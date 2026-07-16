@@ -7,30 +7,29 @@ pub struct PixelSize {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ScreenConfigurationRequestId(pub u32);
+pub struct ScreenStreamRequestId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetScreenResolutions {
-    pub request_id: ScreenConfigurationRequestId,
-    pub changes: Vec<ScreenResolutionRequest>,
+pub struct SetScreenStreams {
+    pub request_id: ScreenStreamRequestId,
+    pub changes: Vec<ScreenStreamRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ScreenResolutionRequest {
+pub struct ScreenStreamRequest {
     pub screen_id: ScreenId,
-    pub mode: RemoteDisplayMode,
-    pub requested: PixelSize,
+    pub remote_display: RemoteDisplayMode,
+    pub max_resolution: PixelSize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteDisplayMode {
     Preserve,
-    MatchRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScreenResolutionCompleted {
-    pub request_id: ScreenConfigurationRequestId,
+pub struct ScreenStreamsConfigured {
+    pub request_id: ScreenStreamRequestId,
     pub outcomes: Vec<ScreenResolutionOutcome>,
 }
 
