@@ -1,3 +1,6 @@
+use std::net::SocketAddr;
+
+use crate::infra::QuicTransport;
 use crate::kernel::connection_request::{ConnectionRequest, ConnectionResponse};
 use bytes::{BufMut, Bytes, BytesMut};
 use eros::Context;
@@ -5,7 +8,79 @@ use eros::Context;
 const REQUESTER_NAME_LENGTH_SIZE: usize = size_of::<u16>();
 const RESPONSE_SIZE: usize = size_of::<u8>();
 
-pub(crate) async fn send_request(
+pub(crate) struct PendingQuicConnectionRequest {
+    request: ConnectionRequest,
+    remote_address: SocketAddr,
+    connection: compio::quic::Connection,
+    response_stream: compio::quic::SendStream,
+}
+
+pub(crate) async fn request_transport(
+    connection: compio::quic::Connection,
+    request: ConnectionRequest,
+) -> eros::Result<Option<QuicTransport>> {
+    let (mut request_stream, mut response_stream) = connection
+        .open_bi_wait()
+        .await
+        .with_context(|| "Failed to open QUIC connection request stream")?;
+
+    send_request(&mut request_stream, request).await?;
+
+    match recv_response(&mut response_stream).await? {
+        ConnectionResponse::Accepted => Ok(Some(QuicTransport::open(connection).await?)),
+        ConnectionResponse::Rejected => Ok(None),
+    }
+}
+
+pub(crate) async fn receive_request(
+    connection: compio::quic::Connection,
+) -> eros::Result<PendingQuicConnectionRequest> {
+    let remote_address = connection.remote_address();
+    let (response_stream, mut request_stream) = connection
+        .accept_bi()
+        .await
+        .with_context(|| "Failed to accept QUIC connection request stream")?;
+    let request = recv_request(&mut request_stream).await?;
+
+    Ok(PendingQuicConnectionRequest {
+        request,
+        remote_address,
+        connection,
+        response_stream,
+    })
+}
+
+impl PendingQuicConnectionRequest {
+    pub(crate) fn request(&self) -> &ConnectionRequest {
+        &self.request
+    }
+
+    pub(crate) fn remote_address(&self) -> SocketAddr {
+        self.remote_address
+    }
+
+    pub(crate) async fn accept(mut self) -> eros::Result<QuicTransport> {
+        send_response(&mut self.response_stream, ConnectionResponse::Accepted).await?;
+
+        QuicTransport::accept(self.connection).await
+    }
+
+    pub(crate) async fn reject(mut self) -> eros::Result<()> {
+        send_response(&mut self.response_stream, ConnectionResponse::Rejected).await?;
+        self.response_stream
+            .stopped()
+            .await
+            .with_context(|| "Failed while confirming the rejected QUIC connection response")?;
+        self.connection.close(
+            compio::quic::VarInt::from_u32(0),
+            b"Connection request rejected",
+        );
+
+        Ok(())
+    }
+}
+
+async fn send_request(
     stream: &mut compio::quic::SendStream,
     request: ConnectionRequest,
 ) -> eros::Result<()> {
@@ -29,7 +104,7 @@ pub(crate) async fn send_request(
     Ok(())
 }
 
-pub(crate) async fn recv_request(
+async fn recv_request(
     stream: &mut compio::quic::RecvStream,
 ) -> eros::Result<ConnectionRequest> {
     let header = read_exact(stream, REQUESTER_NAME_LENGTH_SIZE)
@@ -45,7 +120,7 @@ pub(crate) async fn recv_request(
     Ok(ConnectionRequest { requester_name })
 }
 
-pub(crate) async fn send_response(
+async fn send_response(
     stream: &mut compio::quic::SendStream,
     response: ConnectionResponse,
 ) -> eros::Result<()> {
@@ -62,7 +137,7 @@ pub(crate) async fn send_response(
     Ok(())
 }
 
-pub(crate) async fn recv_response(
+async fn recv_response(
     stream: &mut compio::quic::RecvStream,
 ) -> eros::Result<ConnectionResponse> {
     let response = read_exact(stream, RESPONSE_SIZE)

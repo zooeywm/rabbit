@@ -6,7 +6,11 @@ mod rayon_thread_pool;
 mod transport;
 pub(crate) mod unsync_queue;
 
+pub(crate) use connection_request::{
+    PendingQuicConnectionRequest, receive_request, request_transport,
+};
 pub(crate) use platform::{
     NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_screen_layout_manager_state,
 };
 pub(crate) use rayon_thread_pool::{RayonThreadPool, RayonThreadPoolState};
+pub(crate) use transport::QuicTransport;
