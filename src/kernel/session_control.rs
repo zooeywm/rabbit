@@ -2,7 +2,10 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use eros::Context;
 
 use crate::kernel::{
-    screen_configuration::{RemoteDisplayMode, ScreenStreamsConfigured, SetScreenStreams},
+    screen_configuration::{
+        PixelSize, RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId,
+        ScreenStreamsConfigured, SetScreenStreams,
+    },
     screen_manager::{Screen, ScreenId, ScreenLayout, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
 };
@@ -36,6 +39,17 @@ impl From<RemoteDisplayMode> for u8 {
     fn from(mode: RemoteDisplayMode) -> Self {
         match mode {
             RemoteDisplayMode::Preserve => 0,
+        }
+    }
+}
+
+impl TryFrom<u8> for RemoteDisplayMode {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(mode: u8) -> eros::Result<Self> {
+        match mode {
+            0 => Ok(Self::Preserve),
+            mode => eros::bail!("Unknown RemoteDisplayMode tag {mode}"),
         }
     }
 }
@@ -178,7 +192,7 @@ impl TryFrom<TransportMessage> for ControlMessage {
         let message = match tag {
             ControlMessageTag::ScreenList => Self::ScreenList(reader.read_screen_list()?),
             ControlMessageTag::SetScreenStreams => {
-                eros::bail!("SetScreenStreams decoding is not implemented")
+                Self::SetScreenStreams(reader.read_set_screen_streams()?)
             }
         };
 
@@ -241,6 +255,34 @@ impl ControlPayloadReader {
                 scale,
                 transform,
             },
+        })
+    }
+
+    fn read_set_screen_streams(&mut self) -> eros::Result<SetScreenStreams> {
+        let request_id = ScreenStreamRequestId(self.read_u32("SetScreenStreams request ID")?);
+        let change_count = usize::from(self.read_u8("SetScreenStreams change count")?);
+        let mut changes = Vec::with_capacity(change_count);
+
+        for _ in 0..change_count {
+            let screen_id = ScreenId(self.read_u8("ScreenStreamRequest screen ID")?);
+            let remote_display =
+                RemoteDisplayMode::try_from(self.read_u8("ScreenStreamRequest display mode")?)
+                    .with_context(|| "Failed to decode ScreenStreamRequest display mode")?;
+            let max_resolution = PixelSize {
+                width: self.read_u32("ScreenStreamRequest maximum width")?,
+                height: self.read_u32("ScreenStreamRequest maximum height")?,
+            };
+
+            changes.push(ScreenStreamRequest {
+                screen_id,
+                remote_display,
+                max_resolution,
+            });
+        }
+
+        Ok(SetScreenStreams {
+            request_id,
+            changes,
         })
     }
 
