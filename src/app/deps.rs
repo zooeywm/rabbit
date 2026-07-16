@@ -1,13 +1,21 @@
 use super::{App, config::Config};
 
 use crate::{
-    infra::{NiriScreenLayoutManager, NiriScreenLayoutManagerState},
+    infra::{
+        NiriScreenLayoutManager, NiriScreenLayoutManagerState, RayonThreadPoolState,
+    },
     kernel::screen_manager::{Screen, ScreenId, ScreenLayoutManager},
 };
 
 impl<ScreenLayoutManagerState> AsRef<Config> for App<ScreenLayoutManagerState> {
     fn as_ref(&self) -> &Config {
         &self.config
+    }
+}
+
+impl<ScreenLayoutManagerState> AsRef<RayonThreadPoolState> for App<ScreenLayoutManagerState> {
+    fn as_ref(&self) -> &RayonThreadPoolState {
+        &self.rayon_thread_pool_state
     }
 }
 

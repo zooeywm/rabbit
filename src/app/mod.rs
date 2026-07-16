@@ -5,24 +5,32 @@ mod logging;
 
 use tracing::{info, warn};
 
-use crate::{app::config::Config, kernel::screen_manager::ScreenLayoutManager};
+use crate::{
+    app::config::Config, infra::RayonThreadPoolState,
+    kernel::screen_manager::ScreenLayoutManager,
+};
+
+pub(crate) use logging::init_logging;
 
 /// Root application state and dependency container.
 pub struct App<ScreenLayoutManagerState> {
     config: Config,
     screen_layout_manager_state: ScreenLayoutManagerState,
+    rayon_thread_pool_state: RayonThreadPoolState,
 }
 
 impl<ScreenLayoutManagerState> App<ScreenLayoutManagerState> {
     /// Creates the application and all persistent application services.
-    pub(crate) fn new(screen_layout_manager: ScreenLayoutManagerState) -> eros::Result<Self> {
-        let config = Config::new()?;
-        logging::init_logging(&config)?;
-
-        Ok(Self {
+    pub(crate) fn new(
+        config: Config,
+        screen_layout_manager_state: ScreenLayoutManagerState,
+        rayon_thread_pool_state: RayonThreadPoolState,
+    ) -> Self {
+        Self {
             config,
-            screen_layout_manager_state: screen_layout_manager,
-        })
+            screen_layout_manager_state,
+            rayon_thread_pool_state,
+        }
     }
 }
 
