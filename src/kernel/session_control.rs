@@ -19,6 +19,7 @@ use crate::kernel::{
 pub struct ScreenInfo {
     pub id: ScreenId,
     pub name: String,
+    pub resolution: PixelSize,
     pub layout: ScreenLayout,
 }
 
@@ -82,6 +83,7 @@ struct WireScreenInfoRef<'a> {
     id: u8,
     name_length: u16,
     name: &'a [u8],
+    resolution: WirePixelSize,
     layout: WireScreenLayout,
 }
 
@@ -92,6 +94,7 @@ struct WireScreenInfo {
     name_length: u16,
     #[br(count = name_length)]
     name: Vec<u8>,
+    resolution: WirePixelSize,
     layout: WireScreenLayout,
 }
 
@@ -290,6 +293,7 @@ impl TryFrom<WireScreenInfo> for ScreenInfo {
         Ok(Self {
             id: ScreenId(screen.id),
             name,
+            resolution: screen.resolution.into(),
             layout: screen.layout.into(),
         })
     }
@@ -575,6 +579,7 @@ fn write_screen_info(writer: &mut Cursor<Vec<u8>>, screen: &Screen) -> eros::Res
         id: screen.id.0,
         name_length,
         name,
+        resolution: screen.resolution.into(),
         layout: screen.layout.into(),
     };
 

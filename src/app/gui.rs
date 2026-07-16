@@ -104,8 +104,8 @@ impl RootComponent {
                             session_id.0,
                             screen.id.0,
                             screen.name,
-                            screen.layout.rect.width,
-                            screen.layout.rect.height
+                            screen.resolution.width,
+                            screen.resolution.height
                         ),
                     )
                 })
