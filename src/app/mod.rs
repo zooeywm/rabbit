@@ -1,15 +1,16 @@
 pub(crate) mod config;
 
 mod deps;
+mod gui;
 mod logging;
 
 use tracing::{info, warn};
 
 use crate::{
-    app::config::Config, infra::RayonThreadPoolState,
-    kernel::screen_manager::ScreenLayoutManager,
+    app::config::Config, infra::RayonThreadPoolState, kernel::screen_manager::ScreenLayoutManager,
 };
 
+pub(crate) use gui::RootComponent;
 pub(crate) use logging::init_logging;
 
 /// Root application state and dependency container.

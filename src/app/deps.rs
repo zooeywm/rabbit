@@ -2,10 +2,24 @@ use super::{App, config::Config};
 
 use crate::{
     infra::{
-        NiriScreenLayoutManager, NiriScreenLayoutManagerState, RayonThreadPoolState,
+        NiriScreenLayoutManager, NiriScreenLayoutManagerState, RayonThreadPool,
+        RayonThreadPoolState,
     },
     kernel::screen_manager::{Screen, ScreenId, ScreenLayoutManager},
 };
+
+impl<ScreenLayoutManagerState> App<ScreenLayoutManagerState> {
+    pub(crate) fn spawn_cpu<Task, Output>(
+        &self,
+        task: Task,
+    ) -> futures_channel::oneshot::Receiver<Output>
+    where
+        Task: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
+    {
+        RayonThreadPool::inj_ref(self).spawn(task)
+    }
+}
 
 impl<ScreenLayoutManagerState> AsRef<Config> for App<ScreenLayoutManagerState> {
     fn as_ref(&self) -> &Config {

@@ -15,10 +15,20 @@ impl RayonThreadPoolState {
         Ok(Self { thread_pool })
     }
 
-    pub(crate) fn spawn<Task>(&self, task: Task)
+    pub(crate) fn spawn<Task, Output>(
+        &self,
+        task: Task,
+    ) -> futures_channel::oneshot::Receiver<Output>
     where
-        Task: FnOnce() + Send + 'static,
+        Task: FnOnce() -> Output + Send + 'static,
+        Output: Send + 'static,
     {
-        self.thread_pool.spawn(task);
+        let (sender, receiver) = futures_channel::oneshot::channel();
+
+        self.thread_pool.spawn(move || {
+            let _ = sender.send(task());
+        });
+
+        receiver
     }
 }
