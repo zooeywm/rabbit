@@ -1,3 +1,4 @@
 fn main() -> eros::Result<()> {
-    rabbit::run()
+    let runtime = compio::runtime::Runtime::new()?;
+    runtime.block_on(rabbit::run())
 }

@@ -8,6 +8,8 @@ toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 directories = "6.0"
 eros = "0.6"
+compio = "0.18"
+futures-core = "0.3"
 thiserror = "2.0"
 kudi = "0.1"
 tracing = "0.1"

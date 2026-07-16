@@ -34,7 +34,7 @@ where
     ///
     /// The MVP currently reports the detected screen layout. The persistent
     /// rendering and application event loop will be added here later.
-    pub(crate) fn run(&mut self) -> eros::Result<()> {
+    pub(crate) async fn run(&mut self) -> eros::Result<()> {
         let screens = self.screens();
 
         if screens.is_empty() {
