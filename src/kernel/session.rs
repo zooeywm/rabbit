@@ -39,6 +39,24 @@ where
     recv: T::RecvHalf,
 }
 
+pub struct SessionSend<S>
+where
+    S: TransportSend,
+{
+    id: SessionId,
+    role: SessionRole,
+    send: S,
+}
+
+pub struct SessionRecv<R>
+where
+    R: TransportRecv,
+{
+    id: SessionId,
+    role: SessionRole,
+    recv: R,
+}
+
 impl<T> Session<T>
 where
     T: Transport,
@@ -61,8 +79,36 @@ where
         self.role
     }
 
+    pub fn split(self) -> (SessionSend<T::SendHalf>, SessionRecv<T::RecvHalf>) {
+        (
+            SessionSend {
+                id: self.id,
+                role: self.role,
+                send: self.send,
+            },
+            SessionRecv {
+                id: self.id,
+                role: self.role,
+                recv: self.recv,
+            },
+        )
+    }
+}
+
+impl<S> SessionSend<S>
+where
+    S: TransportSend,
+{
+    pub fn id(&self) -> SessionId {
+        self.id
+    }
+
+    pub fn role(&self) -> SessionRole {
+        self.role
+    }
+
     pub async fn send_screen_list(&self, screens: &[Screen]) -> eros::Result<()> {
-        self.require_role(SessionRole::Host, "send a screen list")?;
+        require_role(self.role, SessionRole::Host, "send a screen list")?;
         self.send_control(screens).await
     }
 
@@ -70,7 +116,11 @@ where
         &self,
         request: SetScreenStreams,
     ) -> eros::Result<()> {
-        self.require_role(SessionRole::Controller, "request screen streams")?;
+        require_role(
+            self.role,
+            SessionRole::Controller,
+            "request screen streams",
+        )?;
         self.send_control(request).await
     }
 
@@ -78,8 +128,28 @@ where
         &self,
         configured: ScreenStreamsConfigured,
     ) -> eros::Result<()> {
-        self.require_role(SessionRole::Host, "send screen stream results")?;
+        require_role(self.role, SessionRole::Host, "send screen stream results")?;
         self.send_control(configured).await
+    }
+
+    async fn send_control<M>(&self, message: M) -> eros::Result<()>
+    where
+        TransportMessage: TryFrom<M, Error = eros::ErrorUnion>,
+    {
+        self.send.send(message.try_into()?).await
+    }
+}
+
+impl<R> SessionRecv<R>
+where
+    R: TransportRecv,
+{
+    pub fn id(&self) -> SessionId {
+        self.id
+    }
+
+    pub fn role(&self) -> SessionRole {
+        self.role
     }
 
     pub async fn recv(&mut self) -> eros::Result<Option<SessionMessage>> {
@@ -90,7 +160,7 @@ where
         match message.channel {
             TransportChannel::Control => {
                 let message = ControlMessage::try_from(message)?;
-                self.validate_received_control(&message)?;
+                validate_received_control(self.role, &message)?;
 
                 Ok(Some(SessionMessage::Control(message)))
             }
@@ -110,43 +180,43 @@ where
             }
         }
     }
+}
 
-    async fn send_control<M>(&self, message: M) -> eros::Result<()>
-    where
-        TransportMessage: TryFrom<M, Error = eros::ErrorUnion>,
-    {
-        self.send.send(message.try_into()?).await
+fn require_role(
+    role: SessionRole,
+    expected: SessionRole,
+    operation: &str,
+) -> eros::Result<()> {
+    if role != expected {
+        eros::bail!(
+            "Session role {:?} cannot {operation}; expected {:?}",
+            role,
+            expected
+        );
     }
 
-    fn require_role(&self, expected: SessionRole, operation: &str) -> eros::Result<()> {
-        if self.role != expected {
-            eros::bail!(
-                "Session role {:?} cannot {operation}; expected {:?}",
-                self.role,
-                expected
-            );
+    Ok(())
+}
+
+fn validate_received_control(
+    role: SessionRole,
+    message: &ControlMessage,
+) -> eros::Result<()> {
+    let (expected, name) = match message {
+        ControlMessage::ScreenList(_) => (SessionRole::Controller, "ScreenList"),
+        ControlMessage::SetScreenStreams(_) => (SessionRole::Host, "SetScreenStreams"),
+        ControlMessage::ScreenStreamsConfigured(_) => {
+            (SessionRole::Controller, "ScreenStreamsConfigured")
         }
+    };
 
-        Ok(())
+    if role != expected {
+        eros::bail!(
+            "Session role {:?} cannot receive {name}; expected {:?}",
+            role,
+            expected
+        );
     }
 
-    fn validate_received_control(&self, message: &ControlMessage) -> eros::Result<()> {
-        let (expected, name) = match message {
-            ControlMessage::ScreenList(_) => (SessionRole::Controller, "ScreenList"),
-            ControlMessage::SetScreenStreams(_) => (SessionRole::Host, "SetScreenStreams"),
-            ControlMessage::ScreenStreamsConfigured(_) => {
-                (SessionRole::Controller, "ScreenStreamsConfigured")
-            }
-        };
-
-        if self.role != expected {
-            eros::bail!(
-                "Session role {:?} cannot receive {name}; expected {:?}",
-                self.role,
-                expected
-            );
-        }
-
-        Ok(())
-    }
+    Ok(())
 }

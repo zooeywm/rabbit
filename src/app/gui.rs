@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{collections::HashMap, net::{IpAddr, SocketAddr}};
 
 use eros::Context;
 use tracing::{error, info, warn};
@@ -8,15 +8,25 @@ use crate::{
     app::{App, config::Config, init_logging},
     infra::{
         NiriScreenLayoutManagerState, PendingQuicConnectionRequest, QuicEndpoint,
-        QuicTransport, RayonThreadPoolState, connect_transport,
+        QuicTransport, QuicTransportSend, RayonThreadPoolState, connect_transport,
         create_screen_layout_manager_state, receive_request,
     },
     kernel::{
         connection_request::ConnectionRequest,
         screen_manager::ScreenLayoutManager,
-        session::{Session, SessionId, SessionRole},
+        session::{
+            Session, SessionId, SessionMessage, SessionRecv, SessionRole,
+            SessionSend,
+        },
+        session_control::{ControlMessage, ScreenInfo},
+        transport::TransportRecv,
     },
 };
+
+struct RunningSession {
+    send: SessionSend<QuicTransportSend>,
+    _receiver: compio::runtime::JoinHandle<()>,
+}
 
 pub(crate) struct RootComponent {
     _app: App<NiriScreenLayoutManagerState>,
@@ -30,7 +40,8 @@ pub(crate) struct RootComponent {
     accept_connection_button: Child<Button>,
     reject_connection_button: Child<Button>,
     pending_connection_requests: Vec<PendingQuicConnectionRequest>,
-    sessions: Vec<Session<QuicTransport>>,
+    sessions: Vec<RunningSession>,
+    remote_screens: HashMap<SessionId, Vec<ScreenInfo>>,
     next_session_id: u32,
     _connection_listener: compio::runtime::JoinHandle<()>,
 }
@@ -48,9 +59,31 @@ pub(crate) enum RootMessage {
     ConnectionRejected(eros::Result<()>),
     ConnectionRequestFailed(eros::ErrorUnion),
     ConnectionListenerFailed(eros::ErrorUnion),
+    SessionMessageReceived(SessionId, SessionMessage),
+    SessionClosed(SessionId),
+    SessionFailed(SessionId, eros::ErrorUnion),
 }
 
 impl RootComponent {
+    fn start_session<R>(
+        &mut self,
+        send: SessionSend<QuicTransportSend>,
+        recv: SessionRecv<R>,
+        sender: &ComponentSender<Self>,
+    ) where
+        R: TransportRecv + 'static,
+    {
+        self.sessions.push(RunningSession {
+            send,
+            _receiver: compio::runtime::spawn(receive_session(recv, sender.clone())),
+        });
+    }
+
+    fn remove_session(&mut self, id: SessionId) {
+        self.sessions.retain(|session| session.send.id() != id);
+        self.remote_screens.remove(&id);
+    }
+
     fn next_session_id(&mut self) -> eros::Result<SessionId> {
         let id = SessionId(self.next_session_id);
         self.next_session_id = self
@@ -179,6 +212,7 @@ impl Component for RootComponent {
             reject_connection_button,
             pending_connection_requests: Vec::new(),
             sessions: Vec::new(),
+            remote_screens: HashMap::new(),
             next_session_id: 0,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
@@ -265,11 +299,14 @@ impl Component for RootComponent {
                 match result {
                     Ok(Some(transport)) => {
                         let id = self.next_session_id()?;
-                        self.sessions.push(Session::new(
+                        let session = Session::new(
                             id,
                             SessionRole::Controller,
                             transport,
-                        ));
+                        );
+                        let (send, recv) = session.split();
+
+                        self.start_session(send, recv, sender);
                         self.connection_status.set_text("Connection accepted")?;
                     }
                     Ok(None) => self.connection_status.set_text("Connection rejected")?,
@@ -332,9 +369,10 @@ impl Component for RootComponent {
                     Ok(transport) => {
                         let id = self.next_session_id()?;
                         let session = Session::new(id, SessionRole::Host, transport);
+                        let (send, recv) = session.split();
 
-                        match session.send_screen_list(self._app.screens()).await {
-                            Ok(()) => self.sessions.push(session),
+                        match send.send_screen_list(self._app.screens()).await {
+                            Ok(()) => self.start_session(send, recv, sender),
                             Err(error) => {
                                 error!(%error, "Failed to send the initial screen list")
                             }
@@ -359,6 +397,36 @@ impl Component for RootComponent {
             RootMessage::ConnectionListenerFailed(error) => {
                 error!(%error, "QUIC connection listener stopped");
                 Ok(false)
+            }
+            RootMessage::SessionMessageReceived(id, message) => {
+                match message {
+                    SessionMessage::Control(ControlMessage::ScreenList(screens)) => {
+                        self.connection_status.set_text(format!(
+                            "Session {} reported {} screens",
+                            id.0,
+                            screens.len()
+                        ))?;
+                        self.remote_screens.insert(id, screens);
+                    }
+                    message => {
+                        warn!(session_id = id.0, ?message, "Session message is not handled yet")
+                    }
+                }
+
+                Ok(true)
+            }
+            RootMessage::SessionClosed(id) => {
+                self.remove_session(id);
+                self.connection_status
+                    .set_text(format!("Session {} closed", id.0))?;
+                Ok(true)
+            }
+            RootMessage::SessionFailed(id, error) => {
+                self.remove_session(id);
+                error!(session_id = id.0, %error, "Session receive loop failed");
+                self.connection_status
+                    .set_text(format!("Session {} failed: {error}", id.0))?;
+                Ok(true)
             }
         }
     }
@@ -406,6 +474,29 @@ async fn receive_connection_requests(
         match receive_request(connection).await {
             Ok(request) => sender.post(RootMessage::ConnectionRequest(request)),
             Err(error) => sender.post(RootMessage::ConnectionRequestFailed(error)),
+        }
+    }
+}
+
+async fn receive_session<R>(
+    mut session: SessionRecv<R>,
+    sender: ComponentSender<RootComponent>,
+) where
+    R: TransportRecv,
+{
+    let id = session.id();
+
+    loop {
+        match session.recv().await {
+            Ok(Some(message)) => sender.post(RootMessage::SessionMessageReceived(id, message)),
+            Ok(None) => {
+                sender.post(RootMessage::SessionClosed(id));
+                return;
+            }
+            Err(error) => {
+                sender.post(RootMessage::SessionFailed(id, error));
+                return;
+            }
         }
     }
 }

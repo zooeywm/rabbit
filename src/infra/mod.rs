@@ -15,4 +15,4 @@ pub(crate) use platform::{
 };
 pub(crate) use quic_endpoint::QuicEndpoint;
 pub(crate) use rayon_thread_pool::{RayonThreadPool, RayonThreadPoolState};
-pub(crate) use transport::QuicTransport;
+pub(crate) use transport::{QuicTransport, QuicTransportSend};
