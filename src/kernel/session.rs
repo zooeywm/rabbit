@@ -14,6 +14,9 @@ pub enum SessionRole {
     Host,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionId(pub u32);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoMessage {
     pub screen_id: ScreenId,
@@ -30,6 +33,7 @@ pub struct Session<T>
 where
     T: Transport,
 {
+    id: SessionId,
     role: SessionRole,
     send: T::SendHalf,
     recv: T::RecvHalf,
@@ -39,9 +43,18 @@ impl<T> Session<T>
 where
     T: Transport,
 {
-    pub fn new(role: SessionRole, transport: T) -> Self {
+    pub fn new(id: SessionId, role: SessionRole, transport: T) -> Self {
         let (send, recv) = transport.split();
-        Self { role, send, recv }
+        Self {
+            id,
+            role,
+            send,
+            recv,
+        }
+    }
+
+    pub fn id(&self) -> SessionId {
+        self.id
     }
 
     pub fn role(&self) -> SessionRole {

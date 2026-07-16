@@ -14,7 +14,7 @@ use crate::{
     kernel::{
         connection_request::ConnectionRequest,
         screen_manager::ScreenLayoutManager,
-        session::{Session, SessionRole},
+        session::{Session, SessionId, SessionRole},
     },
 };
 
@@ -31,6 +31,7 @@ pub(crate) struct RootComponent {
     reject_connection_button: Child<Button>,
     pending_connection_requests: Vec<PendingQuicConnectionRequest>,
     sessions: Vec<Session<QuicTransport>>,
+    next_session_id: u32,
     _connection_listener: compio::runtime::JoinHandle<()>,
 }
 
@@ -50,6 +51,16 @@ pub(crate) enum RootMessage {
 }
 
 impl RootComponent {
+    fn next_session_id(&mut self) -> eros::Result<SessionId> {
+        let id = SessionId(self.next_session_id);
+        self.next_session_id = self
+            .next_session_id
+            .checked_add(1)
+            .context("Failed to allocate a Session ID")?;
+
+        Ok(id)
+    }
+
     fn parse_direct_target(&self) -> eros::Result<(IpAddr, Option<u16>)> {
         let input = self.direct_address_input.text()?;
         let input = input.trim();
@@ -168,6 +179,7 @@ impl Component for RootComponent {
             reject_connection_button,
             pending_connection_requests: Vec::new(),
             sessions: Vec::new(),
+            next_session_id: 0,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -252,8 +264,12 @@ impl Component for RootComponent {
 
                 match result {
                     Ok(Some(transport)) => {
-                        self.sessions
-                            .push(Session::new(SessionRole::Controller, transport));
+                        let id = self.next_session_id()?;
+                        self.sessions.push(Session::new(
+                            id,
+                            SessionRole::Controller,
+                            transport,
+                        ));
                         self.connection_status.set_text("Connection accepted")?;
                     }
                     Ok(None) => self.connection_status.set_text("Connection rejected")?,
@@ -314,7 +330,8 @@ impl Component for RootComponent {
             RootMessage::ConnectionAccepted(result) => {
                 match result {
                     Ok(transport) => {
-                        let session = Session::new(SessionRole::Host, transport);
+                        let id = self.next_session_id()?;
+                        let session = Session::new(id, SessionRole::Host, transport);
 
                         match session.send_screen_list(self._app.screens()).await {
                             Ok(()) => self.sessions.push(session),
