@@ -3,8 +3,8 @@ use eros::Context;
 
 use crate::kernel::{
     screen_configuration::{
-        PixelSize, RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId,
-        ScreenStreamsConfigured, SetScreenStreams,
+        PixelSize, RemoteDisplayMode, ResolutionResult, ScreenResolutionStatus,
+        ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
     },
     screen_manager::{Screen, ScreenId, ScreenLayout, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
@@ -15,6 +15,7 @@ use crate::kernel::{
 enum ControlMessageTag {
     ScreenList = 0,
     SetScreenStreams = 1,
+    ScreenStreamsConfigured = 2,
 }
 
 impl From<ControlMessageTag> for u8 {
@@ -30,8 +31,36 @@ impl TryFrom<u8> for ControlMessageTag {
         match tag {
             0 => Ok(Self::ScreenList),
             1 => Ok(Self::SetScreenStreams),
+            2 => Ok(Self::ScreenStreamsConfigured),
             tag => eros::bail!("Unknown Control message tag {tag}"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+enum ScreenResolutionStatusTag {
+    Configured = 0,
+    Failed = 1,
+}
+
+impl From<ScreenResolutionStatusTag> for u8 {
+    fn from(tag: ScreenResolutionStatusTag) -> Self {
+        tag as Self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+enum ResolutionResultTag {
+    Exact = 0,
+    Fallback = 1,
+    Preserved = 2,
+}
+
+impl From<ResolutionResultTag> for u8 {
+    fn from(tag: ResolutionResultTag) -> Self {
+        tag as Self
     }
 }
 
@@ -168,6 +197,69 @@ impl TryFrom<SetScreenStreams> for TransportMessage {
     }
 }
 
+impl TryFrom<ScreenStreamsConfigured> for TransportMessage {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(configured: ScreenStreamsConfigured) -> eros::Result<Self> {
+        let outcome_count = u8::try_from(configured.outcomes.len())
+            .with_context(|| "Failed to encode ScreenStreamsConfigured outcome count")?;
+        let mut payload = BytesMut::new();
+
+        payload.put_u8(ControlMessageTag::ScreenStreamsConfigured.into());
+        payload.put_u32(configured.request_id.0);
+        payload.put_u8(outcome_count);
+
+        for outcome in configured.outcomes {
+            payload.put_u8(outcome.screen_id.0);
+
+            match outcome.status {
+                ScreenResolutionStatus::Configured(result) => {
+                    payload.put_u8(ScreenResolutionStatusTag::Configured.into());
+
+                    match result {
+                        ResolutionResult::Exact { applied } => {
+                            payload.put_u8(ResolutionResultTag::Exact.into());
+                            put_pixel_size(&mut payload, applied);
+                        }
+                        ResolutionResult::Fallback { requested, applied } => {
+                            payload.put_u8(ResolutionResultTag::Fallback.into());
+                            put_pixel_size(&mut payload, requested);
+                            put_pixel_size(&mut payload, applied);
+                        }
+                        ResolutionResult::Preserved { requested, actual } => {
+                            payload.put_u8(ResolutionResultTag::Preserved.into());
+                            put_pixel_size(&mut payload, requested);
+                            put_pixel_size(&mut payload, actual);
+                        }
+                    }
+                }
+                ScreenResolutionStatus::Failed { requested, actual } => {
+                    payload.put_u8(ScreenResolutionStatusTag::Failed.into());
+                    put_pixel_size(&mut payload, requested);
+
+                    if let Some(actual) = actual {
+                        payload.put_u8(1);
+                        put_pixel_size(&mut payload, actual);
+                    } else {
+                        payload.put_u8(0);
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            channel: TransportChannel::Control,
+            delivery: Delivery::ReliableOrdered,
+            payload: payload.freeze(),
+        })
+    }
+}
+
+fn put_pixel_size(payload: &mut BytesMut, size: PixelSize) {
+    payload.put_u32(size.width);
+    payload.put_u32(size.height);
+}
+
 impl TryFrom<TransportMessage> for ControlMessage {
     type Error = eros::ErrorUnion;
 
@@ -193,6 +285,9 @@ impl TryFrom<TransportMessage> for ControlMessage {
             ControlMessageTag::ScreenList => Self::ScreenList(reader.read_screen_list()?),
             ControlMessageTag::SetScreenStreams => {
                 Self::SetScreenStreams(reader.read_set_screen_streams()?)
+            }
+            ControlMessageTag::ScreenStreamsConfigured => {
+                eros::bail!("ScreenStreamsConfigured decoding is not implemented")
             }
         };
 
