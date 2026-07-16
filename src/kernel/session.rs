@@ -1,13 +1,29 @@
 use crate::kernel::{
     screen_configuration::{ScreenStreamsConfigured, SetScreenStreams},
-    screen_manager::Screen,
-    transport::{Transport, TransportMessage, TransportRecv, TransportSend},
+    screen_manager::{Screen, ScreenId},
+    session_control::ControlMessage,
+    transport::{
+        Delivery, Transport, TransportChannel, TransportMessage, TransportRecv,
+        TransportSend,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionRole {
     Controller,
     Host,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoMessage {
+    pub screen_id: ScreenId,
+    pub payload: bytes::Bytes,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionMessage {
+    Control(ControlMessage),
+    Video(VideoMessage),
 }
 
 pub struct Session<T>
@@ -64,8 +80,32 @@ where
 
     pub fn recv(
         &mut self,
-    ) -> impl Future<Output = eros::Result<Option<TransportMessage>>> {
-        self.recv.recv()
+    ) -> impl Future<Output = eros::Result<Option<SessionMessage>>> {
+        async move {
+            let Some(message) = self.recv.recv().await? else {
+                return Ok(None);
+            };
+
+            match message.channel {
+                TransportChannel::Control => {
+                    Ok(Some(SessionMessage::Control(message.try_into()?)))
+                }
+                TransportChannel::Video(screen_id) => {
+                    if message.delivery != Delivery::Unreliable {
+                        eros::bail!(
+                            "Video message for screen {} has invalid delivery {:?}",
+                            screen_id.0,
+                            message.delivery
+                        );
+                    }
+
+                    Ok(Some(SessionMessage::Video(VideoMessage {
+                        screen_id,
+                        payload: message.payload,
+                    })))
+                }
+            }
+        }
     }
 
     fn send_control<'a, M: 'a>(
