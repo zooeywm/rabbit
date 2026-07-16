@@ -51,6 +51,7 @@ pub(crate) struct RootComponent {
     pending_connection_requests: Vec<PendingQuicConnectionRequest>,
     sessions: Vec<RunningSession>,
     remote_screens: HashMap<SessionId, Vec<ScreenInfo>>,
+    screen_stream_results: HashMap<SessionId, ScreenStreamsConfigured>,
     next_session_id: u32,
     _connection_listener: compio::runtime::JoinHandle<()>,
 }
@@ -130,6 +131,7 @@ impl RootComponent {
     fn remove_session(&mut self, id: SessionId) -> eros::Result<()> {
         self.sessions.retain(|session| session.send.id() != id);
         self.remote_screens.remove(&id);
+        self.screen_stream_results.remove(&id);
         self.refresh_remote_screen_list()
     }
 
@@ -302,6 +304,7 @@ impl Component for RootComponent {
             pending_connection_requests: Vec::new(),
             sessions: Vec::new(),
             remote_screens: HashMap::new(),
+            screen_stream_results: HashMap::new(),
             next_session_id: 0,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
@@ -519,6 +522,30 @@ impl Component for RootComponent {
                             error!(session_id = id.0, %error, "Failed to send screen stream results");
                             self.remove_session(id)?;
                         }
+                    }
+                    SessionMessage::Control(ControlMessage::ScreenStreamsConfigured(
+                        configured,
+                    )) => {
+                        let configured_count = configured
+                            .outcomes
+                            .iter()
+                            .filter(|outcome| {
+                                matches!(
+                                    &outcome.status,
+                                    ScreenResolutionStatus::Configured(_)
+                                )
+                            })
+                            .count();
+                        let failed_count = configured.outcomes.len() - configured_count;
+
+                        self.connection_status.set_text(format!(
+                            "Session {} request {}: {} configured, {} failed",
+                            id.0,
+                            configured.request_id.0,
+                            configured_count,
+                            failed_count
+                        ))?;
+                        self.screen_stream_results.insert(id, configured);
                     }
                     message => {
                         warn!(session_id = id.0, ?message, "Session message is not handled yet")
