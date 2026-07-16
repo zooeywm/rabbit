@@ -1,17 +1,41 @@
+use crate::kernel::screen_manager::ScreenId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TransportChannelId(pub u64);
+pub enum TransportChannel {
+    Control,
+    Video(ScreenId),
+}
+
+impl From<TransportChannel> for u8 {
+    fn from(channel: TransportChannel) -> Self {
+        match channel {
+            TransportChannel::Control => 0,
+            TransportChannel::Video(ScreenId(id)) => id + 1,
+        }
+    }
+}
+
+impl From<u8> for TransportChannel {
+    fn from(id: u8) -> Self {
+        match id {
+            0 => Self::Control,
+            id => Self::Video(ScreenId(id - 1)),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Delivery {
     ReliableOrdered,
-    BestEffort,
+    ReliableUnordered,
+    Unreliable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportMessage {
-    pub channel_id: TransportChannelId,
+    pub channel: TransportChannel,
     pub delivery: Delivery,
-    pub payload: Vec<u8>,
+    pub payload: bytes::Bytes,
 }
 
 pub trait Transport {
@@ -21,12 +45,10 @@ pub trait Transport {
     fn split(self) -> (Self::SendHalf, Self::RecvHalf);
 }
 
-#[allow(async_fn_in_trait)]
 pub trait TransportSend {
-    async fn send(&mut self, message: TransportMessage) -> eros::Result<()>;
+    fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>>;
 }
 
-#[allow(async_fn_in_trait)]
 pub trait TransportRecv {
-    async fn recv(&mut self) -> eros::Result<Option<TransportMessage>>;
+    fn recv(&mut self) -> impl Future<Output = eros::Result<Option<TransportMessage>>>;
 }

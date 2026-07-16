@@ -68,7 +68,7 @@ impl NiriScreenLayoutManagerState {
             .min()
             .expect("mapped_outputs is not empty");
 
-        let mut screens = Vec::with_capacity(mapped_outputs.len());
+        let mut mapped_screens = Vec::with_capacity(mapped_outputs.len());
 
         for (name, logical) in mapped_outputs {
             if !logical.scale.is_finite() || logical.scale <= 0.0 {
@@ -87,9 +87,9 @@ impl NiriScreenLayoutManagerState {
                 format!("Failed to normalize the y coordinate of screen {name}")
             })?;
 
-            screens.push(Screen {
-                id: ScreenId(name),
-                layout: ScreenLayout {
+            mapped_screens.push((
+                name,
+                ScreenLayout {
                     rect: ScreenRect {
                         x,
                         y,
@@ -99,19 +99,36 @@ impl NiriScreenLayoutManagerState {
                     scale: logical.scale,
                     transform: logical.transform.into(),
                 },
-            });
+            ));
         }
 
         // Maintain deterministic ordering for enumeration and primary-screen
         // fallback selection.
-        screens.sort_by(|left, right| {
-            left.layout
+        mapped_screens.sort_by(|left, right| {
+            left.1
                 .rect
                 .x
-                .cmp(&right.layout.rect.x)
-                .then_with(|| left.layout.rect.y.cmp(&right.layout.rect.y))
-                .then_with(|| left.id.cmp(&right.id))
+                .cmp(&right.1.rect.x)
+                .then_with(|| left.1.rect.y.cmp(&right.1.rect.y))
+                .then_with(|| left.0.cmp(&right.0))
         });
+
+        if mapped_screens.len() > usize::from(u8::MAX) {
+            eros::bail!("Niri exposed more than 255 mapped screens");
+        }
+
+        let mut screens = Vec::with_capacity(mapped_screens.len());
+
+        for (index, (name, layout)) in mapped_screens.into_iter().enumerate() {
+            let id = u8::try_from(index)
+                .with_context(|| "Failed to assign a logical Niri screen ID")?;
+
+            screens.push(Screen {
+                id: ScreenId(id),
+                name,
+                layout,
+            });
+        }
 
         Ok(screens)
     }

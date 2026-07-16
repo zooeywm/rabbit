@@ -8,10 +8,12 @@ toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 directories = "6.0"
 eros = "0.6"
-compio = "0.18"
+compio = { version = "0.18", features = ["quic"] }
+bytes = "1"
 futures-core = "0.3"
 futures-channel = "0.3"
 thiserror = "2.0"
+thin-cell = "0.2"
 kudi = "0.1"
 rayon = "1"
 tracing = "0.1"
@@ -22,4 +24,4 @@ time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 # niri-ipc does not guarantee Rust API compatibility across version updates.
 niri-ipc = "26.4.0"
-winio = { version = "0.11", default-features = false, features = ["qt"] }
+winio = { version = "0.11" }

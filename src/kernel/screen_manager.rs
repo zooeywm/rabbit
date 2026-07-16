@@ -5,12 +5,13 @@ pub trait ScreenLayoutManager {
     fn primary_screen(&self) -> eros::Result<&Screen>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ScreenId(pub String);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ScreenId(pub u8);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Screen {
     pub id: ScreenId,
+    pub name: String,
     pub layout: ScreenLayout,
 }
 
