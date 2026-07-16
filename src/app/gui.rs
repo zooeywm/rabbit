@@ -13,6 +13,7 @@ use crate::{
     },
     kernel::{
         connection_request::ConnectionRequest,
+        screen_manager::ScreenLayoutManager,
         session::{Session, SessionRole},
     },
 };
@@ -312,9 +313,16 @@ impl Component for RootComponent {
             }
             RootMessage::ConnectionAccepted(result) => {
                 match result {
-                    Ok(transport) => self
-                        .sessions
-                        .push(Session::new(SessionRole::Host, transport)),
+                    Ok(transport) => {
+                        let session = Session::new(SessionRole::Host, transport);
+
+                        match session.send_screen_list(self._app.screens()).await {
+                            Ok(()) => self.sessions.push(session),
+                            Err(error) => {
+                                error!(%error, "Failed to send the initial screen list")
+                            }
+                        }
+                    }
                     Err(error) => error!(%error, "Failed to accept a QUIC connection request"),
                 }
 
