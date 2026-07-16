@@ -20,7 +20,7 @@ use crate::{
             RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome,
             ScreenResolutionStatus, ScreenStreamsConfigured, SetScreenStreams,
         },
-        screen_manager::ScreenLayoutManager,
+        screen_manager::{ScreenId, ScreenLayoutManager},
         session::{
             Session, SessionId, SessionMessage, SessionRecv, SessionRole,
             SessionSend,
@@ -51,6 +51,8 @@ pub(crate) struct RootComponent {
     pending_connection_requests: Vec<PendingQuicConnectionRequest>,
     sessions: Vec<RunningSession>,
     remote_screens: HashMap<SessionId, Vec<ScreenInfo>>,
+    remote_screen_entries: Vec<(SessionId, ScreenId)>,
+    selected_remote_screen: Option<(SessionId, ScreenId)>,
     screen_stream_results: HashMap<SessionId, ScreenStreamsConfigured>,
     next_session_id: u32,
     _connection_listener: compio::runtime::JoinHandle<()>,
@@ -72,6 +74,7 @@ pub(crate) enum RootMessage {
     SessionMessageReceived(SessionId, SessionMessage),
     SessionClosed(SessionId),
     SessionFailed(SessionId, eros::ErrorUnion),
+    RemoteScreenSelectionChanged,
 }
 
 impl RootComponent {
@@ -142,8 +145,8 @@ impl RootComponent {
             .flat_map(|(session_id, screens)| {
                 screens.iter().map(|screen| {
                     (
-                        session_id.0,
-                        screen.id.0,
+                        *session_id,
+                        screen.id,
                         format!(
                             "Session {} - {}: {} ({}x{})",
                             session_id.0,
@@ -157,7 +160,14 @@ impl RootComponent {
             })
             .collect::<Vec<_>>();
 
-        entries.sort_by_key(|(session_id, screen_id, _)| (*session_id, *screen_id));
+        entries.sort_by_key(|(session_id, screen_id, _)| (session_id.0, screen_id.0));
+        self.remote_screen_entries.clear();
+        self.remote_screen_entries.extend(
+            entries
+                .iter()
+                .map(|(session_id, screen_id, _)| (*session_id, *screen_id)),
+        );
+        self.selected_remote_screen = None;
         self.remote_screen_list
             .set_items(entries.into_iter().map(|(_, _, entry)| entry))?;
         let visible = !self.remote_screen_list.is_empty()?;
@@ -304,6 +314,8 @@ impl Component for RootComponent {
             pending_connection_requests: Vec::new(),
             sessions: Vec::new(),
             remote_screens: HashMap::new(),
+            remote_screen_entries: Vec::new(),
+            selected_remote_screen: None,
             screen_stream_results: HashMap::new(),
             next_session_id: 0,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
@@ -324,6 +336,9 @@ impl Component for RootComponent {
             },
             self.connection_request_list => {
                 ListBoxEvent::Select => RootMessage::ConnectionRequestSelectionChanged,
+            },
+            self.remote_screen_list => {
+                ListBoxEvent::Select => RootMessage::RemoteScreenSelectionChanged,
             },
             self.accept_connection_button => {
                 ButtonEvent::Click => RootMessage::AcceptSelectedConnection,
@@ -565,6 +580,28 @@ impl Component for RootComponent {
                 error!(session_id = id.0, %error, "Session receive loop failed");
                 self.connection_status
                     .set_text(format!("Session {} failed: {error}", id.0))?;
+                Ok(true)
+            }
+            RootMessage::RemoteScreenSelectionChanged => {
+                let mut selected = None;
+
+                for (index, entry) in self.remote_screen_entries.iter().enumerate() {
+                    if self.remote_screen_list.is_selected(index)? {
+                        selected = Some(*entry);
+                        break;
+                    }
+                }
+
+                self.selected_remote_screen = selected;
+
+                if let Some((session_id, screen_id)) = selected {
+                    self.connection_status.set_text(format!(
+                        "Selected session {} screen {}",
+                        session_id.0,
+                        screen_id.0
+                    ))?;
+                }
+
                 Ok(true)
             }
         }
