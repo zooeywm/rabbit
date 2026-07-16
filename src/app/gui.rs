@@ -16,6 +16,10 @@ use crate::{
     },
     kernel::{
         connection_request::ConnectionRequest,
+        screen_configuration::{
+            RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome,
+            ScreenResolutionStatus, ScreenStreamsConfigured, SetScreenStreams,
+        },
         screen_manager::ScreenLayoutManager,
         session::{
             Session, SessionId, SessionMessage, SessionRecv, SessionRole,
@@ -70,6 +74,45 @@ pub(crate) enum RootMessage {
 }
 
 impl RootComponent {
+    fn configure_preserved_screens(
+        &self,
+        request: SetScreenStreams,
+    ) -> ScreenStreamsConfigured {
+        let SetScreenStreams {
+            request_id,
+            changes,
+        } = request;
+        let outcomes = changes
+            .into_iter()
+            .map(|change| {
+                let status = match self._app.screen(&change.screen_id) {
+                    Some(screen) => match change.remote_display {
+                        RemoteDisplayMode::Preserve => {
+                            ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
+                                requested: change.max_resolution,
+                                actual: screen.resolution,
+                            })
+                        }
+                    },
+                    None => ScreenResolutionStatus::Failed {
+                        requested: change.max_resolution,
+                        actual: None,
+                    },
+                };
+
+                ScreenResolutionOutcome {
+                    screen_id: change.screen_id,
+                    status,
+                }
+            })
+            .collect();
+
+        ScreenStreamsConfigured {
+            request_id,
+            outcomes,
+        }
+    }
+
     fn start_session<R>(
         &mut self,
         send: SessionSend<QuicTransportSend>,
@@ -456,6 +499,26 @@ impl Component for RootComponent {
                         ))?;
                         self.remote_screens.insert(id, screens);
                         self.refresh_remote_screen_list()?;
+                    }
+                    SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
+                        let configured = self.configure_preserved_screens(request);
+                        let Some(session) = self
+                            .sessions
+                            .iter()
+                            .find(|session| session.send.id() == id)
+                        else {
+                            warn!(session_id = id.0, "Session closed before screen stream results could be sent");
+                            return Ok(false);
+                        };
+
+                        if let Err(error) = session
+                            .send
+                            .send_screen_streams_configured(configured)
+                            .await
+                        {
+                            error!(session_id = id.0, %error, "Failed to send screen stream results");
+                            self.remove_session(id)?;
+                        }
                     }
                     message => {
                         warn!(session_id = id.0, ?message, "Session message is not handled yet")
