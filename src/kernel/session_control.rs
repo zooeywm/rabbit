@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use eros::Context;
 
 use crate::kernel::{
-    screen_configuration::{ScreenStreamsConfigured, SetScreenStreams},
+    screen_configuration::{RemoteDisplayMode, ScreenStreamsConfigured, SetScreenStreams},
     screen_manager::{Screen, ScreenId, ScreenLayout, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
 };
@@ -11,6 +11,7 @@ use crate::kernel::{
 #[repr(u8)]
 enum ControlMessageTag {
     ScreenList = 0,
+    SetScreenStreams = 1,
 }
 
 impl From<ControlMessageTag> for u8 {
@@ -25,7 +26,16 @@ impl TryFrom<u8> for ControlMessageTag {
     fn try_from(tag: u8) -> eros::Result<Self> {
         match tag {
             0 => Ok(Self::ScreenList),
+            1 => Ok(Self::SetScreenStreams),
             tag => eros::bail!("Unknown Control message tag {tag}"),
+        }
+    }
+}
+
+impl From<RemoteDisplayMode> for u8 {
+    fn from(mode: RemoteDisplayMode) -> Self {
+        match mode {
+            RemoteDisplayMode::Preserve => 0,
         }
     }
 }
@@ -117,6 +127,33 @@ impl TryFrom<&[Screen]> for TransportMessage {
     }
 }
 
+impl TryFrom<SetScreenStreams> for TransportMessage {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(request: SetScreenStreams) -> eros::Result<Self> {
+        let change_count = u8::try_from(request.changes.len())
+            .with_context(|| "Failed to encode SetScreenStreams change count")?;
+        let mut payload = BytesMut::new();
+
+        payload.put_u8(ControlMessageTag::SetScreenStreams.into());
+        payload.put_u32(request.request_id.0);
+        payload.put_u8(change_count);
+
+        for change in request.changes {
+            payload.put_u8(change.screen_id.0);
+            payload.put_u8(change.remote_display.into());
+            payload.put_u32(change.max_resolution.width);
+            payload.put_u32(change.max_resolution.height);
+        }
+
+        Ok(Self {
+            channel: TransportChannel::Control,
+            delivery: Delivery::ReliableOrdered,
+            payload: payload.freeze(),
+        })
+    }
+}
+
 impl TryFrom<TransportMessage> for ControlMessage {
     type Error = eros::ErrorUnion;
 
@@ -140,6 +177,9 @@ impl TryFrom<TransportMessage> for ControlMessage {
             .with_context(|| "Failed to decode Control message tag")?;
         let message = match tag {
             ControlMessageTag::ScreenList => Self::ScreenList(reader.read_screen_list()?),
+            ControlMessageTag::SetScreenStreams => {
+                eros::bail!("SetScreenStreams decoding is not implemented")
+            }
         };
 
         if reader.has_remaining() {
