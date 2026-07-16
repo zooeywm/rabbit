@@ -2,7 +2,7 @@ use super::{App, config::Config};
 
 use crate::{
     infra::{
-        NiriScreenLayoutManager, NiriScreenLayoutManagerState, RayonThreadPool,
+        NiriScreenLayoutManager, NiriScreenLayoutManagerState, QuicEndpoint, RayonThreadPool,
         RayonThreadPoolState,
     },
     kernel::screen_manager::{Screen, ScreenId, ScreenLayoutManager},
@@ -30,6 +30,12 @@ impl<ScreenLayoutManagerState> AsRef<Config> for App<ScreenLayoutManagerState> {
 impl<ScreenLayoutManagerState> AsRef<RayonThreadPoolState> for App<ScreenLayoutManagerState> {
     fn as_ref(&self) -> &RayonThreadPoolState {
         &self.rayon_thread_pool_state
+    }
+}
+
+impl<ScreenLayoutManagerState> AsRef<QuicEndpoint> for App<ScreenLayoutManagerState> {
+    fn as_ref(&self) -> &QuicEndpoint {
+        &self.quic_endpoint
     }
 }
 

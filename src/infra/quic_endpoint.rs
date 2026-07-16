@@ -10,6 +10,7 @@ const BASE_PORT: u16 = 52731;
 const LAST_PORT: u16 = BASE_PORT + 4;
 const SERVER_NAME: &str = "rabbit";
 
+#[derive(Clone)]
 pub(crate) struct QuicEndpoint {
     endpoint: compio::quic::Endpoint,
     client_config: compio::quic::ClientConfig,
