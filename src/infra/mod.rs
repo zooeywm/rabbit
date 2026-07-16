@@ -1,3 +1,4 @@
+mod connection_request;
 #[cfg_attr(target_os = "linux", path = "platform/linux/mod.rs")]
 #[cfg_attr(target_os = "windows", path = "platform/windows/mod.rs")]
 mod platform;

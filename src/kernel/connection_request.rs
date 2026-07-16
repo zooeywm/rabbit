@@ -4,7 +4,32 @@ pub struct ConnectionRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum ConnectionResponse {
     Accepted,
     Rejected,
 }
+
+impl From<ConnectionResponse> for u8 {
+    fn from(response: ConnectionResponse) -> Self {
+        response as Self
+    }
+}
+
+impl TryFrom<u8> for ConnectionResponse {
+    type Error = UnknownConnectionResponse;
+
+    fn try_from(response: u8) -> Result<Self, Self::Error> {
+        if response == Self::Accepted as u8 {
+            Ok(Self::Accepted)
+        } else if response == Self::Rejected as u8 {
+            Ok(Self::Rejected)
+        } else {
+            Err(UnknownConnectionResponse(response))
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unknown connection response {0}")]
+pub struct UnknownConnectionResponse(u8);
