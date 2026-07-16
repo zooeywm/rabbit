@@ -10,6 +10,7 @@ directories = "6.0"
 eros = "0.6"
 compio = { version = "0.18", features = ["quic", "ring"] }
 bytes = "1"
+binrw = "0.15"
 futures-core = "0.3"
 futures-channel = "0.3"
 thiserror = "2.0"

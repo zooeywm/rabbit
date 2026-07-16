@@ -1,120 +1,18 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use binrw::{
+    BinRead, BinReaderExt, BinWrite, BinWriterExt, binread, binrw, io::Cursor,
+};
+use bytes::Bytes;
 use eros::Context;
 
 use crate::kernel::{
     screen_configuration::{
-        PixelSize, RemoteDisplayMode, ResolutionResult, ScreenResolutionStatus,
-        ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
+        PixelSize, RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome,
+        ScreenResolutionStatus, ScreenStreamRequest, ScreenStreamRequestId,
+        ScreenStreamsConfigured, SetScreenStreams,
     },
-    screen_manager::{Screen, ScreenId, ScreenLayout, ScreenTransform},
+    screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-enum ControlMessageTag {
-    ScreenList = 0,
-    SetScreenStreams = 1,
-    ScreenStreamsConfigured = 2,
-}
-
-impl From<ControlMessageTag> for u8 {
-    fn from(tag: ControlMessageTag) -> Self {
-        tag as Self
-    }
-}
-
-impl TryFrom<u8> for ControlMessageTag {
-    type Error = eros::ErrorUnion;
-
-    fn try_from(tag: u8) -> eros::Result<Self> {
-        match tag {
-            0 => Ok(Self::ScreenList),
-            1 => Ok(Self::SetScreenStreams),
-            2 => Ok(Self::ScreenStreamsConfigured),
-            tag => eros::bail!("Unknown Control message tag {tag}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-enum ScreenResolutionStatusTag {
-    Configured = 0,
-    Failed = 1,
-}
-
-impl From<ScreenResolutionStatusTag> for u8 {
-    fn from(tag: ScreenResolutionStatusTag) -> Self {
-        tag as Self
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-enum ResolutionResultTag {
-    Exact = 0,
-    Fallback = 1,
-    Preserved = 2,
-}
-
-impl From<ResolutionResultTag> for u8 {
-    fn from(tag: ResolutionResultTag) -> Self {
-        tag as Self
-    }
-}
-
-impl From<RemoteDisplayMode> for u8 {
-    fn from(mode: RemoteDisplayMode) -> Self {
-        match mode {
-            RemoteDisplayMode::Preserve => 0,
-        }
-    }
-}
-
-impl TryFrom<u8> for RemoteDisplayMode {
-    type Error = eros::ErrorUnion;
-
-    fn try_from(mode: u8) -> eros::Result<Self> {
-        match mode {
-            0 => Ok(Self::Preserve),
-            mode => eros::bail!("Unknown RemoteDisplayMode tag {mode}"),
-        }
-    }
-}
-
-impl From<ScreenTransform> for u8 {
-    fn from(transform: ScreenTransform) -> Self {
-        match transform {
-            ScreenTransform::Normal => 0,
-            ScreenTransform::Rotate90 => 1,
-            ScreenTransform::Rotate180 => 2,
-            ScreenTransform::Rotate270 => 3,
-            ScreenTransform::Flipped => 4,
-            ScreenTransform::Flipped90 => 5,
-            ScreenTransform::Flipped180 => 6,
-            ScreenTransform::Flipped270 => 7,
-        }
-    }
-}
-
-impl TryFrom<u8> for ScreenTransform {
-    type Error = eros::ErrorUnion;
-
-    fn try_from(transform: u8) -> eros::Result<Self> {
-        match transform {
-            0 => Ok(Self::Normal),
-            1 => Ok(Self::Rotate90),
-            2 => Ok(Self::Rotate180),
-            3 => Ok(Self::Rotate270),
-            4 => Ok(Self::Flipped),
-            5 => Ok(Self::Flipped90),
-            6 => Ok(Self::Flipped180),
-            7 => Ok(Self::Flipped270),
-            transform => eros::bail!("Unknown ScreenTransform tag {transform}"),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenInfo {
@@ -130,43 +28,423 @@ pub enum ControlMessage {
     ScreenStreamsConfigured(ScreenStreamsConfigured),
 }
 
+#[derive(BinRead, BinWrite)]
+#[brw(repr = u8)]
+enum WireControlMessageTag {
+    ScreenList = 0,
+    SetScreenStreams = 1,
+    ScreenStreamsConfigured = 2,
+}
+
+#[derive(BinRead, BinWrite)]
+#[brw(repr = u8)]
+enum WireRemoteDisplayMode {
+    Preserve = 0,
+}
+
+#[derive(BinRead, BinWrite)]
+#[brw(repr = u8)]
+enum WireScreenTransform {
+    Normal = 0,
+    Rotate90 = 1,
+    Rotate180 = 2,
+    Rotate270 = 3,
+    Flipped = 4,
+    Flipped90 = 5,
+    Flipped180 = 6,
+    Flipped270 = 7,
+}
+
+#[derive(BinRead, BinWrite)]
+struct WirePixelSize {
+    width: u32,
+    height: u32,
+}
+
+#[derive(BinRead, BinWrite)]
+struct WireScreenRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(BinRead, BinWrite)]
+struct WireScreenLayout {
+    rect: WireScreenRect,
+    scale: f64,
+    transform: WireScreenTransform,
+}
+
+#[derive(BinWrite)]
+struct WireScreenInfoRef<'a> {
+    id: u8,
+    name_length: u16,
+    name: &'a [u8],
+    layout: WireScreenLayout,
+}
+
+#[binread]
+struct WireScreenInfo {
+    id: u8,
+    #[br(temp)]
+    name_length: u16,
+    #[br(count = name_length)]
+    name: Vec<u8>,
+    layout: WireScreenLayout,
+}
+
+#[binread]
+struct WireScreenList {
+    #[br(temp)]
+    screen_count: u8,
+    #[br(count = screen_count)]
+    screens: Vec<WireScreenInfo>,
+}
+
+#[derive(BinRead, BinWrite)]
+struct WireScreenStreamRequest {
+    screen_id: u8,
+    remote_display: WireRemoteDisplayMode,
+    max_resolution: WirePixelSize,
+}
+
+#[binrw]
+struct WireSetScreenStreams {
+    request_id: u32,
+    #[br(temp)]
+    #[bw(try_calc(u8::try_from(changes.len())))]
+    change_count: u8,
+    #[br(count = change_count)]
+    changes: Vec<WireScreenStreamRequest>,
+}
+
+#[derive(BinRead, BinWrite)]
+#[br(return_unexpected_error)]
+enum WireResolutionResult {
+    #[brw(magic(0u8))]
+    Exact { applied: WirePixelSize },
+    #[brw(magic(1u8))]
+    Fallback {
+        requested: WirePixelSize,
+        applied: WirePixelSize,
+    },
+    #[brw(magic(2u8))]
+    Preserved {
+        requested: WirePixelSize,
+        actual: WirePixelSize,
+    },
+}
+
+#[derive(BinRead, BinWrite)]
+#[br(return_unexpected_error)]
+enum WireOptionalPixelSize {
+    #[brw(magic(0u8))]
+    None,
+    #[brw(magic(1u8))]
+    Some(WirePixelSize),
+}
+
+#[derive(BinRead, BinWrite)]
+#[br(return_unexpected_error)]
+enum WireScreenResolutionStatus {
+    #[brw(magic(0u8))]
+    Configured(WireResolutionResult),
+    #[brw(magic(1u8))]
+    Failed {
+        requested: WirePixelSize,
+        actual: WireOptionalPixelSize,
+    },
+}
+
+#[derive(BinRead, BinWrite)]
+struct WireScreenResolutionOutcome {
+    screen_id: u8,
+    status: WireScreenResolutionStatus,
+}
+
+#[binrw]
+struct WireScreenStreamsConfigured {
+    request_id: u32,
+    #[br(temp)]
+    #[bw(try_calc(u8::try_from(outcomes.len())))]
+    outcome_count: u8,
+    #[br(count = outcome_count)]
+    outcomes: Vec<WireScreenResolutionOutcome>,
+}
+
+impl From<RemoteDisplayMode> for WireRemoteDisplayMode {
+    fn from(mode: RemoteDisplayMode) -> Self {
+        match mode {
+            RemoteDisplayMode::Preserve => Self::Preserve,
+        }
+    }
+}
+
+impl From<WireRemoteDisplayMode> for RemoteDisplayMode {
+    fn from(mode: WireRemoteDisplayMode) -> Self {
+        match mode {
+            WireRemoteDisplayMode::Preserve => Self::Preserve,
+        }
+    }
+}
+
+impl From<ScreenTransform> for WireScreenTransform {
+    fn from(transform: ScreenTransform) -> Self {
+        match transform {
+            ScreenTransform::Normal => Self::Normal,
+            ScreenTransform::Rotate90 => Self::Rotate90,
+            ScreenTransform::Rotate180 => Self::Rotate180,
+            ScreenTransform::Rotate270 => Self::Rotate270,
+            ScreenTransform::Flipped => Self::Flipped,
+            ScreenTransform::Flipped90 => Self::Flipped90,
+            ScreenTransform::Flipped180 => Self::Flipped180,
+            ScreenTransform::Flipped270 => Self::Flipped270,
+        }
+    }
+}
+
+impl From<WireScreenTransform> for ScreenTransform {
+    fn from(transform: WireScreenTransform) -> Self {
+        match transform {
+            WireScreenTransform::Normal => Self::Normal,
+            WireScreenTransform::Rotate90 => Self::Rotate90,
+            WireScreenTransform::Rotate180 => Self::Rotate180,
+            WireScreenTransform::Rotate270 => Self::Rotate270,
+            WireScreenTransform::Flipped => Self::Flipped,
+            WireScreenTransform::Flipped90 => Self::Flipped90,
+            WireScreenTransform::Flipped180 => Self::Flipped180,
+            WireScreenTransform::Flipped270 => Self::Flipped270,
+        }
+    }
+}
+
+impl From<PixelSize> for WirePixelSize {
+    fn from(size: PixelSize) -> Self {
+        Self {
+            width: size.width,
+            height: size.height,
+        }
+    }
+}
+
+impl From<ScreenRect> for WireScreenRect {
+    fn from(rect: ScreenRect) -> Self {
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
+
+impl From<ScreenLayout> for WireScreenLayout {
+    fn from(layout: ScreenLayout) -> Self {
+        Self {
+            rect: layout.rect.into(),
+            scale: layout.scale,
+            transform: layout.transform.into(),
+        }
+    }
+}
+
+impl From<WirePixelSize> for PixelSize {
+    fn from(size: WirePixelSize) -> Self {
+        Self {
+            width: size.width,
+            height: size.height,
+        }
+    }
+}
+
+impl From<WireScreenRect> for ScreenRect {
+    fn from(rect: WireScreenRect) -> Self {
+        Self {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
+}
+
+impl From<WireScreenLayout> for ScreenLayout {
+    fn from(layout: WireScreenLayout) -> Self {
+        Self {
+            rect: layout.rect.into(),
+            scale: layout.scale,
+            transform: layout.transform.into(),
+        }
+    }
+}
+
+impl TryFrom<WireScreenInfo> for ScreenInfo {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(screen: WireScreenInfo) -> eros::Result<Self> {
+        let name = String::from_utf8(screen.name)
+            .with_context(|| format!("Failed to decode name for ScreenInfo {}", screen.id))?;
+
+        Ok(Self {
+            id: ScreenId(screen.id),
+            name,
+            layout: screen.layout.into(),
+        })
+    }
+}
+
+impl From<WireScreenStreamRequest> for ScreenStreamRequest {
+    fn from(request: WireScreenStreamRequest) -> Self {
+        Self {
+            screen_id: ScreenId(request.screen_id),
+            remote_display: request.remote_display.into(),
+            max_resolution: request.max_resolution.into(),
+        }
+    }
+}
+
+impl From<ScreenStreamRequest> for WireScreenStreamRequest {
+    fn from(request: ScreenStreamRequest) -> Self {
+        Self {
+            screen_id: request.screen_id.0,
+            remote_display: request.remote_display.into(),
+            max_resolution: request.max_resolution.into(),
+        }
+    }
+}
+
+impl From<SetScreenStreams> for WireSetScreenStreams {
+    fn from(request: SetScreenStreams) -> Self {
+        Self {
+            request_id: request.request_id.0,
+            changes: request.changes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<WireResolutionResult> for ResolutionResult {
+    fn from(result: WireResolutionResult) -> Self {
+        match result {
+            WireResolutionResult::Exact { applied } => Self::Exact {
+                applied: applied.into(),
+            },
+            WireResolutionResult::Fallback { requested, applied } => Self::Fallback {
+                requested: requested.into(),
+                applied: applied.into(),
+            },
+            WireResolutionResult::Preserved { requested, actual } => Self::Preserved {
+                requested: requested.into(),
+                actual: actual.into(),
+            },
+        }
+    }
+}
+
+impl From<ResolutionResult> for WireResolutionResult {
+    fn from(result: ResolutionResult) -> Self {
+        match result {
+            ResolutionResult::Exact { applied } => Self::Exact {
+                applied: applied.into(),
+            },
+            ResolutionResult::Fallback { requested, applied } => Self::Fallback {
+                requested: requested.into(),
+                applied: applied.into(),
+            },
+            ResolutionResult::Preserved { requested, actual } => Self::Preserved {
+                requested: requested.into(),
+                actual: actual.into(),
+            },
+        }
+    }
+}
+
+impl From<WireOptionalPixelSize> for Option<PixelSize> {
+    fn from(size: WireOptionalPixelSize) -> Self {
+        match size {
+            WireOptionalPixelSize::None => None,
+            WireOptionalPixelSize::Some(size) => Some(size.into()),
+        }
+    }
+}
+
+impl From<Option<PixelSize>> for WireOptionalPixelSize {
+    fn from(size: Option<PixelSize>) -> Self {
+        match size {
+            Some(size) => Self::Some(size.into()),
+            None => Self::None,
+        }
+    }
+}
+
+impl From<WireScreenResolutionStatus> for ScreenResolutionStatus {
+    fn from(status: WireScreenResolutionStatus) -> Self {
+        match status {
+            WireScreenResolutionStatus::Configured(result) => Self::Configured(result.into()),
+            WireScreenResolutionStatus::Failed { requested, actual } => Self::Failed {
+                requested: requested.into(),
+                actual: actual.into(),
+            },
+        }
+    }
+}
+
+impl From<ScreenResolutionStatus> for WireScreenResolutionStatus {
+    fn from(status: ScreenResolutionStatus) -> Self {
+        match status {
+            ScreenResolutionStatus::Configured(result) => Self::Configured(result.into()),
+            ScreenResolutionStatus::Failed { requested, actual } => Self::Failed {
+                requested: requested.into(),
+                actual: actual.into(),
+            },
+        }
+    }
+}
+
+impl From<WireScreenResolutionOutcome> for ScreenResolutionOutcome {
+    fn from(outcome: WireScreenResolutionOutcome) -> Self {
+        Self {
+            screen_id: ScreenId(outcome.screen_id),
+            status: outcome.status.into(),
+        }
+    }
+}
+
+impl From<ScreenResolutionOutcome> for WireScreenResolutionOutcome {
+    fn from(outcome: ScreenResolutionOutcome) -> Self {
+        Self {
+            screen_id: outcome.screen_id.0,
+            status: outcome.status.into(),
+        }
+    }
+}
+
+impl From<ScreenStreamsConfigured> for WireScreenStreamsConfigured {
+    fn from(configured: ScreenStreamsConfigured) -> Self {
+        Self {
+            request_id: configured.request_id.0,
+            outcomes: configured.outcomes.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 impl TryFrom<&[Screen]> for TransportMessage {
     type Error = eros::ErrorUnion;
 
     fn try_from(screens: &[Screen]) -> eros::Result<Self> {
         let screen_count = u8::try_from(screens.len())
             .with_context(|| "Failed to encode ScreenList screen count")?;
-        let mut payload = BytesMut::new();
+        let mut writer = begin_control_message(WireControlMessageTag::ScreenList)?;
 
-        payload.put_u8(ControlMessageTag::ScreenList.into());
-        payload.put_u8(screen_count);
+        writer
+            .write_be(&screen_count)
+            .with_context(|| "Failed to encode ScreenList screen count")?;
 
         for screen in screens {
-            let name = screen.name.as_bytes();
-            let name_length = u16::try_from(name.len())
-                .with_context(|| "Failed to encode ScreenInfo name length")?;
-            let ScreenLayout {
-                rect,
-                scale,
-                transform,
-            } = screen.layout;
-
-            payload.put_u8(screen.id.0);
-            payload.put_u16(name_length);
-            payload.extend_from_slice(name);
-            payload.put_u32(rect.x);
-            payload.put_u32(rect.y);
-            payload.put_u32(rect.width);
-            payload.put_u32(rect.height);
-            payload.put_f64(scale);
-            payload.put_u8(transform.into());
+            write_screen_info(&mut writer, screen)?;
         }
 
-        Ok(Self {
-            channel: TransportChannel::Control,
-            delivery: Delivery::ReliableOrdered,
-            payload: payload.freeze(),
-        })
+        Ok(finish_control_message(writer))
     }
 }
 
@@ -174,26 +452,14 @@ impl TryFrom<SetScreenStreams> for TransportMessage {
     type Error = eros::ErrorUnion;
 
     fn try_from(request: SetScreenStreams) -> eros::Result<Self> {
-        let change_count = u8::try_from(request.changes.len())
-            .with_context(|| "Failed to encode SetScreenStreams change count")?;
-        let mut payload = BytesMut::new();
+        let mut writer = begin_control_message(WireControlMessageTag::SetScreenStreams)?;
+        let wire = WireSetScreenStreams::from(request);
 
-        payload.put_u8(ControlMessageTag::SetScreenStreams.into());
-        payload.put_u32(request.request_id.0);
-        payload.put_u8(change_count);
+        writer
+            .write_be(&wire)
+            .with_context(|| "Failed to encode SetScreenStreams")?;
 
-        for change in request.changes {
-            payload.put_u8(change.screen_id.0);
-            payload.put_u8(change.remote_display.into());
-            payload.put_u32(change.max_resolution.width);
-            payload.put_u32(change.max_resolution.height);
-        }
-
-        Ok(Self {
-            channel: TransportChannel::Control,
-            delivery: Delivery::ReliableOrdered,
-            payload: payload.freeze(),
-        })
+        Ok(finish_control_message(writer))
     }
 }
 
@@ -201,63 +467,15 @@ impl TryFrom<ScreenStreamsConfigured> for TransportMessage {
     type Error = eros::ErrorUnion;
 
     fn try_from(configured: ScreenStreamsConfigured) -> eros::Result<Self> {
-        let outcome_count = u8::try_from(configured.outcomes.len())
-            .with_context(|| "Failed to encode ScreenStreamsConfigured outcome count")?;
-        let mut payload = BytesMut::new();
+        let mut writer = begin_control_message(WireControlMessageTag::ScreenStreamsConfigured)?;
+        let wire = WireScreenStreamsConfigured::from(configured);
 
-        payload.put_u8(ControlMessageTag::ScreenStreamsConfigured.into());
-        payload.put_u32(configured.request_id.0);
-        payload.put_u8(outcome_count);
+        writer
+            .write_be(&wire)
+            .with_context(|| "Failed to encode ScreenStreamsConfigured")?;
 
-        for outcome in configured.outcomes {
-            payload.put_u8(outcome.screen_id.0);
-
-            match outcome.status {
-                ScreenResolutionStatus::Configured(result) => {
-                    payload.put_u8(ScreenResolutionStatusTag::Configured.into());
-
-                    match result {
-                        ResolutionResult::Exact { applied } => {
-                            payload.put_u8(ResolutionResultTag::Exact.into());
-                            put_pixel_size(&mut payload, applied);
-                        }
-                        ResolutionResult::Fallback { requested, applied } => {
-                            payload.put_u8(ResolutionResultTag::Fallback.into());
-                            put_pixel_size(&mut payload, requested);
-                            put_pixel_size(&mut payload, applied);
-                        }
-                        ResolutionResult::Preserved { requested, actual } => {
-                            payload.put_u8(ResolutionResultTag::Preserved.into());
-                            put_pixel_size(&mut payload, requested);
-                            put_pixel_size(&mut payload, actual);
-                        }
-                    }
-                }
-                ScreenResolutionStatus::Failed { requested, actual } => {
-                    payload.put_u8(ScreenResolutionStatusTag::Failed.into());
-                    put_pixel_size(&mut payload, requested);
-
-                    if let Some(actual) = actual {
-                        payload.put_u8(1);
-                        put_pixel_size(&mut payload, actual);
-                    } else {
-                        payload.put_u8(0);
-                    }
-                }
-            }
-        }
-
-        Ok(Self {
-            channel: TransportChannel::Control,
-            delivery: Delivery::ReliableOrdered,
-            payload: payload.freeze(),
-        })
+        Ok(finish_control_message(writer))
     }
-}
-
-fn put_pixel_size(payload: &mut BytesMut, size: PixelSize) {
-    payload.put_u32(size.width);
-    payload.put_u32(size.height);
 }
 
 impl TryFrom<TransportMessage> for ControlMessage {
@@ -278,139 +496,90 @@ impl TryFrom<TransportMessage> for ControlMessage {
             );
         }
 
-        let mut reader = ControlPayloadReader::from(message.payload);
-        let tag = ControlMessageTag::try_from(reader.read_u8("Control message tag")?)
+        let mut reader = Cursor::new(message.payload);
+        let tag = reader
+            .read_be::<WireControlMessageTag>()
             .with_context(|| "Failed to decode Control message tag")?;
         let message = match tag {
-            ControlMessageTag::ScreenList => Self::ScreenList(reader.read_screen_list()?),
-            ControlMessageTag::SetScreenStreams => {
-                Self::SetScreenStreams(reader.read_set_screen_streams()?)
+            WireControlMessageTag::ScreenList => {
+                let wire = reader
+                    .read_be::<WireScreenList>()
+                    .with_context(|| "Failed to decode ScreenList")?;
+                let screens = wire
+                    .screens
+                    .into_iter()
+                    .map(ScreenInfo::try_from)
+                    .collect::<eros::Result<Vec<_>>>()?;
+
+                Self::ScreenList(screens)
             }
-            ControlMessageTag::ScreenStreamsConfigured => {
-                eros::bail!("ScreenStreamsConfigured decoding is not implemented")
+            WireControlMessageTag::SetScreenStreams => {
+                let wire = reader
+                    .read_be::<WireSetScreenStreams>()
+                    .with_context(|| "Failed to decode SetScreenStreams")?;
+
+                Self::SetScreenStreams(SetScreenStreams {
+                    request_id: ScreenStreamRequestId(wire.request_id),
+                    changes: wire.changes.into_iter().map(Into::into).collect(),
+                })
+            }
+            WireControlMessageTag::ScreenStreamsConfigured => {
+                let wire = reader
+                    .read_be::<WireScreenStreamsConfigured>()
+                    .with_context(|| "Failed to decode ScreenStreamsConfigured")?;
+
+                Self::ScreenStreamsConfigured(ScreenStreamsConfigured {
+                    request_id: ScreenStreamRequestId(wire.request_id),
+                    outcomes: wire.outcomes.into_iter().map(Into::into).collect(),
+                })
             }
         };
+        let payload_length = u64::try_from(reader.get_ref().len())
+            .with_context(|| "Failed to validate decoded Control payload length")?;
 
-        if reader.has_remaining() {
-            eros::bail!("Control message contains trailing payload bytes");
+        if reader.position() != payload_length {
+            eros::bail!(
+                "Control message contains {} trailing payload bytes",
+                payload_length - reader.position()
+            );
         }
 
         Ok(message)
     }
 }
 
-struct ControlPayloadReader {
-    payload: Bytes,
+fn begin_control_message(tag: WireControlMessageTag) -> eros::Result<Cursor<Vec<u8>>> {
+    let mut writer = Cursor::new(Vec::new());
+
+    writer
+        .write_be(&tag)
+        .with_context(|| "Failed to encode Control message tag")?;
+
+    Ok(writer)
 }
 
-impl From<Bytes> for ControlPayloadReader {
-    fn from(payload: Bytes) -> Self {
-        Self { payload }
+fn finish_control_message(writer: Cursor<Vec<u8>>) -> TransportMessage {
+    TransportMessage {
+        channel: TransportChannel::Control,
+        delivery: Delivery::ReliableOrdered,
+        payload: Bytes::from(writer.into_inner()),
     }
 }
 
-impl ControlPayloadReader {
-    fn has_remaining(&self) -> bool {
-        self.payload.has_remaining()
-    }
+fn write_screen_info(writer: &mut Cursor<Vec<u8>>, screen: &Screen) -> eros::Result<()> {
+    let name = screen.name.as_bytes();
+    let name_length = u16::try_from(name.len())
+        .with_context(|| "Failed to encode ScreenInfo name length")?;
+    let wire = WireScreenInfoRef {
+        id: screen.id.0,
+        name_length,
+        name,
+        layout: screen.layout.into(),
+    };
 
-    fn read_screen_list(&mut self) -> eros::Result<Vec<ScreenInfo>> {
-        let screen_count = usize::from(self.read_u8("ScreenList screen count")?);
-        let mut screens = Vec::with_capacity(screen_count);
+    writer
+        .write_be(&wire)
+        .with_context(|| format!("Failed to encode ScreenInfo {}", screen.id.0))?;
 
-        for _ in 0..screen_count {
-            screens.push(self.read_screen_info()?);
-        }
-
-        Ok(screens)
-    }
-
-    fn read_screen_info(&mut self) -> eros::Result<ScreenInfo> {
-        let id = ScreenId(self.read_u8("ScreenInfo ID")?);
-        let name_length = usize::from(self.read_u16("ScreenInfo name length")?);
-        let name = self.read_bytes(name_length, "ScreenInfo name")?;
-        let name = std::str::from_utf8(&name)
-            .with_context(|| "Failed to decode ScreenInfo name as UTF-8")?
-            .to_owned();
-        let rect = crate::kernel::screen_manager::ScreenRect {
-            x: self.read_u32("ScreenInfo layout x")?,
-            y: self.read_u32("ScreenInfo layout y")?,
-            width: self.read_u32("ScreenInfo layout width")?,
-            height: self.read_u32("ScreenInfo layout height")?,
-        };
-        let scale = self.read_f64("ScreenInfo scale")?;
-        let transform = ScreenTransform::try_from(self.read_u8("ScreenInfo transform")?)
-            .with_context(|| "Failed to decode ScreenInfo transform")?;
-
-        Ok(ScreenInfo {
-            id,
-            name,
-            layout: ScreenLayout {
-                rect,
-                scale,
-                transform,
-            },
-        })
-    }
-
-    fn read_set_screen_streams(&mut self) -> eros::Result<SetScreenStreams> {
-        let request_id = ScreenStreamRequestId(self.read_u32("SetScreenStreams request ID")?);
-        let change_count = usize::from(self.read_u8("SetScreenStreams change count")?);
-        let mut changes = Vec::with_capacity(change_count);
-
-        for _ in 0..change_count {
-            let screen_id = ScreenId(self.read_u8("ScreenStreamRequest screen ID")?);
-            let remote_display =
-                RemoteDisplayMode::try_from(self.read_u8("ScreenStreamRequest display mode")?)
-                    .with_context(|| "Failed to decode ScreenStreamRequest display mode")?;
-            let max_resolution = PixelSize {
-                width: self.read_u32("ScreenStreamRequest maximum width")?,
-                height: self.read_u32("ScreenStreamRequest maximum height")?,
-            };
-
-            changes.push(ScreenStreamRequest {
-                screen_id,
-                remote_display,
-                max_resolution,
-            });
-        }
-
-        Ok(SetScreenStreams {
-            request_id,
-            changes,
-        })
-    }
-
-    fn read_u8(&mut self, field: &str) -> eros::Result<u8> {
-        self.require(size_of::<u8>(), field)?;
-        Ok(self.payload.get_u8())
-    }
-
-    fn read_u16(&mut self, field: &str) -> eros::Result<u16> {
-        self.require(size_of::<u16>(), field)?;
-        Ok(self.payload.get_u16())
-    }
-
-    fn read_u32(&mut self, field: &str) -> eros::Result<u32> {
-        self.require(size_of::<u32>(), field)?;
-        Ok(self.payload.get_u32())
-    }
-
-    fn read_f64(&mut self, field: &str) -> eros::Result<f64> {
-        self.require(size_of::<f64>(), field)?;
-        Ok(self.payload.get_f64())
-    }
-
-    fn read_bytes(&mut self, length: usize, field: &str) -> eros::Result<Bytes> {
-        self.require(length, field)?;
-        Ok(self.payload.split_to(length))
-    }
-
-    fn require(&self, length: usize, field: &str) -> eros::Result<()> {
-        if self.payload.remaining() < length {
-            eros::bail!("{field} is truncated");
-        }
-
-        Ok(())
-    }
+    Ok(())
 }
