@@ -48,80 +48,87 @@ where
         self.role
     }
 
-    pub fn send_screen_list<'a>(
-        &'a self,
-        screens: &'a [Screen],
-    ) -> impl Future<Output = eros::Result<()>> + 'a {
-        async move {
-            self.require_role(SessionRole::Host, "send a screen list")?;
-            self.send_control(screens).await
-        }
+    pub async fn send_screen_list(&self, screens: &[Screen]) -> eros::Result<()> {
+        self.require_role(SessionRole::Host, "send a screen list")?;
+        self.send_control(screens).await
     }
 
-    pub fn send_screen_streams_request(
+    pub async fn send_screen_streams_request(
         &self,
         request: SetScreenStreams,
-    ) -> impl Future<Output = eros::Result<()>> + '_ {
-        async move {
-            self.require_role(SessionRole::Controller, "request screen streams")?;
-            self.send_control(request).await
-        }
+    ) -> eros::Result<()> {
+        self.require_role(SessionRole::Controller, "request screen streams")?;
+        self.send_control(request).await
     }
 
-    pub fn send_screen_streams_configured(
+    pub async fn send_screen_streams_configured(
         &self,
         configured: ScreenStreamsConfigured,
-    ) -> impl Future<Output = eros::Result<()>> + '_ {
-        async move {
-            self.require_role(SessionRole::Host, "send screen stream results")?;
-            self.send_control(configured).await
-        }
+    ) -> eros::Result<()> {
+        self.require_role(SessionRole::Host, "send screen stream results")?;
+        self.send_control(configured).await
     }
 
-    pub fn recv(
-        &mut self,
-    ) -> impl Future<Output = eros::Result<Option<SessionMessage>>> {
-        async move {
-            let Some(message) = self.recv.recv().await? else {
-                return Ok(None);
-            };
+    pub async fn recv(&mut self) -> eros::Result<Option<SessionMessage>> {
+        let Some(message) = self.recv.recv().await? else {
+            return Ok(None);
+        };
 
-            match message.channel {
-                TransportChannel::Control => {
-                    Ok(Some(SessionMessage::Control(message.try_into()?)))
-                }
-                TransportChannel::Video(screen_id) => {
-                    if message.delivery != Delivery::Unreliable {
-                        eros::bail!(
-                            "Video message for screen {} has invalid delivery {:?}",
-                            screen_id.0,
-                            message.delivery
-                        );
-                    }
+        match message.channel {
+            TransportChannel::Control => {
+                let message = ControlMessage::try_from(message)?;
+                self.validate_received_control(&message)?;
 
-                    Ok(Some(SessionMessage::Video(VideoMessage {
-                        screen_id,
-                        payload: message.payload,
-                    })))
+                Ok(Some(SessionMessage::Control(message)))
+            }
+            TransportChannel::Video(screen_id) => {
+                if message.delivery != Delivery::Unreliable {
+                    eros::bail!(
+                        "Video message for screen {} has invalid delivery {:?}",
+                        screen_id.0,
+                        message.delivery
+                    );
                 }
+
+                Ok(Some(SessionMessage::Video(VideoMessage {
+                    screen_id,
+                    payload: message.payload,
+                })))
             }
         }
     }
 
-    fn send_control<'a, M: 'a>(
-        &'a self,
-        message: M,
-    ) -> impl Future<Output = eros::Result<()>> + 'a
+    async fn send_control<M>(&self, message: M) -> eros::Result<()>
     where
         TransportMessage: TryFrom<M, Error = eros::ErrorUnion>,
     {
-        async move { self.send.send(message.try_into()?).await }
+        self.send.send(message.try_into()?).await
     }
 
     fn require_role(&self, expected: SessionRole, operation: &str) -> eros::Result<()> {
         if self.role != expected {
             eros::bail!(
                 "Session role {:?} cannot {operation}; expected {:?}",
+                self.role,
+                expected
+            );
+        }
+
+        Ok(())
+    }
+
+    fn validate_received_control(&self, message: &ControlMessage) -> eros::Result<()> {
+        let (expected, name) = match message {
+            ControlMessage::ScreenList(_) => (SessionRole::Controller, "ScreenList"),
+            ControlMessage::SetScreenStreams(_) => (SessionRole::Host, "SetScreenStreams"),
+            ControlMessage::ScreenStreamsConfigured(_) => {
+                (SessionRole::Controller, "ScreenStreamsConfigured")
+            }
+        };
+
+        if self.role != expected {
+            eros::bail!(
+                "Session role {:?} cannot receive {name}; expected {:?}",
                 self.role,
                 expected
             );
