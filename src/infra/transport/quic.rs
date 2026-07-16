@@ -54,10 +54,13 @@ impl Drop for ControlSendGuard {
 
 impl QuicTransport {
     pub(crate) async fn open(connection: compio::quic::Connection) -> eros::Result<Self> {
-        let (control_send, control_recv) = connection
+        let (mut control_send, mut control_recv) = connection
             .open_bi_wait()
             .await
             .with_context(|| "Failed to open QUIC Control stream")?;
+
+        write_control_stream_preface(&mut control_send).await?;
+        read_control_stream_preface(&mut control_recv).await?;
 
         Ok(Self {
             connection,
@@ -67,10 +70,13 @@ impl QuicTransport {
     }
 
     pub(crate) async fn accept(connection: compio::quic::Connection) -> eros::Result<Self> {
-        let (control_send, control_recv) = connection
+        let (mut control_send, mut control_recv) = connection
             .accept_bi()
             .await
             .with_context(|| "Failed to accept QUIC Control stream")?;
+
+        read_control_stream_preface(&mut control_recv).await?;
+        write_control_stream_preface(&mut control_send).await?;
 
         Ok(Self {
             connection,
@@ -78,6 +84,38 @@ impl QuicTransport {
             control_recv,
         })
     }
+}
+
+async fn write_control_stream_preface(
+    stream: &mut compio::quic::SendStream,
+) -> eros::Result<()> {
+    let mut preface = [Bytes::copy_from_slice(&[TransportChannel::Control.into()])];
+
+    stream
+        .write_all_chunks(&mut preface)
+        .await
+        .with_context(|| "Failed to write QUIC Control stream preface")?;
+
+    Ok(())
+}
+
+async fn read_control_stream_preface(
+    stream: &mut compio::quic::RecvStream,
+) -> eros::Result<()> {
+    let Some(preface) = stream
+        .read_chunk(size_of::<u8>(), true)
+        .await
+        .with_context(|| "Failed to read QUIC Control stream preface")?
+    else {
+        eros::bail!("QUIC Control stream ended before its preface");
+    };
+    let channel = TransportChannel::from(preface.bytes[0]);
+
+    if channel != TransportChannel::Control {
+        eros::bail!("QUIC Control stream has invalid preface channel {channel:?}");
+    }
+
+    Ok(())
 }
 
 impl Transport for QuicTransport {
