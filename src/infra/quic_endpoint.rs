@@ -7,6 +7,7 @@ use eros::Context;
 
 const BASE_PORT: u16 = 52731;
 const LAST_PORT: u16 = BASE_PORT + 4;
+const SERVER_NAME: &str = "rabbit";
 
 pub(crate) struct QuicEndpoint {
     endpoint: compio::quic::Endpoint,
@@ -43,6 +44,39 @@ impl QuicEndpoint {
             .endpoint
             .local_addr()
             .with_context(|| "Failed to read QUIC endpoint local address")?)
+    }
+
+    pub(crate) async fn connect(
+        &self,
+        remote_address: SocketAddr,
+    ) -> eros::Result<compio::quic::Connection> {
+        let connecting = self
+            .endpoint
+            .connect(
+                remote_address,
+                SERVER_NAME,
+                Some(self.client_config.clone()),
+            )
+            .with_context(|| {
+                format!("Failed to start QUIC connection to {remote_address}")
+            })?;
+
+        Ok(connecting
+            .await
+            .with_context(|| format!("Failed to connect QUIC peer {remote_address}"))?)
+    }
+
+    pub(crate) async fn accept_connection(
+        &self,
+    ) -> eros::Result<Option<compio::quic::Connection>> {
+        let Some(incoming) = self.endpoint.wait_incoming().await else {
+            return Ok(None);
+        };
+        let remote_address = incoming.remote_address();
+
+        Ok(Some(incoming.await.with_context(|| {
+            format!("Failed to accept QUIC connection from {remote_address}")
+        })?))
     }
 }
 
