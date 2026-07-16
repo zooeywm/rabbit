@@ -1,10 +1,4 @@
-use crate::kernel::screen_manager::ScreenId;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PixelSize {
-    pub width: u32,
-    pub height: u32,
-}
+use crate::kernel::{geometry::PixelSize, screen_manager::ScreenId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScreenStreamRequestId(pub u32);

@@ -5,8 +5,9 @@ use bytes::Bytes;
 use eros::Context;
 
 use crate::kernel::{
+    geometry::PixelSize,
     screen_configuration::{
-        PixelSize, RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome,
+        RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome,
         ScreenResolutionStatus, ScreenStreamRequest, ScreenStreamRequestId,
         ScreenStreamsConfigured, SetScreenStreams,
     },

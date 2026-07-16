@@ -1,8 +1,12 @@
 use eros::Context;
 use niri_ipc::{Request, Response, Transform as NiriTransform, socket::Socket};
 
-use crate::kernel::screen_manager::{
-    Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
+use crate::kernel::{
+    geometry::PixelSize,
+    screen_manager::{
+        Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect,
+        ScreenTransform,
+    },
 };
 
 #[derive(Debug, kudi::DepInj)]
@@ -44,13 +48,31 @@ impl NiriScreenLayoutManagerState {
         };
 
         // Outputs without a logical layout are disabled or unmapped.
-        let mapped_outputs = outputs
-            .into_values()
-            .filter_map(|output| {
-                let logical = output.logical?;
-                Some((output.name, logical))
-            })
-            .collect::<Vec<_>>();
+        let mut mapped_outputs = Vec::new();
+
+        for output in outputs.into_values() {
+            let Some(logical) = output.logical else {
+                continue;
+            };
+            let mode_index = output.current_mode.with_context(|| {
+                format!("Niri mapped output {} without a current mode", output.name)
+            })?;
+            let mode = output.modes.get(mode_index).with_context(|| {
+                format!(
+                    "Niri returned invalid current mode index {mode_index} for output {}",
+                    output.name
+                )
+            })?;
+
+            mapped_outputs.push((
+                output.name,
+                logical,
+                PixelSize {
+                    width: u32::from(mode.width),
+                    height: u32::from(mode.height),
+                },
+            ));
+        }
 
         if mapped_outputs.is_empty() {
             return Ok(Vec::new());
@@ -58,19 +80,19 @@ impl NiriScreenLayoutManagerState {
 
         let min_x = mapped_outputs
             .iter()
-            .map(|(_, logical)| logical.x)
+            .map(|(_, logical, _)| logical.x)
             .min()
             .expect("mapped_outputs is not empty");
 
         let min_y = mapped_outputs
             .iter()
-            .map(|(_, logical)| logical.y)
+            .map(|(_, logical, _)| logical.y)
             .min()
             .expect("mapped_outputs is not empty");
 
         let mut mapped_screens = Vec::with_capacity(mapped_outputs.len());
 
-        for (name, logical) in mapped_outputs {
+        for (name, logical, resolution) in mapped_outputs {
             if !logical.scale.is_finite() || logical.scale <= 0.0 {
                 eros::bail!(
                     "Niri returned an invalid scale for screen \
@@ -89,6 +111,7 @@ impl NiriScreenLayoutManagerState {
 
             mapped_screens.push((
                 name,
+                resolution,
                 ScreenLayout {
                     rect: ScreenRect {
                         x,
@@ -105,11 +128,11 @@ impl NiriScreenLayoutManagerState {
         // Maintain deterministic ordering for enumeration and primary-screen
         // fallback selection.
         mapped_screens.sort_by(|left, right| {
-            left.1
+            left.2
                 .rect
                 .x
-                .cmp(&right.1.rect.x)
-                .then_with(|| left.1.rect.y.cmp(&right.1.rect.y))
+                .cmp(&right.2.rect.x)
+                .then_with(|| left.2.rect.y.cmp(&right.2.rect.y))
                 .then_with(|| left.0.cmp(&right.0))
         });
 
@@ -119,13 +142,14 @@ impl NiriScreenLayoutManagerState {
 
         let mut screens = Vec::with_capacity(mapped_screens.len());
 
-        for (index, (name, layout)) in mapped_screens.into_iter().enumerate() {
+        for (index, (name, resolution, layout)) in mapped_screens.into_iter().enumerate() {
             let id = u8::try_from(index)
                 .with_context(|| "Failed to assign a logical Niri screen ID")?;
 
             screens.push(Screen {
                 id: ScreenId(id),
                 name,
+                resolution,
                 layout,
             });
         }

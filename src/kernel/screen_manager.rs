@@ -1,3 +1,5 @@
+use crate::kernel::geometry::PixelSize;
+
 pub trait ScreenLayoutManager {
     fn refresh(&mut self) -> eros::Result<()>;
     fn screens(&self) -> &[Screen];
@@ -12,6 +14,7 @@ pub struct ScreenId(pub u8);
 pub struct Screen {
     pub id: ScreenId,
     pub name: String,
+    pub resolution: PixelSize,
     pub layout: ScreenLayout,
 }
 
