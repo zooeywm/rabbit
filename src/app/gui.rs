@@ -11,7 +11,10 @@ use crate::{
         QuicTransport, RayonThreadPoolState, connect_transport,
         create_screen_layout_manager_state, receive_request,
     },
-    kernel::connection_request::ConnectionRequest,
+    kernel::{
+        connection_request::ConnectionRequest,
+        session::{Session, SessionRole},
+    },
 };
 
 pub(crate) struct RootComponent {
@@ -26,7 +29,7 @@ pub(crate) struct RootComponent {
     accept_connection_button: Child<Button>,
     reject_connection_button: Child<Button>,
     pending_connection_requests: Vec<PendingQuicConnectionRequest>,
-    accepted_transports: Vec<QuicTransport>,
+    sessions: Vec<Session<QuicTransport>>,
     _connection_listener: compio::runtime::JoinHandle<()>,
 }
 
@@ -163,7 +166,7 @@ impl Component for RootComponent {
             accept_connection_button,
             reject_connection_button,
             pending_connection_requests: Vec::new(),
-            accepted_transports: Vec::new(),
+            sessions: Vec::new(),
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -248,7 +251,8 @@ impl Component for RootComponent {
 
                 match result {
                     Ok(Some(transport)) => {
-                        self.accepted_transports.push(transport);
+                        self.sessions
+                            .push(Session::new(SessionRole::Controller, transport));
                         self.connection_status.set_text("Connection accepted")?;
                     }
                     Ok(None) => self.connection_status.set_text("Connection rejected")?,
@@ -308,7 +312,9 @@ impl Component for RootComponent {
             }
             RootMessage::ConnectionAccepted(result) => {
                 match result {
-                    Ok(transport) => self.accepted_transports.push(transport),
+                    Ok(transport) => self
+                        .sessions
+                        .push(Session::new(SessionRole::Host, transport)),
                     Err(error) => error!(%error, "Failed to accept a QUIC connection request"),
                 }
 
