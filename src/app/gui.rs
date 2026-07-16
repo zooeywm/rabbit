@@ -93,13 +93,13 @@ impl RootComponent {
                     Some(screen) => match change.remote_display {
                         RemoteDisplayMode::Preserve => {
                             ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
-                                requested: change.max_resolution,
+                                requested: change.frame_size,
                                 actual: screen.resolution,
                             })
                         }
                     },
                     None => ScreenResolutionStatus::Failed {
-                        requested: change.max_resolution,
+                        requested: change.frame_size,
                         actual: None,
                     },
                 };

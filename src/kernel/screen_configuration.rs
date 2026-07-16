@@ -13,7 +13,7 @@ pub struct SetScreenStreams {
 pub struct ScreenStreamRequest {
     pub screen_id: ScreenId,
     pub remote_display: RemoteDisplayMode,
-    pub max_resolution: PixelSize,
+    pub frame_size: PixelSize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -110,7 +110,7 @@ struct WireScreenList {
 struct WireScreenStreamRequest {
     screen_id: u8,
     remote_display: WireRemoteDisplayMode,
-    max_resolution: WirePixelSize,
+    frame_size: WirePixelSize,
 }
 
 #[binrw]
@@ -304,7 +304,7 @@ impl From<WireScreenStreamRequest> for ScreenStreamRequest {
         Self {
             screen_id: ScreenId(request.screen_id),
             remote_display: request.remote_display.into(),
-            max_resolution: request.max_resolution.into(),
+            frame_size: request.frame_size.into(),
         }
     }
 }
@@ -314,7 +314,7 @@ impl From<ScreenStreamRequest> for WireScreenStreamRequest {
         Self {
             screen_id: request.screen_id.0,
             remote_display: request.remote_display.into(),
-            max_resolution: request.max_resolution.into(),
+            frame_size: request.frame_size.into(),
         }
     }
 }
