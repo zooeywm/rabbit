@@ -1,3 +1,5 @@
+use std::net::{IpAddr, SocketAddr};
+
 use eros::Context;
 use tracing::{error, info, warn};
 use winio::prelude::*;
@@ -6,13 +8,19 @@ use crate::{
     app::{App, config::Config, init_logging},
     infra::{
         NiriScreenLayoutManagerState, PendingQuicConnectionRequest, QuicEndpoint,
-        QuicTransport, RayonThreadPoolState, create_screen_layout_manager_state, receive_request,
+        QuicTransport, RayonThreadPoolState, connect_transport,
+        create_screen_layout_manager_state, receive_request,
     },
+    kernel::connection_request::ConnectionRequest,
 };
 
 pub(crate) struct RootComponent {
     _app: App<NiriScreenLayoutManagerState>,
     window: Child<Window>,
+    direct_address_input: Child<Edit>,
+    connect_button: Child<Button>,
+    connection_status: Child<Label>,
+    requester_name: String,
     connection_request_title: Child<Label>,
     connection_request_list: Child<ListBox>,
     accept_connection_button: Child<Button>,
@@ -25,6 +33,8 @@ pub(crate) struct RootComponent {
 pub(crate) enum RootMessage {
     Noop,
     Close,
+    ConnectDirect,
+    DirectConnectionFinished(eros::Result<Option<QuicTransport>>),
     ConnectionRequest(PendingQuicConnectionRequest),
     ConnectionRequestSelectionChanged,
     AcceptSelectedConnection,
@@ -36,6 +46,21 @@ pub(crate) enum RootMessage {
 }
 
 impl RootComponent {
+    fn parse_direct_target(&self) -> eros::Result<(IpAddr, Option<u16>)> {
+        let input = self.direct_address_input.text()?;
+        let input = input.trim();
+
+        if let Ok(address) = input.parse::<SocketAddr>() {
+            return Ok((address.ip(), Some(address.port())));
+        }
+
+        let ip = input
+            .parse::<IpAddr>()
+            .with_context(|| format!("Failed to parse direct connection IP {input:?}"))?;
+
+        Ok((ip, None))
+    }
+
     fn set_connection_request_panel_visible(&mut self, visible: bool) -> eros::Result<()> {
         self.connection_request_title.set_visible(visible)?;
         self.connection_request_list.set_visible(visible)?;
@@ -91,6 +116,7 @@ impl Component for RootComponent {
             .await
             .context("Failed to create the QUIC endpoint")?;
         let local_address = quic_endpoint.local_address()?;
+        let requester_name = format!("{} ({})", config.app_name, local_address.port());
 
         info!(%local_address, "Listening for direct QUIC connections");
 
@@ -105,6 +131,12 @@ impl Component for RootComponent {
         let mut window = Child::<Window>::init(()).await?;
         window.set_text(format!("Rabbit - UDP {}", local_address.port()))?;
         window.set_size(Size::new(800.0, 600.0))?;
+        let mut direct_address_input = Child::<Edit>::init(&window).await?;
+        direct_address_input.set_text("127.0.0.1")?;
+        let mut connect_button = Child::<Button>::init(&window).await?;
+        connect_button.set_text("Connect")?;
+        let mut connection_status = Child::<Label>::init(&window).await?;
+        connection_status.set_text(format!("Listening on UDP {}", local_address.port()))?;
         let mut connection_request_title = Child::<Label>::init(&window).await?;
         connection_request_title.set_text("Pending connection requests")?;
         connection_request_title.set_visible(false)?;
@@ -122,6 +154,10 @@ impl Component for RootComponent {
         Ok(Self {
             _app: app,
             window,
+            direct_address_input,
+            connect_button,
+            connection_status,
+            requester_name,
             connection_request_title,
             connection_request_list,
             accept_connection_button,
@@ -141,6 +177,9 @@ impl Component for RootComponent {
             self.window => {
                 WindowEvent::Close => RootMessage::Close,
             },
+            self.connect_button => {
+                ButtonEvent::Click => RootMessage::ConnectDirect,
+            },
             self.connection_request_list => {
                 ListBoxEvent::Select => RootMessage::ConnectionRequestSelectionChanged,
             },
@@ -155,6 +194,9 @@ impl Component for RootComponent {
 
     async fn update_children(&mut self) -> eros::Result<bool> {
         let mut changed = self.window.update().await?;
+        changed |= self.direct_address_input.update().await?;
+        changed |= self.connect_button.update().await?;
+        changed |= self.connection_status.update().await?;
         changed |= self.connection_request_title.update().await?;
         changed |= self.connection_request_list.update().await?;
         changed |= self.accept_connection_button.update().await?;
@@ -172,6 +214,50 @@ impl Component for RootComponent {
             RootMessage::Close => {
                 sender.output(());
                 Ok(false)
+            }
+            RootMessage::ConnectDirect => {
+                let (remote_ip, remote_port) = match self.parse_direct_target() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.connection_status
+                            .set_text(format!("Invalid address: {error}"))?;
+                        return Ok(true);
+                    }
+                };
+                let endpoint: &QuicEndpoint = self._app.as_ref();
+                let endpoint = endpoint.clone();
+                let request = ConnectionRequest {
+                    requester_name: self.requester_name.clone(),
+                };
+                let connection_sender = sender.clone();
+
+                self.connect_button.set_enabled(false)?;
+                self.connection_status.set_text("Connecting...")?;
+
+                compio::runtime::spawn(async move {
+                    let result =
+                        connect_transport(&endpoint, remote_ip, remote_port, request).await;
+                    connection_sender.post(RootMessage::DirectConnectionFinished(result));
+                })
+                .detach();
+
+                Ok(true)
+            }
+            RootMessage::DirectConnectionFinished(result) => {
+                self.connect_button.set_enabled(true)?;
+
+                match result {
+                    Ok(Some(transport)) => {
+                        self.accepted_transports.push(transport);
+                        self.connection_status.set_text("Connection accepted")?;
+                    }
+                    Ok(None) => self.connection_status.set_text("Connection rejected")?,
+                    Err(error) => self
+                        .connection_status
+                        .set_text(format!("Connection failed: {error}"))?,
+                }
+
+                Ok(true)
             }
             RootMessage::ConnectionRequest(request) => {
                 let first_request = self.pending_connection_requests.is_empty();
@@ -248,6 +334,11 @@ impl Component for RootComponent {
 
     fn render(&mut self, _sender: &ComponentSender<Self>) -> eros::Result<()> {
         let size = self.window.size()?;
+        let mut direct_connection = layout! {
+            StackPanel::new(Orient::Horizontal),
+            self.direct_address_input => { grow: true },
+            self.connect_button,
+        };
         let mut actions = layout! {
             StackPanel::new(Orient::Horizontal),
             self.reject_connection_button => { grow: true },
@@ -255,6 +346,8 @@ impl Component for RootComponent {
         };
         let mut panel = layout! {
             StackPanel::new(Orient::Vertical),
+            direct_connection,
+            self.connection_status,
             self.connection_request_title,
             self.connection_request_list => { grow: true },
             actions,
