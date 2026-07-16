@@ -1,6 +1,6 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
-use crate::infra::QuicTransport;
+use crate::infra::{QuicEndpoint, QuicTransport};
 use crate::kernel::connection_request::{ConnectionRequest, ConnectionResponse};
 use bytes::{BufMut, Bytes, BytesMut};
 use eros::Context;
@@ -13,6 +13,37 @@ pub(crate) struct PendingQuicConnectionRequest {
     remote_address: SocketAddr,
     connection: compio::quic::Connection,
     response_stream: compio::quic::SendStream,
+}
+
+pub(crate) async fn connect_transport(
+    endpoint: &QuicEndpoint,
+    remote_ip: IpAddr,
+    remote_port: Option<u16>,
+    request: ConnectionRequest,
+) -> eros::Result<Option<QuicTransport>> {
+    if let Some(remote_port) = remote_port {
+        let remote_address = SocketAddr::new(remote_ip, remote_port);
+        let connection = endpoint.connect(remote_address).await?;
+
+        return request_transport(connection, request).await;
+    }
+
+    let mut last_error = None;
+
+    for remote_port in QuicEndpoint::default_ports() {
+        let remote_address = SocketAddr::new(remote_ip, remote_port);
+
+        match endpoint.connect(remote_address).await {
+            Ok(connection) => return request_transport(connection, request).await,
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    let last_error = last_error.expect("the default QUIC port range must not be empty");
+
+    Err(last_error).with_context(|| {
+        format!("Failed to connect Rabbit at any default QUIC port on {remote_ip}")
+    })
 }
 
 pub(crate) async fn request_transport(

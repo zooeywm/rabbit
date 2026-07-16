@@ -8,7 +8,7 @@ mod transport;
 pub(crate) mod unsync_queue;
 
 pub(crate) use connection_request::{
-    PendingQuicConnectionRequest, receive_request, request_transport,
+    PendingQuicConnectionRequest, connect_transport, receive_request,
 };
 pub(crate) use platform::{
     NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_screen_layout_manager_state,

@@ -1,6 +1,7 @@
 use std::{
     io::ErrorKind,
     net::{IpAddr, Ipv6Addr, SocketAddr},
+    ops::RangeInclusive,
 };
 
 use eros::Context;
@@ -44,6 +45,10 @@ impl QuicEndpoint {
             .endpoint
             .local_addr()
             .with_context(|| "Failed to read QUIC endpoint local address")?)
+    }
+
+    pub(crate) fn default_ports() -> RangeInclusive<u16> {
+        BASE_PORT..=LAST_PORT
     }
 
     pub(crate) async fn connect(
