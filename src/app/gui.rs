@@ -1,4 +1,7 @@
-use std::{collections::HashMap, net::{IpAddr, SocketAddr}};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+};
 
 use eros::Context;
 use tracing::{error, info, warn};
@@ -34,6 +37,8 @@ pub(crate) struct RootComponent {
     direct_address_input: Child<Edit>,
     connect_button: Child<Button>,
     connection_status: Child<Label>,
+    remote_screen_title: Child<Label>,
+    remote_screen_list: Child<ListBox>,
     requester_name: String,
     connection_request_title: Child<Label>,
     connection_request_list: Child<ListBox>,
@@ -79,9 +84,42 @@ impl RootComponent {
         });
     }
 
-    fn remove_session(&mut self, id: SessionId) {
+    fn remove_session(&mut self, id: SessionId) -> eros::Result<()> {
         self.sessions.retain(|session| session.send.id() != id);
         self.remote_screens.remove(&id);
+        self.refresh_remote_screen_list()
+    }
+
+    fn refresh_remote_screen_list(&mut self) -> eros::Result<()> {
+        let mut entries = self
+            .remote_screens
+            .iter()
+            .flat_map(|(session_id, screens)| {
+                screens.iter().map(|screen| {
+                    (
+                        session_id.0,
+                        screen.id.0,
+                        format!(
+                            "Session {} - {}: {} ({}x{})",
+                            session_id.0,
+                            screen.id.0,
+                            screen.name,
+                            screen.layout.rect.width,
+                            screen.layout.rect.height
+                        ),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        entries.sort_by_key(|(session_id, screen_id, _)| (*session_id, *screen_id));
+        self.remote_screen_list
+            .set_items(entries.into_iter().map(|(_, _, entry)| entry))?;
+        let visible = !self.remote_screen_list.is_empty()?;
+        self.remote_screen_title.set_visible(visible)?;
+        self.remote_screen_list.set_visible(visible)?;
+
+        Ok(())
     }
 
     fn next_session_id(&mut self) -> eros::Result<SessionId> {
@@ -185,6 +223,12 @@ impl Component for RootComponent {
         connect_button.set_text("Connect")?;
         let mut connection_status = Child::<Label>::init(&window).await?;
         connection_status.set_text(format!("Listening on UDP {}", local_address.port()))?;
+        let mut remote_screen_title = Child::<Label>::init(&window).await?;
+        remote_screen_title.set_text("Remote screens")?;
+        remote_screen_title.set_visible(false)?;
+        let mut remote_screen_list = Child::<ListBox>::init(&window).await?;
+        remote_screen_list.set_multiple(false)?;
+        remote_screen_list.set_visible(false)?;
         let mut connection_request_title = Child::<Label>::init(&window).await?;
         connection_request_title.set_text("Pending connection requests")?;
         connection_request_title.set_visible(false)?;
@@ -205,6 +249,8 @@ impl Component for RootComponent {
             direct_address_input,
             connect_button,
             connection_status,
+            remote_screen_title,
+            remote_screen_list,
             requester_name,
             connection_request_title,
             connection_request_list,
@@ -247,6 +293,8 @@ impl Component for RootComponent {
         changed |= self.direct_address_input.update().await?;
         changed |= self.connect_button.update().await?;
         changed |= self.connection_status.update().await?;
+        changed |= self.remote_screen_title.update().await?;
+        changed |= self.remote_screen_list.update().await?;
         changed |= self.connection_request_title.update().await?;
         changed |= self.connection_request_list.update().await?;
         changed |= self.accept_connection_button.update().await?;
@@ -407,6 +455,7 @@ impl Component for RootComponent {
                             screens.len()
                         ))?;
                         self.remote_screens.insert(id, screens);
+                        self.refresh_remote_screen_list()?;
                     }
                     message => {
                         warn!(session_id = id.0, ?message, "Session message is not handled yet")
@@ -416,13 +465,13 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::SessionClosed(id) => {
-                self.remove_session(id);
+                self.remove_session(id)?;
                 self.connection_status
                     .set_text(format!("Session {} closed", id.0))?;
                 Ok(true)
             }
             RootMessage::SessionFailed(id, error) => {
-                self.remove_session(id);
+                self.remove_session(id)?;
                 error!(session_id = id.0, %error, "Session receive loop failed");
                 self.connection_status
                     .set_text(format!("Session {} failed: {error}", id.0))?;
@@ -447,6 +496,8 @@ impl Component for RootComponent {
             StackPanel::new(Orient::Vertical),
             direct_connection,
             self.connection_status,
+            self.remote_screen_title,
+            self.remote_screen_list => { grow: true },
             self.connection_request_title,
             self.connection_request_list => { grow: true },
             actions,
