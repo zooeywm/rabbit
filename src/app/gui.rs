@@ -10,8 +10,9 @@ use winio::prelude::*;
 use crate::{
     app::{App, config::Config, init_logging},
     infra::{
-        NiriScreenLayoutManagerState, PendingQuicConnectionRequest, QuicEndpoint,
-        QuicTransport, QuicTransportSend, RayonThreadPoolState, connect_transport,
+        KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
+        PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportSend,
+        RayonThreadPoolState, connect_transport, create_screen_capture_manager_state,
         create_screen_layout_manager_state, receive_request,
     },
     kernel::{
@@ -36,7 +37,7 @@ struct RunningSession {
 }
 
 pub(crate) struct RootComponent {
-    _app: App<NiriScreenLayoutManagerState>,
+    _app: App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState>,
     window: Child<Window>,
     direct_address_input: Child<Edit>,
     connect_button: Child<Button>,
@@ -251,6 +252,7 @@ impl Component for RootComponent {
         init_logging(&config)?;
         let screen_layout_manager_state = create_screen_layout_manager_state()
             .context("Failed to create the screen layout manager state")?;
+        let screen_capture_manager_state = create_screen_capture_manager_state();
         let rayon_thread_pool_state =
             RayonThreadPoolState::new().context("Failed to create the Rayon thread pool state")?;
         let quic_endpoint = QuicEndpoint::new()
@@ -264,6 +266,7 @@ impl Component for RootComponent {
         let mut app = App::new(
             config,
             screen_layout_manager_state,
+            screen_capture_manager_state,
             rayon_thread_pool_state,
             quic_endpoint.clone(),
         );

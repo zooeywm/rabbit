@@ -16,31 +16,37 @@ pub(crate) use gui::RootComponent;
 pub(crate) use logging::init_logging;
 
 /// Root application state and dependency container.
-pub struct App<ScreenLayoutManagerState> {
+pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState> {
     config: Config,
     screen_layout_manager_state: ScreenLayoutManagerState,
+    screen_capture_manager_state: ScreenCaptureManagerState,
     rayon_thread_pool_state: RayonThreadPoolState,
     quic_endpoint: QuicEndpoint,
 }
 
-impl<ScreenLayoutManagerState> App<ScreenLayoutManagerState> {
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
+    App<ScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     /// Creates the application and all persistent application services.
     pub(crate) fn new(
         config: Config,
         screen_layout_manager_state: ScreenLayoutManagerState,
+        screen_capture_manager_state: ScreenCaptureManagerState,
         rayon_thread_pool_state: RayonThreadPoolState,
         quic_endpoint: QuicEndpoint,
     ) -> Self {
         Self {
             config,
             screen_layout_manager_state,
+            screen_capture_manager_state,
             rayon_thread_pool_state,
             quic_endpoint,
         }
     }
 }
 
-impl<ScreenLayoutManagerState> App<ScreenLayoutManagerState>
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
+    App<ScreenLayoutManagerState, ScreenCaptureManagerState>
 where
     Self: ScreenLayoutManager,
 {

@@ -2,13 +2,15 @@ use super::{App, config::Config};
 
 use crate::{
     infra::{
-        NiriScreenLayoutManager, NiriScreenLayoutManagerState, QuicEndpoint, RayonThreadPool,
-        RayonThreadPoolState,
+        KmsScreenCaptureManagerState, NiriScreenLayoutManager,
+        NiriScreenLayoutManagerState, QuicEndpoint, RayonThreadPool, RayonThreadPoolState,
     },
     kernel::screen_manager::{Screen, ScreenId, ScreenLayoutManager},
 };
 
-impl<ScreenLayoutManagerState> App<ScreenLayoutManagerState> {
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
+    App<ScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     pub(crate) fn spawn_cpu<Task, Output>(
         &self,
         task: Task,
@@ -21,37 +23,49 @@ impl<ScreenLayoutManagerState> App<ScreenLayoutManagerState> {
     }
 }
 
-impl<ScreenLayoutManagerState> AsRef<Config> for App<ScreenLayoutManagerState> {
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsRef<Config>
+    for App<ScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     fn as_ref(&self) -> &Config {
         &self.config
     }
 }
 
-impl<ScreenLayoutManagerState> AsRef<RayonThreadPoolState> for App<ScreenLayoutManagerState> {
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsRef<RayonThreadPoolState>
+    for App<ScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     fn as_ref(&self) -> &RayonThreadPoolState {
         &self.rayon_thread_pool_state
     }
 }
 
-impl<ScreenLayoutManagerState> AsRef<QuicEndpoint> for App<ScreenLayoutManagerState> {
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsRef<QuicEndpoint>
+    for App<ScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     fn as_ref(&self) -> &QuicEndpoint {
         &self.quic_endpoint
     }
 }
 
-impl AsRef<NiriScreenLayoutManagerState> for App<NiriScreenLayoutManagerState> {
+impl<ScreenCaptureManagerState> AsRef<NiriScreenLayoutManagerState>
+    for App<NiriScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     fn as_ref(&self) -> &NiriScreenLayoutManagerState {
         &self.screen_layout_manager_state
     }
 }
 
-impl AsMut<NiriScreenLayoutManagerState> for App<NiriScreenLayoutManagerState> {
+impl<ScreenCaptureManagerState> AsMut<NiriScreenLayoutManagerState>
+    for App<NiriScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     fn as_mut(&mut self) -> &mut NiriScreenLayoutManagerState {
         &mut self.screen_layout_manager_state
     }
 }
 
-impl ScreenLayoutManager for App<NiriScreenLayoutManagerState> {
+impl<ScreenCaptureManagerState> ScreenLayoutManager
+    for App<NiriScreenLayoutManagerState, ScreenCaptureManagerState>
+{
     fn refresh(&mut self) -> eros::Result<()> {
         NiriScreenLayoutManager::inj_ref_mut(self).refresh()
     }
@@ -66,5 +80,21 @@ impl ScreenLayoutManager for App<NiriScreenLayoutManagerState> {
 
     fn primary_screen(&self) -> eros::Result<&Screen> {
         NiriScreenLayoutManager::inj_ref(self).primary_screen()
+    }
+}
+
+impl<ScreenLayoutManagerState> AsRef<KmsScreenCaptureManagerState>
+    for App<ScreenLayoutManagerState, KmsScreenCaptureManagerState>
+{
+    fn as_ref(&self) -> &KmsScreenCaptureManagerState {
+        &self.screen_capture_manager_state
+    }
+}
+
+impl<ScreenLayoutManagerState> AsMut<KmsScreenCaptureManagerState>
+    for App<ScreenLayoutManagerState, KmsScreenCaptureManagerState>
+{
+    fn as_mut(&mut self) -> &mut KmsScreenCaptureManagerState {
+        &mut self.screen_capture_manager_state
     }
 }
