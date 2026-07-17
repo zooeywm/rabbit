@@ -33,6 +33,13 @@ impl GStreamerVideoEncoder {
     fn select_hardware_h264_encoder(
         input_caps: &gstreamer::CapsRef,
     ) -> eros::Result<gstreamer::ElementFactory> {
+        if !Self::is_nv12_dmabuf_input_caps(input_caps) {
+            eros::bail!(
+                "First-version H.264 encoding requires NV12 DMA-BUF input caps, got {}",
+                input_caps
+            );
+        }
+
         let factory = Self::find_hardware_h264_encoders()?
             .into_iter()
             .find(|factory| factory.can_sink_all_caps(input_caps));
@@ -45,6 +52,24 @@ impl GStreamerVideoEncoder {
         };
 
         Ok(factory)
+    }
+
+    fn is_nv12_dmabuf_input_caps(caps: &gstreamer::CapsRef) -> bool {
+        if caps.size() != 1 {
+            return false;
+        }
+
+        let Some((structure, features)) = caps.iter_with_features().next() else {
+            return false;
+        };
+
+        features.contains("memory:DMABuf")
+            && structure
+                .get::<&str>("format")
+                .is_ok_and(|format| format == "DMA_DRM")
+            && structure
+                .get::<&str>("drm-format")
+                .is_ok_and(|format| format == "NV12" || format.starts_with("NV12:"))
     }
 }
 
@@ -83,10 +108,10 @@ mod tests {
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
-    fn selects_a_hardware_h264_encoder_for_dmabuf_input() {
+    fn selects_a_hardware_h264_encoder_for_nv12_dmabuf_input() {
         let _encoder = GStreamerVideoEncoder::new()
             .expect("GStreamer should initialize before selecting an encoder");
-        let input_caps = registered_dmabuf_input_caps();
+        let input_caps = registered_nv12_dmabuf_input_caps();
         let factory = GStreamerVideoEncoder::select_hardware_h264_encoder(&input_caps)
             .expect("A hardware H.264 encoder should accept its advertised DMA-BUF input caps");
 
@@ -94,19 +119,39 @@ mod tests {
         assert!(factory.can_src_any_caps(&h264_caps()));
     }
 
-    fn registered_dmabuf_input_caps() -> gstreamer::Caps {
-        let dmabuf_caps = gstreamer::Caps::builder("video/x-raw")
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn rejects_p010_dmabuf_input() {
+        let _encoder = GStreamerVideoEncoder::new()
+            .expect("GStreamer should initialize before validating encoder input caps");
+        let input_caps = gstreamer::Caps::builder("video/x-raw")
             .features(["memory:DMABuf"])
+            .field("format", "DMA_DRM")
+            .field("drm-format", "P010")
             .build();
 
+        GStreamerVideoEncoder::select_hardware_h264_encoder(&input_caps)
+            .expect_err("The first-version encoder should reject P010 input");
+    }
+
+    fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
         GStreamerVideoEncoder::find_hardware_h264_encoders()
             .expect("At least one hardware H.264 encoder should be registered")
             .into_iter()
             .flat_map(|factory| factory.static_pad_templates())
             .filter(|template| template.direction() == gstreamer::PadDirection::Sink)
-            .map(|template| template.caps().intersect(&dmabuf_caps))
-            .find(|caps| !caps.is_empty())
-            .expect("A hardware H.264 encoder should advertise DMA-BUF input caps")
+            .find_map(|template| {
+                let caps = template.caps();
+
+                caps.iter_with_features()
+                    .map(|(structure, features)| {
+                        gstreamer::Caps::builder_full()
+                            .structure_with_features(structure.to_owned(), features.to_owned())
+                            .build()
+                    })
+                    .find(|caps| GStreamerVideoEncoder::is_nv12_dmabuf_input_caps(caps))
+            })
+            .expect("A hardware H.264 encoder should advertise NV12 DMA-BUF input caps")
     }
 
     fn h264_caps() -> gstreamer::Caps {
