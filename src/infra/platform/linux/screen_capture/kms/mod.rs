@@ -3,8 +3,15 @@ use std::collections::{HashMap, hash_map::Entry};
 use eros::Context;
 
 use crate::{
-    infra::platform::screen_capture::kms::worker::KmsCaptureWorker,
-    kernel::screen_manager::{ScreenId, ScreenLayoutManager},
+    infra::platform::screen_capture::kms::{
+        subscription::{KmsFramePublisher, KmsFrameSubscription},
+        types::{DmaBufFrame, KmsPlaneIssue},
+        worker::KmsCaptureWorker,
+    },
+    kernel::{
+        screen_capture::ScreenCaptureManager,
+        screen_manager::{ScreenId, ScreenLayoutManager},
+    },
 };
 
 mod capture;
@@ -23,13 +30,19 @@ mod worker;
 #[derive(Debug, kudi::DepInj)]
 #[target(KmsScreenCaptureManager)]
 pub(crate) struct KmsScreenCaptureManagerState {
-    workers: HashMap<ScreenId, KmsCaptureWorker>,
+    sources: HashMap<ScreenId, KmsCaptureSource>,
+}
+
+#[derive(Debug)]
+struct KmsCaptureSource {
+    worker: KmsCaptureWorker,
+    frames: KmsFramePublisher,
 }
 
 impl KmsScreenCaptureManagerState {
     pub(crate) fn new() -> Self {
         Self {
-            workers: HashMap::new(),
+            sources: HashMap::new(),
         }
     }
 }
@@ -40,7 +53,7 @@ where
         + AsMut<KmsScreenCaptureManagerState>
         + ScreenLayoutManager,
 {
-    pub(crate) fn worker(&mut self, screen_id: &ScreenId) -> eros::Result<&mut KmsCaptureWorker> {
+    fn source(&mut self, screen_id: &ScreenId) -> eros::Result<&mut KmsCaptureSource> {
         let screen_name = self
             .prj_ref()
             .screen(screen_id)
@@ -48,16 +61,34 @@ where
             .name
             .clone();
 
-        match self.workers.entry(*screen_id) {
+        match self.sources.entry(*screen_id) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
             Entry::Vacant(entry) => {
                 let context =
                     format!("Failed to start KMS capture worker for screen {screen_name}");
                 let worker = KmsCaptureWorker::new(screen_name).with_context(|| context)?;
 
-                Ok(entry.insert(worker))
+                Ok(entry.insert(KmsCaptureSource {
+                    worker,
+                    frames: KmsFramePublisher::default(),
+                }))
             }
         }
+    }
+}
+
+impl<Deps> ScreenCaptureManager for KmsScreenCaptureManager<Deps>
+where
+    Deps: AsRef<KmsScreenCaptureManagerState>
+        + AsMut<KmsScreenCaptureManagerState>
+        + ScreenLayoutManager,
+{
+    type Buffer = DmaBufFrame;
+    type Issue = KmsPlaneIssue;
+    type Subscription = KmsFrameSubscription;
+
+    fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription> {
+        Ok(self.source(screen_id)?.frames.subscribe())
     }
 }
 
@@ -69,6 +100,7 @@ mod tests {
         },
         kernel::{
             geometry::PixelSize,
+            screen_capture::ScreenCaptureManager,
             screen_manager::{
                 Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
             },
@@ -114,26 +146,23 @@ mod tests {
     }
 
     #[test]
-    fn reuses_one_worker_per_physical_screen() {
+    fn subscriptions_reuse_one_source_per_physical_screen() {
         let mut deps = TestDeps {
             capture: KmsScreenCaptureManagerState::new(),
             screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
         };
         let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
 
-        let first_worker = manager
-            .worker(&ScreenId(0))
-            .expect("first KMS worker should start") as *const _;
-        let reused_worker = manager
-            .worker(&ScreenId(0))
-            .expect("first KMS worker should be reused") as *const _;
-        let second_worker = manager
-            .worker(&ScreenId(1))
-            .expect("second KMS worker should start") as *const _;
+        let _first = manager
+            .subscribe(&ScreenId(0))
+            .expect("first KMS subscription should start");
+        let _second = manager
+            .subscribe(&ScreenId(0))
+            .expect("second KMS subscription should reuse the source");
 
-        assert_eq!(first_worker, reused_worker);
-        assert_ne!(first_worker, second_worker);
-        assert_eq!(manager.workers.len(), 2);
+        assert_eq!(manager.sources.len(), 1);
+        assert!(manager.subscribe(&ScreenId(2)).is_err());
+        assert_eq!(manager.sources.len(), 1);
     }
 
     fn screen(id: u8, name: &str) -> Screen {
