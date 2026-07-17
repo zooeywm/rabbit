@@ -1,3 +1,4 @@
+mod device;
 mod types;
 
 #[derive(Debug, kudi::DepInj)]
