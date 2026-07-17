@@ -114,10 +114,10 @@ struct WireScreenStreamRequest {
 struct WireSetScreenStreams {
     request_id: u32,
     #[br(temp)]
-    #[bw(try_calc(u8::try_from(changes.len())))]
-    change_count: u8,
-    #[br(count = change_count)]
-    changes: Vec<WireScreenStreamRequest>,
+    #[bw(try_calc(u8::try_from(desired_streams.len())))]
+    desired_stream_count: u8,
+    #[br(count = desired_stream_count)]
+    desired_streams: Vec<WireScreenStreamRequest>,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -320,7 +320,11 @@ impl From<SetScreenStreams> for WireSetScreenStreams {
     fn from(request: SetScreenStreams) -> Self {
         Self {
             request_id: request.request_id.0,
-            changes: request.changes.into_iter().map(Into::into).collect(),
+            desired_streams: request
+                .desired_streams
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -522,7 +526,7 @@ impl TryFrom<TransportMessage> for ControlMessage {
 
                 Self::SetScreenStreams(SetScreenStreams {
                     request_id: ScreenStreamRequestId(wire.request_id),
-                    changes: wire.changes.into_iter().map(Into::into).collect(),
+                    desired_streams: wire.desired_streams.into_iter().map(Into::into).collect(),
                 })
             }
             WireControlMessageTag::ScreenStreamsConfigured => {

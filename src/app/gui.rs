@@ -79,28 +79,28 @@ impl RootComponent {
     fn configure_preserved_screens(&self, request: SetScreenStreams) -> ScreenStreamsConfigured {
         let SetScreenStreams {
             request_id,
-            changes,
+            desired_streams,
         } = request;
-        let outcomes = changes
+        let outcomes = desired_streams
             .into_iter()
-            .map(|change| {
-                let status = match self._app.screen(&change.screen_id) {
-                    Some(screen) => match change.remote_display {
+            .map(|desired_stream| {
+                let status = match self._app.screen(&desired_stream.screen_id) {
+                    Some(screen) => match desired_stream.remote_display {
                         RemoteDisplayMode::Preserve => {
                             ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
-                                requested: change.frame_size,
+                                requested: desired_stream.frame_size,
                                 actual: screen.resolution,
                             })
                         }
                     },
                     None => ScreenResolutionStatus::Failed {
-                        requested: change.frame_size,
+                        requested: desired_stream.frame_size,
                         actual: None,
                     },
                 };
 
                 ScreenResolutionOutcome {
-                    screen_id: change.screen_id,
+                    screen_id: desired_stream.screen_id,
                     status,
                 }
             })

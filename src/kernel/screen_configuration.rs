@@ -6,7 +6,7 @@ pub struct ScreenStreamRequestId(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetScreenStreams {
     pub request_id: ScreenStreamRequestId,
-    pub changes: Vec<ScreenStreamRequest>,
+    pub desired_streams: Vec<ScreenStreamRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
