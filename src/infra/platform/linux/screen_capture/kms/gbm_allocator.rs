@@ -103,7 +103,7 @@ impl GbmFrameAllocator {
             planes,
             mut issues,
         } = snapshot;
-        let frame = self.allocate_composition_target(output_size)?;
+        let mut frame = self.allocate_composition_target(output_size)?;
         let image = self.egl.import_composition_target(&frame)?;
         let target = self
             .egl
@@ -137,7 +137,11 @@ impl GbmFrameAllocator {
                 .with_context(|| format!("Failed to compose KMS plane {:?}", plane.id))?;
         }
 
-        self.egl.finish_composition()?;
+        frame.readiness_fence = Some(
+            self.egl
+                .finish_composition()
+                .with_context(|| "Failed to export KMS composition readiness")?,
+        );
 
         Ok(CapturedFrame {
             buffer: frame,

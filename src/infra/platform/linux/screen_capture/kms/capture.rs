@@ -74,5 +74,6 @@ mod tests {
         assert!(frame.buffer.size.height > 0);
         assert!(!frame.buffer.objects.is_empty());
         assert!(!frame.buffer.planes.is_empty());
+        assert!(frame.buffer.readiness_fence.is_some());
     }
 }

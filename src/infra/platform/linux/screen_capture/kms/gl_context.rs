@@ -367,12 +367,12 @@ impl GlContext {
         Ok(())
     }
 
-    pub(crate) fn finish_composition(&self) -> eros::Result<()> {
-        unsafe { self.api.finish() };
+    pub(crate) fn flush_composition(&self) -> eros::Result<()> {
+        unsafe { self.api.flush() };
 
         let error = unsafe { self.api.get_error() };
         if error != glow::NO_ERROR {
-            eros::bail!("Failed to finish KMS composition: GL error 0x{:04X}", error);
+            eros::bail!("Failed to flush KMS composition: GL error 0x{:04X}", error);
         }
 
         Ok(())

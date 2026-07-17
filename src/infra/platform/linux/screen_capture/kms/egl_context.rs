@@ -1,7 +1,7 @@
 use std::{
     ffi::{CStr, c_void},
     marker::PhantomData,
-    os::fd::AsRawFd as _,
+    os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
     ptr,
     rc::Rc,
 };
@@ -15,9 +15,11 @@ use crate::infra::platform::screen_capture::kms::{
     composition::KmsCompositionTransform,
     egl_ext::{
         DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
-        DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, ITU_REC601_EXT, ITU_REC709_EXT,
-        ITU_REC2020_EXT, LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT, PLATFORM_GBM_KHR,
-        SAMPLE_RANGE_HINT_EXT, YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
+        DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, DupNativeFenceFdAndroid, ITU_REC601_EXT,
+        ITU_REC709_EXT, ITU_REC2020_EXT, LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT,
+        NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR, SAMPLE_RANGE_HINT_EXT,
+        SYNC_NATIVE_FENCE_ANDROID, YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT,
+        YUV_NARROW_RANGE_EXT,
     },
     gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
     types::{
@@ -31,6 +33,7 @@ pub(crate) struct EglContext {
     display: egl::Display,
     context: egl::Context,
     gl: GlContext,
+    dup_native_fence_fd: DupNativeFenceFdAndroid,
     supports_modifiers: bool,
     thread_affinity: PhantomData<Rc<()>>,
 }
@@ -81,7 +84,7 @@ impl EglContext {
             .initialize(display)
             .with_context(|| "Failed to initialize the GBM EGL display")?;
 
-        let (context, gl, supports_modifiers) =
+        let (context, gl, dup_native_fence_fd, supports_modifiers) =
             match initialize_context(&instance, display, version) {
                 Ok(initialized) => initialized,
                 Err(error) => {
@@ -95,6 +98,7 @@ impl EglContext {
             display,
             context,
             gl,
+            dup_native_fence_fd,
             supports_modifiers,
             thread_affinity: PhantomData,
         })
@@ -253,8 +257,34 @@ impl EglContext {
         self.gl.compose_plane(target, texture, transform, blend)
     }
 
-    pub(crate) fn finish_composition(&self) -> eros::Result<()> {
-        self.gl.finish_composition()
+    pub(crate) fn finish_composition(&self) -> eros::Result<OwnedFd> {
+        let sync = unsafe {
+            self.instance
+                .create_sync(self.display, SYNC_NATIVE_FENCE_ANDROID, &[egl::ATTRIB_NONE])
+                .with_context(|| "Failed to create an EGL native fence for KMS composition")?
+        };
+
+        if let Err(error) = self.gl.flush_composition() {
+            let _ = unsafe { self.instance.destroy_sync(self.display, sync) };
+            return Err(error);
+        }
+
+        let raw_fd = unsafe { (self.dup_native_fence_fd)(self.display.as_ptr(), sync.as_ptr()) };
+        if raw_fd == NO_NATIVE_FENCE_FD_ANDROID {
+            let source = self.instance.get_error();
+            let _ = unsafe { self.instance.destroy_sync(self.display, sync) };
+            return match source {
+                Some(source) => Ok(Err(source)
+                    .with_context(|| "Failed to export the KMS composition readiness fence")?),
+                None => eros::bail!("Failed to export the KMS composition readiness fence"),
+            };
+        }
+
+        let fence = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        unsafe { self.instance.destroy_sync(self.display, sync) }
+            .with_context(|| "Failed to destroy the exported EGL native fence")?;
+
+        Ok(fence)
     }
 }
 
@@ -287,7 +317,7 @@ fn initialize_context(
     instance: &egl::DynamicInstance<egl::EGL1_5>,
     display: egl::Display,
     version: (egl::Int, egl::Int),
-) -> eros::Result<(egl::Context, GlContext, bool)> {
+) -> eros::Result<(egl::Context, GlContext, DupNativeFenceFdAndroid, bool)> {
     let extensions = instance
         .query_string(Some(display), egl::EXTENSIONS)
         .with_context(|| "Failed to query EGL display extensions")?;
@@ -298,6 +328,16 @@ fn initialize_context(
     if !has_extension(extensions, "EGL_EXT_image_dma_buf_import") {
         eros::bail!("EGL display does not support DMA-BUF image import");
     }
+    if !has_extension(extensions, "EGL_ANDROID_native_fence_sync") {
+        eros::bail!("EGL display does not support native fence synchronization");
+    }
+
+    let dup_native_fence_fd = instance
+        .get_proc_address("eglDupNativeFenceFDANDROID")
+        .with_context(|| "EGL did not provide eglDupNativeFenceFDANDROID")?;
+    let dup_native_fence_fd = unsafe {
+        std::mem::transmute::<extern "system" fn(), DupNativeFenceFdAndroid>(dup_native_fence_fd)
+    };
 
     let supports_modifiers = has_extension(extensions, "EGL_EXT_image_dma_buf_import_modifiers");
 
@@ -334,7 +374,7 @@ fn initialize_context(
         }
     };
 
-    Ok((context, gl, supports_modifiers))
+    Ok((context, gl, dup_native_fence_fd, supports_modifiers))
 }
 
 fn has_extension(extensions: &CStr, expected: &str) -> bool {
