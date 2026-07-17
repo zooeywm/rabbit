@@ -1,3 +1,5 @@
+mod types;
+
 #[derive(Debug, kudi::DepInj)]
 #[target(KmsScreenCaptureManager)]
 pub(crate) struct KmsScreenCaptureManagerState;

@@ -25,5 +25,6 @@ time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 # Linux screen layout and KMS capture backends.
 [target.'cfg(target_os = "linux")'.dependencies]
 # niri-ipc does not guarantee Rust API compatibility across version updates.
+drm = "0.15"
 niri-ipc = "26.4.0"
 winio = { version = "0.11" }
