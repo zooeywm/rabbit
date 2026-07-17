@@ -26,6 +26,9 @@ impl KmsCapturer {
     }
 
     pub(crate) fn capture(&self) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
+        self.output
+            .wait_for_vblank()
+            .with_context(|| "Failed to synchronize KMS capture with the display refresh")?;
         let snapshot = self
             .output
             .snapshot_framebuffers()

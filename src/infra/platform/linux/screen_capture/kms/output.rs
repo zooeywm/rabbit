@@ -1,6 +1,9 @@
 use std::{fs, path::PathBuf};
 
-use drm::control::{Device as _, PlaneType, connector, crtc, plane};
+use drm::{
+    Device as _, VblankWaitFlags, VblankWaitTarget,
+    control::{Device as _, PlaneType, connector, crtc, plane},
+};
 use eros::Context;
 use tracing::{error, warn};
 
@@ -24,6 +27,7 @@ pub(crate) struct KmsOutput {
     pub device: KmsDevice,
     pub connector: connector::Handle,
     pub crtc: crtc::Handle,
+    vblank_crtc_index: u32,
     planes: Vec<KmsPlane>,
 }
 
@@ -46,7 +50,9 @@ impl KmsOutput {
 
         for device_path in device_paths {
             let device = KmsDevice::open(&device_path)?;
-            let Some((connector, crtc)) = device.find_active_output(screen_name)? else {
+            let Some((connector, crtc, vblank_crtc_index)) =
+                device.find_active_output(screen_name)?
+            else {
                 continue;
             };
 
@@ -59,12 +65,32 @@ impl KmsOutput {
                 device,
                 connector,
                 crtc,
+                vblank_crtc_index,
                 planes,
             });
         }
 
         Ok(output
             .with_context(|| format!("No active DRM connector matches screen {screen_name}"))?)
+    }
+
+    pub(crate) fn wait_for_vblank(&self) -> eros::Result<()> {
+        self.device
+            .wait_vblank(
+                VblankWaitTarget::Relative(1),
+                VblankWaitFlags::empty(),
+                self.vblank_crtc_index,
+                0,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to wait for DRM CRTC {:?} vblank on {}",
+                    self.crtc,
+                    self.device.path().display()
+                )
+            })?;
+
+        Ok(())
     }
 
     pub(crate) fn snapshot_planes(&self) -> eros::Result<KmsPlaneSnapshot> {

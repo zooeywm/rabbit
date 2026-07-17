@@ -81,7 +81,7 @@ impl KmsDevice {
     pub(crate) fn find_active_output(
         &self,
         screen_name: &str,
-    ) -> eros::Result<Option<(connector::Handle, crtc::Handle)>> {
+    ) -> eros::Result<Option<(connector::Handle, crtc::Handle, u32)>> {
         let resources = self.resource_handles().with_context(|| {
             format!(
                 "Failed to enumerate DRM resources on {}",
@@ -129,12 +129,23 @@ impl KmsDevice {
                     self.path().display()
                 )
             })?;
+            let crtc_index = vblank_crtc_index(resources.crtcs(), crtc_handle)?;
 
-            return Ok(Some((connector.handle(), crtc_handle)));
+            return Ok(Some((connector.handle(), crtc_handle, crtc_index)));
         }
 
         Ok(None)
     }
+}
+
+fn vblank_crtc_index(crtcs: &[crtc::Handle], target: crtc::Handle) -> eros::Result<u32> {
+    let index = crtcs
+        .iter()
+        .position(|crtc| *crtc == target)
+        .with_context(|| format!("DRM CRTC {target:?} is missing from device resources"))?;
+
+    Ok(u32::try_from(index)
+        .with_context(|| format!("DRM CRTC {target:?} has an invalid vblank pipe index"))?)
 }
 
 impl AsFd for KmsDevice {
@@ -146,3 +157,27 @@ impl AsFd for KmsDevice {
 impl drm::Device for KmsDevice {}
 
 impl drm::control::Device for KmsDevice {}
+
+#[cfg(test)]
+mod tests {
+    use drm::control::{crtc, from_u32};
+
+    use crate::infra::platform::screen_capture::kms::device::vblank_crtc_index;
+
+    #[test]
+    fn resolves_the_vblank_pipe_index_from_resource_order() {
+        let first = crtc(10);
+        let second = crtc(20);
+
+        assert_eq!(
+            vblank_crtc_index(&[first, second], second)
+                .expect("second CRTC should have a vblank pipe index"),
+            1
+        );
+        assert!(vblank_crtc_index(&[first], second).is_err());
+    }
+
+    fn crtc(raw: u32) -> crtc::Handle {
+        from_u32(raw).expect("test CRTC handle should be non-zero")
+    }
+}
