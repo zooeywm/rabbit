@@ -4,13 +4,15 @@ set -eu
 
 : "${RABBIT_KMS_SCREEN:?Set RABBIT_KMS_SCREEN to the DRM connector name}"
 
-build_output=$(cargo test --lib --no-run 2>&1)
-printf '%s\n' "$build_output"
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+
+cargo test --color=always --lib --no-run 2>&1 | tee "$tmp"
 
 test_binary=$(
-    printf '%s\n' "$build_output" |
-        sed -n 's/^  Executable unittests src\/lib.rs (\(.*\))$/\1/p' |
-        tail -n 1
+    sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' "$tmp" |
+    sed -n 's/^  Executable unittests src\/lib.rs (\(.*\))$/\1/p' |
+    tail -n 1
 )
 
 if [ -z "$test_binary" ]; then
@@ -19,6 +21,7 @@ if [ -z "$test_binary" ]; then
 fi
 
 sudo setcap cap_sys_admin+ep "$test_binary"
+
 exec "$test_binary" \
     infra::platform::screen_capture::kms::capture::tests::captures_one_composed_frame \
     --exact \
