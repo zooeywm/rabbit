@@ -7,8 +7,9 @@ use crate::infra::platform::screen_capture::{
     device::KmsDevice,
         types::{
             KmsActivePlane, KmsDestinationRect, KmsPlaneCaptureError,
-            KmsPlaneIssue, KmsPlanePlacement, KmsPlaneSnapshot,
-            KmsPlaneTransform, KmsRotation, KmsSourceRect,
+            KmsPixelBlendMode, KmsPlaneBlend, KmsPlaneIssue,
+            KmsPlanePlacement, KmsPlaneSnapshot, KmsPlaneTransform,
+            KmsRotation, KmsSourceRect,
         },
 };
 
@@ -104,6 +105,7 @@ impl KmsOutput {
                 plane_type: properties.plane_type,
                 framebuffer,
                 placement,
+                blend: properties.blend,
             });
         }
 
@@ -139,6 +141,10 @@ fn query_plane_properties(
             b"CRTC_W" => values.destination_width = Some(*value),
             b"CRTC_H" => values.destination_height = Some(*value),
             b"rotation" => values.rotation = Some(*value),
+            b"alpha" => values.alpha = Some(*value),
+            b"pixel blend mode" => {
+                values.pixel_blend_mode = Some(pixel_blend_mode(&property, *value)?);
+            }
             _ => {}
         }
     }
@@ -159,11 +165,14 @@ struct RawPlaneProperties {
     destination_width: Option<u64>,
     destination_height: Option<u64>,
     rotation: Option<u64>,
+    alpha: Option<u64>,
+    pixel_blend_mode: Option<KmsPixelBlendMode>,
 }
 
 struct KmsPlaneProperties {
     plane_type: PlaneType,
     placement: Option<KmsPlanePlacement>,
+    blend: KmsPlaneBlend,
 }
 
 impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
@@ -199,6 +208,19 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             Some(rotation) => KmsPlaneTransform::try_from(rotation)?,
             None => KmsPlaneTransform::default(),
         };
+        let alpha = match values.alpha {
+            Some(alpha) => u16::try_from(alpha).map_err(|_| {
+                KmsPlaneCaptureError::InvalidProperty {
+                    property: "alpha",
+                    value: alpha,
+                }
+            })?,
+            None => u16::MAX,
+        };
+        let blend = KmsPlaneBlend {
+            alpha,
+            pixel_mode: values.pixel_blend_mode.unwrap_or_default(),
+        };
 
         let placement = if source.width == 0
             || source.height == 0
@@ -218,7 +240,31 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
         Ok(Self {
             plane_type,
             placement,
+            blend,
         })
+    }
+}
+
+fn pixel_blend_mode(
+    property: &drm::control::property::Info,
+    value: u64,
+) -> Result<KmsPixelBlendMode, KmsPlaneCaptureError> {
+    let converted = property.value_type().convert_value(value);
+    let Some(value_name) = converted.as_enum() else {
+        return Err(KmsPlaneCaptureError::InvalidProperty {
+            property: "pixel blend mode",
+            value,
+        });
+    };
+
+    match value_name.name().to_bytes() {
+        b"None" => Ok(KmsPixelBlendMode::None),
+        b"Pre-multiplied" => Ok(KmsPixelBlendMode::PreMultiplied),
+        b"Coverage" => Ok(KmsPixelBlendMode::Coverage),
+        _ => Err(KmsPlaneCaptureError::InvalidProperty {
+            property: "pixel blend mode",
+            value,
+        }),
     }
 }
 

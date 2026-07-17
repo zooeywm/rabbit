@@ -89,6 +89,7 @@ pub(crate) struct KmsActivePlane {
     pub plane_type: PlaneType,
     pub framebuffer: framebuffer::Handle,
     pub placement: KmsPlanePlacement,
+    pub blend: KmsPlaneBlend,
 }
 
 #[derive(Debug)]
@@ -103,6 +104,7 @@ pub(crate) struct KmsFramebufferPlane {
     pub plane_type: PlaneType,
     pub buffer: DmaBufFrame,
     pub placement: KmsPlanePlacement,
+    pub blend: KmsPlaneBlend,
 }
 
 #[derive(Debug)]
@@ -150,4 +152,27 @@ pub(crate) enum KmsRotation {
     Rotate90,
     Rotate180,
     Rotate270,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KmsPlaneBlend {
+    pub alpha: u16,
+    pub pixel_mode: KmsPixelBlendMode,
+}
+
+impl Default for KmsPlaneBlend {
+    fn default() -> Self {
+        Self {
+            alpha: u16::MAX,
+            pixel_mode: KmsPixelBlendMode::PreMultiplied,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KmsPixelBlendMode {
+    None,
+    #[default]
+    PreMultiplied,
+    Coverage,
 }
