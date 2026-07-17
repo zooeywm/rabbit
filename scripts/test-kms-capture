@@ -1,0 +1,26 @@
+#!/bin/sh
+
+set -eu
+
+: "${RABBIT_KMS_SCREEN:?Set RABBIT_KMS_SCREEN to the DRM connector name}"
+
+build_output=$(cargo test --lib --no-run 2>&1)
+printf '%s\n' "$build_output"
+
+test_binary=$(
+    printf '%s\n' "$build_output" |
+        sed -n 's/^  Executable unittests src\/lib.rs (\(.*\))$/\1/p' |
+        tail -n 1
+)
+
+if [ -z "$test_binary" ]; then
+    printf '%s\n' 'Failed to locate the Rabbit unit-test executable' >&2
+    exit 1
+fi
+
+sudo setcap cap_sys_admin+ep "$test_binary"
+exec "$test_binary" \
+    infra::platform::screen_capture::kms::capture::tests::captures_one_composed_frame \
+    --exact \
+    --ignored \
+    --nocapture

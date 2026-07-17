@@ -1,15 +1,65 @@
-pub(crate) fn capture_one_frame() -> eros::Result<Option<()>> {
-    Ok(None)
+use eros::Context;
+
+use crate::{
+    infra::platform::screen_capture::kms::{
+        gbm_allocator::GbmFrameAllocator,
+        output::KmsOutput,
+        types::{DmaBufFrame, KmsPlaneIssue},
+    },
+    kernel::screen_capture::CapturedFrame,
+};
+
+#[derive(Debug)]
+pub(crate) struct KmsCapturer {
+    output: KmsOutput,
+    allocator: GbmFrameAllocator,
+}
+
+impl KmsCapturer {
+    pub(crate) fn new(screen_name: &str) -> eros::Result<Self> {
+        let output = KmsOutput::open(screen_name)
+            .with_context(|| format!("Failed to open KMS output {screen_name}"))?;
+        let allocator = GbmFrameAllocator::new(&output.device)
+            .with_context(|| format!("Failed to create KMS compositor for {screen_name}"))?;
+
+        Ok(Self { output, allocator })
+    }
+
+    pub(crate) fn capture(
+        &self,
+    ) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
+        let snapshot = self
+            .output
+            .snapshot_framebuffers()
+            .with_context(|| "Failed to snapshot KMS framebuffers")?;
+
+        Ok(self
+            .allocator
+            .compose(snapshot)
+            .with_context(|| "Failed to compose KMS framebuffers")?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::platform::screen_capture::kms::capture::capture_one_frame;
+    use crate::infra::platform::screen_capture::kms::capture::KmsCapturer;
 
     #[test]
-    fn empty_capture_runs() {
-        let frame = capture_one_frame().expect("KMS capture should run");
+    #[ignore = "requires a real KMS output and CAP_SYS_ADMIN"]
+    fn captures_one_composed_frame() {
+        let screen_name = std::env::var("RABBIT_KMS_SCREEN")
+            .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
+        let capturer = KmsCapturer::new(&screen_name).expect("KMS capturer should open");
+        let frame = capturer.capture().expect("KMS should capture one frame");
 
-        assert!(frame.is_none());
+        for issue in &frame.issues {
+            eprintln!("{issue}");
+        }
+        eprintln!("Captured KMS frame: {:#?}", frame.buffer);
+
+        assert!(frame.buffer.size.width > 0);
+        assert!(frame.buffer.size.height > 0);
+        assert!(!frame.buffer.objects.is_empty());
+        assert!(!frame.buffer.planes.is_empty());
     }
 }
