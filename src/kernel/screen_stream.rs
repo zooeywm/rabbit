@@ -26,7 +26,7 @@ where
         }
     }
 
-    pub async fn process_next(&mut self) -> eros::Result<Option<Encoder::Output>> {
+    pub async fn process_next(&mut self) -> eros::Result<Option<Vec<Encoder::Packet>>> {
         let Some(frame) = poll_fn(|context| Pin::new(&mut self.capture).poll_next(context)).await
         else {
             return Ok(None);
@@ -37,13 +37,13 @@ where
             .process(frame)
             .await
             .with_context(|| "Failed to process the next captured frame")?;
-        let frame = self
+        let packets = self
             .encoder
             .encode(frame)
             .await
             .with_context(|| "Failed to encode the next processed frame")?;
 
-        Ok(Some(frame))
+        Ok(Some(packets))
     }
 }
 
@@ -55,6 +55,7 @@ mod tests {
         task::{Context, Poll},
     };
 
+    use eros::Context as _;
     use futures_core::Stream;
 
     use crate::kernel::{
@@ -65,7 +66,7 @@ mod tests {
     struct ProcessedFrame(u8);
 
     #[derive(Debug, PartialEq, Eq)]
-    struct EncodedFrame(u8);
+    struct EncodedPacket(u8);
 
     struct OneFrameCapture(Option<CapturedFrame>);
 
@@ -98,40 +99,36 @@ mod tests {
 
     impl VideoEncoder for EmptyEncoder {
         type Input = ProcessedFrame;
-        type Output = EncodedFrame;
+        type Packet = EncodedPacket;
 
         fn encode(
             &mut self,
             frame: Self::Input,
-        ) -> impl Future<Output = eros::Result<Self::Output>> {
-            ready(Ok(EncodedFrame(frame.0)))
+        ) -> impl Future<Output = eros::Result<Vec<Self::Packet>>> {
+            ready(Ok(vec![EncodedPacket(frame.0), EncodedPacket(frame.0 + 1)]))
         }
     }
 
     #[test]
-    fn processes_one_captured_frame_through_the_encoder() {
+    fn processes_one_captured_frame_into_encoder_packets() -> eros::Result<()> {
         let mut stream = ScreenStream::new(
             OneFrameCapture(Some(CapturedFrame(11))),
             EmptyPipeline,
             EmptyEncoder,
         );
-        let runtime = compio::runtime::Runtime::new().expect("Compio runtime should start");
+        let runtime = compio::runtime::Runtime::new()
+            .with_context(|| "Failed to start the Compio test runtime")?;
 
         runtime.block_on(async {
             assert_eq!(
-                stream
-                    .process_next()
-                    .await
-                    .expect("screen stream should process one frame"),
-                Some(EncodedFrame(11))
+                stream.process_next().await?,
+                Some(vec![EncodedPacket(11), EncodedPacket(12)])
             );
-            assert_eq!(
-                stream
-                    .process_next()
-                    .await
-                    .expect("closed capture should not fail"),
-                None
-            );
-        });
+            assert_eq!(stream.process_next().await?, None);
+
+            Ok::<(), eros::ErrorUnion>(())
+        })?;
+
+        Ok(())
     }
 }
