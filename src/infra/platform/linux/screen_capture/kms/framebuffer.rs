@@ -4,7 +4,7 @@ use drm::{
 };
 
 use crate::{
-    infra::platform::screen_capture::{
+    infra::platform::screen_capture::kms::{
         output::KmsOutput,
         types::{
             DmaBufFrame, DmaBufObject, DmaBufPlane, KmsActivePlane,
@@ -18,6 +18,7 @@ use crate::{
 impl KmsOutput {
     pub(crate) fn snapshot_framebuffers(&self) -> eros::Result<KmsFramebufferSnapshot> {
         let KmsPlaneSnapshot {
+            output_size,
             planes: active_planes,
             mut issues,
         } = self.snapshot_planes()?;
@@ -49,7 +50,11 @@ impl KmsOutput {
             }
         }
 
-        Ok(KmsFramebufferSnapshot { planes, issues })
+        Ok(KmsFramebufferSnapshot {
+            output_size,
+            planes,
+            issues,
+        })
     }
 
     fn export_framebuffer(

@@ -2,9 +2,11 @@ use std::{fs, path::PathBuf};
 
 use drm::control::{Device as _, PlaneType, connector, crtc, plane};
 use eros::Context;
+use tracing::{error, warn};
 
-use crate::infra::platform::screen_capture::{
-    device::KmsDevice,
+use crate::{
+    infra::platform::screen_capture::kms::{
+        device::KmsDevice,
         types::{
             KmsActivePlane, KmsColorEncoding, KmsColorRange,
             KmsCursorHotspot, KmsDestinationRect, KmsPixelBlendMode,
@@ -12,6 +14,8 @@ use crate::infra::platform::screen_capture::{
             KmsPlaneIssue, KmsPlanePlacement, KmsPlaneSnapshot,
             KmsPlaneTransform, KmsRotation, KmsSourceRect,
         },
+    },
+    kernel::geometry::PixelSize,
 };
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
@@ -22,6 +26,13 @@ pub(crate) struct KmsOutput {
     pub device: KmsDevice,
     pub connector: connector::Handle,
     pub crtc: crtc::Handle,
+    planes: Vec<KmsPlane>,
+}
+
+#[derive(Debug)]
+struct KmsPlane {
+    id: plane::Handle,
+    plane_type: PlaneType,
 }
 
 impl KmsOutput {
@@ -45,10 +56,12 @@ impl KmsOutput {
                 eros::bail!("More than one active DRM connector matches screen {screen_name}");
             }
 
+            let planes = discover_planes(&device, crtc)?;
             output = Some(Self {
                 device,
                 connector,
                 crtc,
+                planes,
             });
         }
 
@@ -56,22 +69,35 @@ impl KmsOutput {
     }
 
     pub(crate) fn snapshot_planes(&self) -> eros::Result<KmsPlaneSnapshot> {
-        let plane_handles = self.device.plane_handles().with_context(|| {
+        let crtc = self.device.get_crtc(self.crtc).with_context(|| {
             format!(
-                "Failed to enumerate DRM planes on {}",
+                "Failed to query DRM CRTC {:?} on {}",
+                self.crtc,
                 self.device.path().display()
             )
         })?;
+        let mode = crtc.mode().with_context(|| {
+            format!(
+                "DRM CRTC {:?} on {} has no active mode",
+                self.crtc,
+                self.device.path().display()
+            )
+        })?;
+        let (width, height) = mode.size();
+        let output_size = PixelSize {
+            width: u32::from(width),
+            height: u32::from(height),
+        };
         let mut planes = Vec::new();
         let mut issues = Vec::new();
 
-        for plane_id in plane_handles {
-            let plane = match self.device.get_plane(plane_id) {
+        for known_plane in &self.planes {
+            let plane = match self.device.get_plane(known_plane.id) {
                 Ok(plane) => plane,
                 Err(source) => {
                     issues.push(KmsPlaneIssue {
-                        plane_id,
-                        plane_type: None,
+                        plane_id: known_plane.id,
+                        plane_type: Some(known_plane.plane_type),
                         error: KmsPlaneCaptureError::QueryPlane(source),
                     });
                     continue;
@@ -86,12 +112,12 @@ impl KmsOutput {
                 continue;
             };
 
-            let properties = match query_plane_properties(&self.device, plane_id) {
+            let properties = match query_plane_properties(&self.device, known_plane.id) {
                 Ok(properties) => properties,
                 Err(error) => {
                     issues.push(KmsPlaneIssue {
-                        plane_id,
-                        plane_type: None,
+                        plane_id: known_plane.id,
+                        plane_type: Some(known_plane.plane_type),
                         error,
                     });
                     continue;
@@ -102,7 +128,7 @@ impl KmsOutput {
             };
 
             planes.push(KmsActivePlane {
-                id: plane_id,
+                id: known_plane.id,
                 plane_type: properties.plane_type,
                 framebuffer,
                 placement,
@@ -114,8 +140,109 @@ impl KmsOutput {
 
         planes.sort_unstable_by_key(|plane| (plane.placement.zpos, u32::from(plane.id)));
 
-        Ok(KmsPlaneSnapshot { planes, issues })
+        Ok(KmsPlaneSnapshot {
+            output_size,
+            planes,
+            issues,
+        })
     }
+}
+
+fn discover_planes(device: &KmsDevice, crtc: crtc::Handle) -> eros::Result<Vec<KmsPlane>> {
+    let resources = device.resource_handles().with_context(|| {
+        format!(
+            "Failed to enumerate DRM resources on {}",
+            device.path().display()
+        )
+    })?;
+    let plane_handles = device.plane_handles().with_context(|| {
+        format!(
+            "Failed to enumerate DRM planes on {}",
+            device.path().display()
+        )
+    })?;
+    let mut planes = Vec::new();
+
+    for plane_id in plane_handles {
+        let plane = match device.get_plane(plane_id) {
+            Ok(plane) => plane,
+            Err(source) => {
+                let error = KmsPlaneCaptureError::QueryPlane(source);
+                error!(
+                    ?plane_id,
+                    ?crtc,
+                    device = %device.path().display(),
+                    %error,
+                    "Skipping DRM plane after discovery failed"
+                );
+                continue;
+            }
+        };
+
+        if !resources
+            .filter_crtcs(plane.possible_crtcs())
+            .contains(&crtc)
+        {
+            continue;
+        }
+
+        let plane_type = match query_plane_type(device, plane_id) {
+            Ok(plane_type) => plane_type,
+            Err(error) => {
+                error!(
+                    ?plane_id,
+                    ?crtc,
+                    device = %device.path().display(),
+                    %error,
+                    "Skipping DRM plane after type discovery failed"
+                );
+                continue;
+            }
+        };
+
+        planes.push(KmsPlane {
+            id: plane_id,
+            plane_type,
+        });
+    }
+
+    for (plane_type, name) in [
+        (PlaneType::Primary, "primary"),
+        (PlaneType::Overlay, "overlay"),
+        (PlaneType::Cursor, "cursor"),
+    ] {
+        if !planes.iter().any(|plane| plane.plane_type == plane_type) {
+            warn!(
+                ?crtc,
+                device = %device.path().display(),
+                plane_type = name,
+                "DRM output does not expose this plane type; it will not be probed"
+            );
+        }
+    }
+
+    Ok(planes)
+}
+
+fn query_plane_type(
+    device: &KmsDevice,
+    plane_id: plane::Handle,
+) -> Result<PlaneType, KmsPlaneCaptureError> {
+    let properties = device
+        .get_properties(plane_id)
+        .map_err(KmsPlaneCaptureError::QueryProperties)?;
+
+    for (property_id, value) in properties.iter() {
+        let property = device
+            .get_property(*property_id)
+            .map_err(KmsPlaneCaptureError::QueryProperties)?;
+
+        if property.name().to_bytes() == b"type" {
+            return plane_type(*value);
+        }
+    }
+
+    Err(KmsPlaneCaptureError::MissingProperty { property: "type" })
 }
 
 fn query_plane_properties(
@@ -196,18 +323,7 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
     type Error = KmsPlaneCaptureError;
 
     fn try_from(values: RawPlaneProperties) -> Result<Self, Self::Error> {
-        let plane_type = required(values.plane_type, "type")?;
-        let plane_type = match plane_type {
-            value if value == u64::from(PlaneType::Primary as u32) => PlaneType::Primary,
-            value if value == u64::from(PlaneType::Overlay as u32) => PlaneType::Overlay,
-            value if value == u64::from(PlaneType::Cursor as u32) => PlaneType::Cursor,
-            value => {
-                return Err(KmsPlaneCaptureError::InvalidProperty {
-                    property: "type",
-                    value,
-                });
-            }
-        };
+        let plane_type = plane_type(required(values.plane_type, "type")?)?;
         let zpos = required(values.zpos, "zpos")?;
         let source = KmsSourceRect {
             x: unsigned_32(values.source_x, "SRC_X")?,
@@ -305,6 +421,18 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             color,
             cursor_hotspot,
         })
+    }
+}
+
+fn plane_type(value: u64) -> Result<PlaneType, KmsPlaneCaptureError> {
+    match value {
+        value if value == u64::from(PlaneType::Primary as u32) => Ok(PlaneType::Primary),
+        value if value == u64::from(PlaneType::Overlay as u32) => Ok(PlaneType::Overlay),
+        value if value == u64::from(PlaneType::Cursor as u32) => Ok(PlaneType::Cursor),
+        value => Err(KmsPlaneCaptureError::InvalidProperty {
+            property: "type",
+            value,
+        }),
     }
 }
 

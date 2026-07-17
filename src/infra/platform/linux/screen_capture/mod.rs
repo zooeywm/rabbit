@@ -1,17 +1,6 @@
-mod device;
-mod framebuffer;
-mod output;
-mod types;
+mod kms;
 
-#[derive(Debug, kudi::DepInj)]
-#[target(KmsScreenCaptureManager)]
-pub(crate) struct KmsScreenCaptureManagerState;
-
-impl KmsScreenCaptureManagerState {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-}
+pub(crate) use kms::KmsScreenCaptureManagerState;
 
 /// Creates the screen-capture manager state selected for Linux.
 pub(crate) fn create_screen_capture_manager_state() -> KmsScreenCaptureManagerState {

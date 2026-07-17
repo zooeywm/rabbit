@@ -51,9 +51,9 @@ pub(crate) enum KmsPlaneCaptureError {
     },
     #[error("GETFB2 did not return a GEM handle for framebuffer plane {plane_index}")]
     MissingBufferHandle { plane_index: usize },
-    #[error("active plane is missing required property {property}")]
+    #[error("plane is missing required property {property}")]
     MissingProperty { property: &'static str },
-    #[error("active plane has invalid {property} value {value}")]
+    #[error("plane has invalid {property} value {value}")]
     InvalidProperty { property: &'static str, value: u64 },
     #[error(
         "plane state changed during capture: CRTC {expected_crtc:?} -> {actual_crtc:?}, \
@@ -96,6 +96,7 @@ pub(crate) struct KmsActivePlane {
 
 #[derive(Debug)]
 pub(crate) struct KmsPlaneSnapshot {
+    pub output_size: PixelSize,
     pub planes: Vec<KmsActivePlane>,
     pub issues: Vec<KmsPlaneIssue>,
 }
@@ -113,6 +114,7 @@ pub(crate) struct KmsFramebufferPlane {
 
 #[derive(Debug)]
 pub(crate) struct KmsFramebufferSnapshot {
+    pub output_size: PixelSize,
     pub planes: Vec<KmsFramebufferPlane>,
     pub issues: Vec<KmsPlaneIssue>,
 }
