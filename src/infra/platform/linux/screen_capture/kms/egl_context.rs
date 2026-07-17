@@ -24,7 +24,7 @@ use crate::infra::platform::screen_capture::kms::{
     gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
     types::{
         DmaBufFrame, KmsColorEncoding, KmsColorRange, KmsFramebufferPlane,
-        KmsPlaneBlend, KmsPlaneColor,
+        KmsPlaneBlend, KmsPlaneCaptureError, KmsPlaneColor,
     },
 };
 
@@ -105,10 +105,9 @@ impl EglContext {
     pub(crate) fn import_plane<'context>(
         &'context self,
         plane: &KmsFramebufferPlane,
-    ) -> eros::Result<EglPlaneImage<'context>> {
+    ) -> Result<EglPlaneImage<'context>, KmsPlaneCaptureError> {
         Ok(EglPlaneImage(
-            self.import_dma_buf(&plane.buffer, Some(plane.color))
-                .with_context(|| format!("Failed to import KMS plane {:?}", plane.id))?,
+            self.import_dma_buf(&plane.buffer, Some(plane.color))?,
         ))
     }
 
@@ -116,23 +115,25 @@ impl EglContext {
         &'context self,
         frame: &DmaBufFrame,
     ) -> eros::Result<EglCompositionImage<'context>> {
-        Ok(EglCompositionImage(self.import_dma_buf(frame, None)?))
+        Ok(EglCompositionImage(
+            self.import_dma_buf(frame, None)
+                .with_context(|| "Failed to import the KMS composition target")?,
+        ))
     }
 
     fn import_dma_buf<'context>(
         &'context self,
         frame: &DmaBufFrame,
         color: Option<KmsPlaneColor>,
-    ) -> eros::Result<EglImage<'context>> {
+    ) -> Result<EglImage<'context>, KmsPlaneCaptureError> {
         if frame.planes.is_empty() {
-            eros::bail!("Cannot import a DMA-BUF frame without planes");
+            return Err(KmsPlaneCaptureError::MissingDmaBufPlanes);
         }
         if frame.planes.len() > DMA_BUF_PLANE_FD_EXT.len() {
-            eros::bail!(
-                "Cannot import a DMA-BUF frame with {} planes; EGL supports at most {}",
-                frame.planes.len(),
-                DMA_BUF_PLANE_FD_EXT.len()
-            );
+            return Err(KmsPlaneCaptureError::TooManyDmaBufPlanes {
+                count: frame.planes.len(),
+                maximum: DMA_BUF_PLANE_FD_EXT.len(),
+            });
         }
 
         let mut attributes = vec![
@@ -154,12 +155,12 @@ impl EglContext {
         }
 
         for (plane_index, plane) in frame.planes.iter().enumerate() {
-            let object = frame.objects.get(plane.object_index).with_context(|| {
-                format!(
-                    "DMA-BUF plane {plane_index} references missing object {}",
-                    plane.object_index
-                )
-            })?;
+            let object = frame.objects.get(plane.object_index).ok_or(
+                KmsPlaneCaptureError::MissingDmaBufObject {
+                    plane_index,
+                    object_index: plane.object_index,
+                },
+            )?;
 
             attributes.extend_from_slice(&[
                 DMA_BUF_PLANE_FD_EXT[plane_index],
@@ -172,10 +173,10 @@ impl EglContext {
 
             if plane.modifier != DrmModifier::Invalid {
                 if !self.supports_modifiers {
-                    eros::bail!(
-                        "EGL cannot import DMA-BUF plane {plane_index} modifier {:?}",
-                        plane.modifier
-                    );
+                    return Err(KmsPlaneCaptureError::UnsupportedFormat {
+                        format: frame.format,
+                        modifier: plane.modifier,
+                    });
                 }
 
                 let modifier: u64 = plane.modifier.into();
@@ -191,6 +192,7 @@ impl EglContext {
         attributes.push(egl::ATTRIB_NONE);
         let no_context = unsafe { egl::Context::from_ptr(ptr::null_mut()) };
         let no_buffer = unsafe { egl::ClientBuffer::from_ptr(ptr::null_mut()) };
+        let modifier = frame.planes[0].modifier;
         let image = self
             .instance
             .create_image(
@@ -200,11 +202,10 @@ impl EglContext {
                 no_buffer,
                 &attributes,
             )
-            .with_context(|| {
-                format!(
-                    "Failed to import {}x{} {:?} DMA-BUF as an EGLImage",
-                    frame.size.width, frame.size.height, frame.format
-                )
+            .map_err(|source| KmsPlaneCaptureError::ImportDmaBuf {
+                format: frame.format,
+                modifier,
+                source,
             })?;
 
         Ok(EglImage {
@@ -252,6 +253,10 @@ impl EglContext {
         blend: KmsPlaneBlend,
     ) -> eros::Result<()> {
         self.gl.compose_plane(target, texture, transform, blend)
+    }
+
+    pub(crate) fn finish_composition(&self) -> eros::Result<()> {
+        self.gl.finish_composition()
     }
 }
 

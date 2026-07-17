@@ -51,6 +51,24 @@ pub(crate) enum KmsPlaneCaptureError {
     },
     #[error("GETFB2 did not return a GEM handle for framebuffer plane {plane_index}")]
     MissingBufferHandle { plane_index: usize },
+    #[error("DMA-BUF does not contain any planes")]
+    MissingDmaBufPlanes,
+    #[error("DMA-BUF contains {count} planes, but EGL supports at most {maximum}")]
+    TooManyDmaBufPlanes { count: usize, maximum: usize },
+    #[error(
+        "DMA-BUF plane {plane_index} references missing object {object_index}"
+    )]
+    MissingDmaBufObject {
+        plane_index: usize,
+        object_index: usize,
+    },
+    #[error("failed to import format {format:?} with modifier {modifier:?} as an EGLImage")]
+    ImportDmaBuf {
+        format: DrmFourcc,
+        modifier: DrmModifier,
+        #[source]
+        source: khronos_egl::Error,
+    },
     #[error("plane is missing required property {property}")]
     MissingProperty { property: &'static str },
     #[error("plane has invalid {property} value {value}")]
