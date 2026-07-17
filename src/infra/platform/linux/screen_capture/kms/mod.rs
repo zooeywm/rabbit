@@ -39,6 +39,30 @@ struct KmsCaptureSource {
     frames: KmsFramePublisher,
 }
 
+impl KmsCaptureSource {
+    fn new(screen_name: String) -> std::io::Result<Self> {
+        Ok(Self {
+            worker: KmsCaptureWorker::new(screen_name)?,
+            frames: KmsFramePublisher::default(),
+        })
+    }
+
+    fn subscribe(&mut self) -> KmsFrameSubscription {
+        self.frames.subscribe()
+    }
+
+    async fn capture(&mut self) -> eros::Result<()> {
+        let frame = self
+            .worker
+            .capture()
+            .await
+            .with_context(|| "Failed to capture a KMS source frame")?;
+        self.frames.publish(frame);
+
+        Ok(())
+    }
+}
+
 impl KmsScreenCaptureManagerState {
     pub(crate) fn new() -> Self {
         Self {
@@ -66,12 +90,9 @@ where
             Entry::Vacant(entry) => {
                 let context =
                     format!("Failed to start KMS capture worker for screen {screen_name}");
-                let worker = KmsCaptureWorker::new(screen_name).with_context(|| context)?;
+                let source = KmsCaptureSource::new(screen_name).with_context(|| context)?;
 
-                Ok(entry.insert(KmsCaptureSource {
-                    worker,
-                    frames: KmsFramePublisher::default(),
-                }))
+                Ok(entry.insert(source))
             }
         }
     }
@@ -88,7 +109,7 @@ where
     type Subscription = KmsFrameSubscription;
 
     fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription> {
-        Ok(self.source(screen_id)?.frames.subscribe())
+        Ok(self.source(screen_id)?.subscribe())
     }
 }
 
