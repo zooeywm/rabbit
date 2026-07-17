@@ -53,19 +53,17 @@ mod tests {
     fn captures_one_composed_frame() {
         let screen_name = std::env::var("RABBIT_KMS_SCREEN")
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
-        let mut source =
-            KmsCaptureSource::new(screen_name).expect("KMS capture source should start");
-        let mut subscription = source.subscribe();
         let runtime = compio::runtime::Runtime::new().expect("Compio runtime should start");
-        runtime
-            .block_on(source.capture())
-            .expect("KMS source should capture one frame");
-        let frame = runtime
-            .block_on(poll_fn(|context| {
-                Pin::new(&mut subscription).poll_next(context)
-            }))
-            .expect("KMS subscription should remain open")
-            .expect("KMS subscription should return one frame");
+        let frame = runtime.block_on(async move {
+            let mut source =
+                KmsCaptureSource::new(screen_name).expect("KMS capture source should start");
+            let mut subscription = source.subscribe();
+
+            poll_fn(|context| Pin::new(&mut subscription).poll_next(context))
+                .await
+                .expect("KMS subscription should remain open")
+                .expect("KMS subscription should return one frame")
+        });
 
         for issue in &frame.issues {
             eprintln!("{issue}");

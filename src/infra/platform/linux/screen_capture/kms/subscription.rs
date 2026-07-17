@@ -28,6 +28,7 @@ pub(crate) struct KmsFrameSubscription {
 struct KmsFrameSubscriptionState {
     latest: Option<SharedKmsFrame>,
     waker: Option<Waker>,
+    closed: bool,
 }
 
 impl KmsFramePublisher {
@@ -58,6 +59,30 @@ impl KmsFramePublisher {
             true
         });
     }
+
+    pub(crate) fn has_subscribers(&mut self) -> bool {
+        self.subscribers
+            .retain(|subscriber| subscriber.strong_count() > 0);
+
+        !self.subscribers.is_empty()
+    }
+
+    pub(crate) fn close(&mut self) {
+        for subscriber in self.subscribers.drain(..) {
+            let Some(state) = subscriber.upgrade() else {
+                continue;
+            };
+            let waker = {
+                let mut state = state.borrow_mut();
+                state.closed = true;
+                state.waker.take()
+            };
+
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
 }
 
 impl Stream for KmsFrameSubscription {
@@ -68,6 +93,10 @@ impl Stream for KmsFrameSubscription {
 
         if let Some(frame) = state.latest.take() {
             return Poll::Ready(Some(Ok(frame)));
+        }
+
+        if state.closed {
+            return Poll::Ready(None);
         }
 
         match &state.waker {
@@ -124,6 +153,25 @@ mod tests {
             Pin::new(&mut first).poll_next(&mut context),
             Poll::Pending
         ));
+    }
+
+    #[test]
+    fn publisher_detects_dropped_subscribers_and_closes_live_ones() {
+        let mut publisher = KmsFramePublisher::default();
+        let dropped = publisher.subscribe();
+        let mut live = publisher.subscribe();
+
+        drop(dropped);
+        assert!(publisher.has_subscribers());
+        publisher.close();
+
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            Pin::new(&mut live).poll_next(&mut context),
+            Poll::Ready(None)
+        ));
+        assert!(!publisher.has_subscribers());
     }
 
     fn frame(width: u32) -> CapturedFrame<DmaBufFrame, KmsPlaneIssue> {

@@ -1,6 +1,11 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, hash_map::Entry},
+    rc::Rc,
+};
 
 use eros::Context;
+use tracing::error;
 
 use crate::{
     infra::platform::screen_capture::kms::{
@@ -35,31 +40,58 @@ pub(crate) struct KmsScreenCaptureManagerState {
 
 #[derive(Debug)]
 struct KmsCaptureSource {
+    capture_task: Option<compio::runtime::JoinHandle<()>>,
+    inner: Rc<KmsCaptureSourceInner>,
+}
+
+#[derive(Debug)]
+struct KmsCaptureSourceInner {
     worker: KmsCaptureWorker,
-    frames: KmsFramePublisher,
+    frames: RefCell<KmsFramePublisher>,
 }
 
 impl KmsCaptureSource {
     fn new(screen_name: String) -> std::io::Result<Self> {
         Ok(Self {
-            worker: KmsCaptureWorker::new(screen_name)?,
-            frames: KmsFramePublisher::default(),
+            capture_task: None,
+            inner: Rc::new(KmsCaptureSourceInner {
+                worker: KmsCaptureWorker::new(screen_name)?,
+                frames: RefCell::new(KmsFramePublisher::default()),
+            }),
         })
     }
 
     fn subscribe(&mut self) -> KmsFrameSubscription {
-        self.frames.subscribe()
+        let subscription = self.inner.frames.borrow_mut().subscribe();
+
+        if self
+            .capture_task
+            .as_ref()
+            .is_none_or(compio::runtime::JoinHandle::is_finished)
+        {
+            self.capture_task = Some(compio::runtime::spawn(capture_frames(Rc::clone(
+                &self.inner,
+            ))));
+        }
+
+        subscription
     }
+}
 
-    async fn capture(&mut self) -> eros::Result<()> {
-        let frame = self
-            .worker
-            .capture()
-            .await
-            .with_context(|| "Failed to capture a KMS source frame")?;
-        self.frames.publish(frame);
+async fn capture_frames(source: Rc<KmsCaptureSourceInner>) {
+    loop {
+        if !source.frames.borrow_mut().has_subscribers() {
+            return;
+        }
 
-        Ok(())
+        match source.worker.capture().await {
+            Ok(frame) => source.frames.borrow_mut().publish(frame),
+            Err(error) => {
+                error!(%error, "KMS capture source stopped");
+                source.frames.borrow_mut().close();
+                return;
+            }
+        }
     }
 }
 
@@ -168,22 +200,26 @@ mod tests {
 
     #[test]
     fn subscriptions_reuse_one_source_per_physical_screen() {
-        let mut deps = TestDeps {
-            capture: KmsScreenCaptureManagerState::new(),
-            screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
-        };
-        let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
+        let runtime = compio::runtime::Runtime::new().expect("Compio runtime should start");
 
-        let _first = manager
-            .subscribe(&ScreenId(0))
-            .expect("first KMS subscription should start");
-        let _second = manager
-            .subscribe(&ScreenId(0))
-            .expect("second KMS subscription should reuse the source");
+        runtime.block_on(async {
+            let mut deps = TestDeps {
+                capture: KmsScreenCaptureManagerState::new(),
+                screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
+            };
+            let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
 
-        assert_eq!(manager.sources.len(), 1);
-        assert!(manager.subscribe(&ScreenId(2)).is_err());
-        assert_eq!(manager.sources.len(), 1);
+            let _first = manager
+                .subscribe(&ScreenId(0))
+                .expect("first KMS subscription should start");
+            let _second = manager
+                .subscribe(&ScreenId(0))
+                .expect("second KMS subscription should reuse the source");
+
+            assert_eq!(manager.sources.len(), 1);
+            assert!(manager.subscribe(&ScreenId(2)).is_err());
+            assert_eq!(manager.sources.len(), 1);
+        });
     }
 
     fn screen(id: u8, name: &str) -> Screen {
