@@ -88,6 +88,7 @@ pub(crate) struct KmsActivePlane {
     pub id: plane::Handle,
     pub plane_type: PlaneType,
     pub framebuffer: framebuffer::Handle,
+    pub placement: KmsPlanePlacement,
 }
 
 #[derive(Debug)]
@@ -101,10 +102,35 @@ pub(crate) struct KmsFramebufferPlane {
     pub id: plane::Handle,
     pub plane_type: PlaneType,
     pub buffer: DmaBufFrame,
+    pub placement: KmsPlanePlacement,
 }
 
 #[derive(Debug)]
 pub(crate) struct KmsFramebufferSnapshot {
     pub planes: Vec<KmsFramebufferPlane>,
     pub issues: Vec<KmsPlaneIssue>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KmsPlanePlacement {
+    pub zpos: u64,
+    pub source: KmsSourceRect,
+    pub destination: KmsDestinationRect,
+}
+
+/// Source coordinates in DRM's unsigned 16.16 fixed-point representation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KmsSourceRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct KmsDestinationRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }

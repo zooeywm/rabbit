@@ -5,9 +5,10 @@ use eros::Context;
 
 use crate::infra::platform::screen_capture::{
     device::KmsDevice,
-    types::{
-        KmsActivePlane, KmsPlaneCaptureError, KmsPlaneIssue, KmsPlaneSnapshot,
-    },
+        types::{
+            KmsActivePlane, KmsDestinationRect, KmsPlaneCaptureError,
+            KmsPlaneIssue, KmsPlanePlacement, KmsPlaneSnapshot, KmsSourceRect,
+        },
 };
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
@@ -82,8 +83,8 @@ impl KmsOutput {
                 continue;
             };
 
-            let plane_type = match query_plane_type(&self.device, plane_id) {
-                Ok(plane_type) => plane_type,
+            let properties = match query_plane_properties(&self.device, plane_id) {
+                Ok(properties) => properties,
                 Err(error) => {
                     issues.push(KmsPlaneIssue {
                         plane_id,
@@ -93,47 +94,150 @@ impl KmsOutput {
                     continue;
                 }
             };
+            let Some(placement) = properties.placement else {
+                continue;
+            };
 
             planes.push(KmsActivePlane {
                 id: plane_id,
-                plane_type,
+                plane_type: properties.plane_type,
                 framebuffer,
+                placement,
             });
         }
+
+        planes.sort_unstable_by_key(|plane| (plane.placement.zpos, u32::from(plane.id)));
 
         Ok(KmsPlaneSnapshot { planes, issues })
     }
 }
 
-fn query_plane_type(
+fn query_plane_properties(
     device: &KmsDevice,
     plane_id: plane::Handle,
-) -> Result<PlaneType, KmsPlaneCaptureError> {
+) -> Result<KmsPlaneProperties, KmsPlaneCaptureError> {
     let properties = device
         .get_properties(plane_id)
         .map_err(KmsPlaneCaptureError::QueryProperties)?;
+    let mut values = RawPlaneProperties::default();
 
     for (property_id, value) in properties.iter() {
         let property = device
             .get_property(*property_id)
             .map_err(KmsPlaneCaptureError::QueryProperties)?;
 
-        if property.name().to_bytes() != b"type" {
-            continue;
+        match property.name().to_bytes() {
+            b"type" => values.plane_type = Some(*value),
+            b"zpos" => values.zpos = Some(*value),
+            b"SRC_X" => values.source_x = Some(*value),
+            b"SRC_Y" => values.source_y = Some(*value),
+            b"SRC_W" => values.source_width = Some(*value),
+            b"SRC_H" => values.source_height = Some(*value),
+            b"CRTC_X" => values.destination_x = Some(*value),
+            b"CRTC_Y" => values.destination_y = Some(*value),
+            b"CRTC_W" => values.destination_width = Some(*value),
+            b"CRTC_H" => values.destination_height = Some(*value),
+            _ => {}
         }
-
-        return match *value {
-            value if value == u64::from(PlaneType::Primary as u32) => Ok(PlaneType::Primary),
-            value if value == u64::from(PlaneType::Overlay as u32) => Ok(PlaneType::Overlay),
-            value if value == u64::from(PlaneType::Cursor as u32) => Ok(PlaneType::Cursor),
-            value => Err(KmsPlaneCaptureError::InvalidProperty {
-                property: "type",
-                value,
-            }),
-        };
     }
 
-    Err(KmsPlaneCaptureError::MissingProperty { property: "type" })
+    values.try_into()
+}
+
+#[derive(Debug, Default)]
+struct RawPlaneProperties {
+    plane_type: Option<u64>,
+    zpos: Option<u64>,
+    source_x: Option<u64>,
+    source_y: Option<u64>,
+    source_width: Option<u64>,
+    source_height: Option<u64>,
+    destination_x: Option<u64>,
+    destination_y: Option<u64>,
+    destination_width: Option<u64>,
+    destination_height: Option<u64>,
+}
+
+struct KmsPlaneProperties {
+    plane_type: PlaneType,
+    placement: Option<KmsPlanePlacement>,
+}
+
+impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
+    type Error = KmsPlaneCaptureError;
+
+    fn try_from(values: RawPlaneProperties) -> Result<Self, Self::Error> {
+        let plane_type = required(values.plane_type, "type")?;
+        let plane_type = match plane_type {
+            value if value == u64::from(PlaneType::Primary as u32) => PlaneType::Primary,
+            value if value == u64::from(PlaneType::Overlay as u32) => PlaneType::Overlay,
+            value if value == u64::from(PlaneType::Cursor as u32) => PlaneType::Cursor,
+            value => {
+                return Err(KmsPlaneCaptureError::InvalidProperty {
+                    property: "type",
+                    value,
+                });
+            }
+        };
+        let zpos = required(values.zpos, "zpos")?;
+        let source = KmsSourceRect {
+            x: unsigned_32(values.source_x, "SRC_X")?,
+            y: unsigned_32(values.source_y, "SRC_Y")?,
+            width: unsigned_32(values.source_width, "SRC_W")?,
+            height: unsigned_32(values.source_height, "SRC_H")?,
+        };
+        let destination = KmsDestinationRect {
+            x: signed_32(values.destination_x, "CRTC_X")?,
+            y: signed_32(values.destination_y, "CRTC_Y")?,
+            width: unsigned_32(values.destination_width, "CRTC_W")?,
+            height: unsigned_32(values.destination_height, "CRTC_H")?,
+        };
+
+        let placement = if source.width == 0
+            || source.height == 0
+            || destination.width == 0
+            || destination.height == 0
+        {
+            None
+        } else {
+            Some(KmsPlanePlacement {
+                zpos,
+                source,
+                destination,
+            })
+        };
+
+        Ok(Self {
+            plane_type,
+            placement,
+        })
+    }
+}
+
+fn required(
+    value: Option<u64>,
+    property: &'static str,
+) -> Result<u64, KmsPlaneCaptureError> {
+    value.ok_or(KmsPlaneCaptureError::MissingProperty { property })
+}
+
+fn unsigned_32(
+    value: Option<u64>,
+    property: &'static str,
+) -> Result<u32, KmsPlaneCaptureError> {
+    let value = required(value, property)?;
+
+    u32::try_from(value).map_err(|_| KmsPlaneCaptureError::InvalidProperty { property, value })
+}
+
+fn signed_32(
+    value: Option<u64>,
+    property: &'static str,
+) -> Result<i32, KmsPlaneCaptureError> {
+    let value = required(value, property)?;
+
+    i32::try_from(value as i64)
+        .map_err(|_| KmsPlaneCaptureError::InvalidProperty { property, value })
 }
 
 fn device_paths(screen_name: &str) -> eros::Result<Vec<PathBuf>> {
