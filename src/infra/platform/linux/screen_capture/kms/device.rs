@@ -178,6 +178,7 @@ mod tests {
     use crate::infra::platform::screen_capture::kms::device::vblank_crtc_index;
 
     #[test]
+    #[ignore = "run through scripts/test-kms"]
     fn resolves_the_vblank_pipe_index_from_resource_order() {
         let first = crtc(10);
         let second = crtc(20);

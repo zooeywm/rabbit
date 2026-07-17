@@ -49,7 +49,7 @@ mod tests {
     use crate::infra::platform::screen_capture::kms::KmsCaptureSource;
 
     #[test]
-    #[ignore = "requires a real KMS output and CAP_SYS_ADMIN"]
+    #[ignore = "run through scripts/test-kms"]
     fn captures_one_composed_frame() {
         let screen_name = std::env::var("RABBIT_KMS_SCREEN")
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");

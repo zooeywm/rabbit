@@ -128,6 +128,7 @@ mod tests {
     };
 
     #[test]
+    #[ignore = "run through scripts/test-kms"]
     fn slow_subscribers_share_only_the_latest_frame() {
         let mut publisher = KmsFramePublisher::default();
         let mut first = publisher.subscribe();
@@ -156,6 +157,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run through scripts/test-kms"]
     fn publisher_detects_dropped_subscribers_and_closes_live_ones() {
         let mut publisher = KmsFramePublisher::default();
         let dropped = publisher.subscribe();

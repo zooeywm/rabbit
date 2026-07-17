@@ -199,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "run through scripts/test-kms"]
     fn subscriptions_reuse_one_source_per_physical_screen() {
         let runtime = compio::runtime::Runtime::new().expect("Compio runtime should start");
 

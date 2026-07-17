@@ -23,7 +23,6 @@ fi
 sudo setcap cap_sys_admin+ep "$test_binary"
 
 exec "$test_binary" \
-    infra::platform::screen_capture::kms::capture::tests::captures_one_composed_frame \
-    --exact \
+    infra::platform::screen_capture::kms:: \
     --ignored \
     --nocapture

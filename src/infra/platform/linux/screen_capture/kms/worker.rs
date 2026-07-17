@@ -105,6 +105,7 @@ mod tests {
     use crate::infra::platform::screen_capture::kms::worker::KmsCaptureWorker;
 
     #[test]
+    #[ignore = "run through scripts/test-kms"]
     fn worker_starts_without_opening_the_kms_output() {
         let worker = KmsCaptureWorker::new("not-a-real-output".to_owned())
             .expect("KMS worker thread should start without opening the output");
