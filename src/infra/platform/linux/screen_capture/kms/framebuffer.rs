@@ -7,9 +7,8 @@ use crate::{
     infra::platform::screen_capture::kms::{
         output::KmsOutput,
         types::{
-            DmaBufFrame, DmaBufObject, DmaBufPlane, KmsActivePlane,
-            KmsFramebufferPlane, KmsFramebufferSnapshot, KmsPlaneCaptureError,
-            KmsPlaneIssue, KmsPlaneSnapshot,
+            DmaBufFrame, DmaBufObject, DmaBufPlane, KmsActivePlane, KmsFramebufferPlane,
+            KmsFramebufferSnapshot, KmsPlaneCaptureError, KmsPlaneIssue, KmsPlaneSnapshot,
         },
     },
     kernel::geometry::PixelSize,
@@ -80,7 +79,9 @@ impl KmsOutput {
                 }
                 break;
             };
-            let object_index = match unique_handles.iter().position(|candidate| *candidate == handle)
+            let object_index = match unique_handles
+                .iter()
+                .position(|candidate| *candidate == handle)
             {
                 Some(index) => index,
                 None => {

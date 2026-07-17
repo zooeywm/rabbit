@@ -215,7 +215,10 @@ impl GlContext {
         let texture = match unsafe { self.api.create_texture() } {
             Ok(texture) => texture,
             Err(error) => {
-                eros::bail!("Failed to create an OpenGL ES composition texture: {}", error)
+                eros::bail!(
+                    "Failed to create an OpenGL ES composition texture: {}",
+                    error
+                )
             }
         };
 
@@ -326,9 +329,9 @@ impl GlContext {
             self.api.viewport(0, 0, width, height);
             self.api.use_program(Some(program.program));
             self.api.active_texture(glow::TEXTURE0);
-            self.api.bind_texture(TEXTURE_EXTERNAL, Some(texture.texture));
             self.api
-                .uniform_1_i32(Some(&program.plane_texture), 0);
+                .bind_texture(TEXTURE_EXTERNAL, Some(texture.texture));
+            self.api.uniform_1_i32(Some(&program.plane_texture), 0);
             self.api.uniform_matrix_3_f32_slice(
                 Some(&program.position_transform),
                 false,
@@ -348,8 +351,7 @@ impl GlContext {
                 pixel_blend_mode(blend.pixel_mode),
             );
             self.api.enable(glow::BLEND);
-            self.api
-                .blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            self.api.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             self.api.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.api.disable(glow::BLEND);
             self.api.bind_texture(TEXTURE_EXTERNAL, None);

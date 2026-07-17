@@ -55,9 +55,7 @@ pub(crate) enum KmsPlaneCaptureError {
     MissingDmaBufPlanes,
     #[error("DMA-BUF contains {count} planes, but EGL supports at most {maximum}")]
     TooManyDmaBufPlanes { count: usize, maximum: usize },
-    #[error(
-        "DMA-BUF plane {plane_index} references missing object {object_index}"
-    )]
+    #[error("DMA-BUF plane {plane_index} references missing object {object_index}")]
     MissingDmaBufObject {
         plane_index: usize,
         object_index: usize,

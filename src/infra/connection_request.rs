@@ -169,9 +169,7 @@ async fn send_request(
     Ok(())
 }
 
-async fn recv_request(
-    stream: &mut compio::quic::RecvStream,
-) -> eros::Result<ConnectionRequest> {
+async fn recv_request(stream: &mut compio::quic::RecvStream) -> eros::Result<ConnectionRequest> {
     let header = read_exact(stream, REQUESTER_NAME_LENGTH_SIZE)
         .await
         .with_context(|| "Failed to receive QUIC connection request header")?;
@@ -202,9 +200,7 @@ async fn send_response(
     Ok(())
 }
 
-async fn recv_response(
-    stream: &mut compio::quic::RecvStream,
-) -> eros::Result<ConnectionResponse> {
+async fn recv_response(stream: &mut compio::quic::RecvStream) -> eros::Result<ConnectionResponse> {
     let response = read_exact(stream, RESPONSE_SIZE)
         .await
         .with_context(|| "Failed to receive QUIC connection response")?;

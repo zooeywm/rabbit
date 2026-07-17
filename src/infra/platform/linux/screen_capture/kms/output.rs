@@ -8,11 +8,9 @@ use crate::{
     infra::platform::screen_capture::kms::{
         device::KmsDevice,
         types::{
-            KmsActivePlane, KmsColorEncoding, KmsColorRange,
-            KmsCursorHotspot, KmsDestinationRect, KmsPixelBlendMode,
-            KmsPlaneBlend, KmsPlaneCaptureError, KmsPlaneColor,
-            KmsPlaneIssue, KmsPlanePlacement, KmsPlaneSnapshot,
-            KmsPlaneTransform, KmsRotation, KmsSourceRect,
+            KmsActivePlane, KmsColorEncoding, KmsColorRange, KmsCursorHotspot, KmsDestinationRect,
+            KmsPixelBlendMode, KmsPlaneBlend, KmsPlaneCaptureError, KmsPlaneColor, KmsPlaneIssue,
+            KmsPlanePlacement, KmsPlaneSnapshot, KmsPlaneTransform, KmsRotation, KmsSourceRect,
         },
     },
     kernel::geometry::PixelSize,
@@ -65,7 +63,8 @@ impl KmsOutput {
             });
         }
 
-        Ok(output.with_context(|| format!("No active DRM connector matches screen {screen_name}"))?)
+        Ok(output
+            .with_context(|| format!("No active DRM connector matches screen {screen_name}"))?)
     }
 
     pub(crate) fn snapshot_planes(&self) -> eros::Result<KmsPlaneSnapshot> {
@@ -342,12 +341,12 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             None => KmsPlaneTransform::default(),
         };
         let alpha = match values.alpha {
-            Some(alpha) => u16::try_from(alpha).map_err(|_| {
-                KmsPlaneCaptureError::InvalidProperty {
+            Some(alpha) => {
+                u16::try_from(alpha).map_err(|_| KmsPlaneCaptureError::InvalidProperty {
                     property: "alpha",
                     value: alpha,
-                }
-            })?,
+                })?
+            }
             None => u16::MAX,
         };
         let blend = KmsPlaneBlend {
@@ -371,17 +370,13 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
         let cursor_hotspot = match plane_type {
             PlaneType::Cursor => match (values.hotspot_x, values.hotspot_y) {
                 (Some(x), Some(y)) => Some(KmsCursorHotspot {
-                    x: u32::try_from(x).map_err(|_| {
-                        KmsPlaneCaptureError::InvalidProperty {
-                            property: "HOTSPOT_X",
-                            value: x,
-                        }
+                    x: u32::try_from(x).map_err(|_| KmsPlaneCaptureError::InvalidProperty {
+                        property: "HOTSPOT_X",
+                        value: x,
                     })?,
-                    y: u32::try_from(y).map_err(|_| {
-                        KmsPlaneCaptureError::InvalidProperty {
-                            property: "HOTSPOT_Y",
-                            value: y,
-                        }
+                    y: u32::try_from(y).map_err(|_| KmsPlaneCaptureError::InvalidProperty {
+                        property: "HOTSPOT_Y",
+                        value: y,
                     })?,
                 }),
                 (None, None) => Some(KmsCursorHotspot::default()),
@@ -512,8 +507,7 @@ impl TryFrom<u64> for KmsPlaneTransform {
             | KmsTransformFlag::Rotate90 as u64
             | KmsTransformFlag::Rotate180 as u64
             | KmsTransformFlag::Rotate270 as u64;
-        let reflection_mask =
-            KmsTransformFlag::ReflectX as u64 | KmsTransformFlag::ReflectY as u64;
+        let reflection_mask = KmsTransformFlag::ReflectX as u64 | KmsTransformFlag::ReflectY as u64;
 
         if value & !(rotation_mask | reflection_mask) != 0 {
             return Err(KmsPlaneCaptureError::InvalidProperty {
@@ -553,26 +547,17 @@ enum KmsTransformFlag {
     ReflectY = 1 << 5,
 }
 
-fn required(
-    value: Option<u64>,
-    property: &'static str,
-) -> Result<u64, KmsPlaneCaptureError> {
+fn required(value: Option<u64>, property: &'static str) -> Result<u64, KmsPlaneCaptureError> {
     value.ok_or(KmsPlaneCaptureError::MissingProperty { property })
 }
 
-fn unsigned_32(
-    value: Option<u64>,
-    property: &'static str,
-) -> Result<u32, KmsPlaneCaptureError> {
+fn unsigned_32(value: Option<u64>, property: &'static str) -> Result<u32, KmsPlaneCaptureError> {
     let value = required(value, property)?;
 
     u32::try_from(value).map_err(|_| KmsPlaneCaptureError::InvalidProperty { property, value })
 }
 
-fn signed_32(
-    value: Option<u64>,
-    property: &'static str,
-) -> Result<i32, KmsPlaneCaptureError> {
+fn signed_32(value: Option<u64>, property: &'static str) -> Result<i32, KmsPlaneCaptureError> {
     let value = required(value, property)?;
 
     i32::try_from(value as i64)
@@ -585,11 +570,12 @@ fn device_paths(screen_name: &str) -> eros::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
     for entry in entries {
-        let entry = entry.with_context(|| format!("Failed to read an entry in {DRM_CLASS_PATH}"))?;
+        let entry =
+            entry.with_context(|| format!("Failed to read an entry in {DRM_CLASS_PATH}"))?;
         let entry_name = entry.file_name();
-        let entry_name = entry_name.to_str().with_context(|| {
-            format!("DRM class entry name {entry_name:?} is not valid UTF-8")
-        })?;
+        let entry_name = entry_name
+            .to_str()
+            .with_context(|| format!("DRM class entry name {entry_name:?} is not valid UTF-8"))?;
         let Some((card_name, connector_name)) = entry_name.split_once('-') else {
             continue;
         };

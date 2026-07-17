@@ -13,9 +13,7 @@ pub struct CapturedFrame<Buffer, Issue> {
 pub trait ScreenCaptureManager {
     type Buffer;
     type Issue;
-    type Subscription: futures_core::Stream<
-        Item = eros::Result<Rc<CapturedFrame<Self::Buffer, Self::Issue>>>,
-    >;
+    type Subscription: futures_core::Stream<Item = eros::Result<Rc<CapturedFrame<Self::Buffer, Self::Issue>>>>;
 
     fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription>;
 }

@@ -8,10 +8,7 @@ use crate::{
         composition::KmsCompositionTransform,
         device::KmsDevice,
         egl_context::EglContext,
-        types::{
-            DmaBufFrame, DmaBufObject, DmaBufPlane, KmsFramebufferSnapshot,
-            KmsPlaneIssue,
-        },
+        types::{DmaBufFrame, DmaBufObject, DmaBufPlane, KmsFramebufferSnapshot, KmsPlaneIssue},
     },
     kernel::{geometry::PixelSize, screen_capture::CapturedFrame},
 };
@@ -41,10 +38,7 @@ impl GbmFrameAllocator {
         Ok(Self { egl, device })
     }
 
-    pub(crate) fn allocate_composition_target(
-        &self,
-        size: PixelSize,
-    ) -> eros::Result<DmaBufFrame> {
+    pub(crate) fn allocate_composition_target(&self, size: PixelSize) -> eros::Result<DmaBufFrame> {
         let format = Format::Xrgb8888;
         let usage = BufferObjectFlags::RENDERING;
 
@@ -132,12 +126,9 @@ impl GbmFrameAllocator {
                     continue;
                 }
             };
-            let texture = self
-                .egl
-                .create_external_texture(&image)
-                .with_context(|| {
-                    format!("Failed to bind KMS plane {:?} for composition", plane.id)
-                })?;
+            let texture = self.egl.create_external_texture(&image).with_context(|| {
+                format!("Failed to bind KMS plane {:?} for composition", plane.id)
+            })?;
             let transform =
                 KmsCompositionTransform::new(output_size, plane.buffer.size, plane.placement);
 

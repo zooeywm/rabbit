@@ -2464,6 +2464,7 @@ dependencies = [
  "directories",
  "drm",
  "eros",
+ "flume",
  "futures-channel",
  "futures-core",
  "gbm",

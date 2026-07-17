@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub(crate) use gui::RootComponent;
-pub(crate) use logging::init_logging;
+pub(crate) use logging::{LoggerGuard, init_logging};
 
 /// Root application state and dependency container.
 pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState> {

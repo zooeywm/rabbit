@@ -74,11 +74,7 @@ fn texture_coordinate(
     texture_x: f64,
     texture_y: f64,
 ) -> (f64, f64) {
-    let (source_x, source_y) = source_coordinate(
-        placement.transform,
-        texture_x,
-        1.0 - texture_y,
-    );
+    let (source_x, source_y) = source_coordinate(placement.transform, texture_x, 1.0 - texture_y);
     let source = placement.source;
     let framebuffer_width = f64::from(framebuffer_size.width) * FIXED_POINT_SCALE;
     let framebuffer_height = f64::from(framebuffer_size.height) * FIXED_POINT_SCALE;

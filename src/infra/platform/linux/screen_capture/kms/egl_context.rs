@@ -14,17 +14,15 @@ use khronos_egl as egl;
 use crate::infra::platform::screen_capture::kms::{
     composition::KmsCompositionTransform,
     egl_ext::{
-        DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT,
-        DMA_BUF_PLANE_MODIFIER_LO_EXT, DMA_BUF_PLANE_OFFSET_EXT,
-        DMA_BUF_PLANE_PITCH_EXT, ITU_REC601_EXT, ITU_REC709_EXT,
-        ITU_REC2020_EXT, LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT,
-        PLATFORM_GBM_KHR, SAMPLE_RANGE_HINT_EXT, YUV_COLOR_SPACE_HINT_EXT,
-        YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
+        DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
+        DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, ITU_REC601_EXT, ITU_REC709_EXT,
+        ITU_REC2020_EXT, LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT, PLATFORM_GBM_KHR,
+        SAMPLE_RANGE_HINT_EXT, YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
     },
     gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
     types::{
-        DmaBufFrame, KmsColorEncoding, KmsColorRange, KmsFramebufferPlane,
-        KmsPlaneBlend, KmsPlaneCaptureError, KmsPlaneColor,
+        DmaBufFrame, KmsColorEncoding, KmsColorRange, KmsFramebufferPlane, KmsPlaneBlend,
+        KmsPlaneCaptureError, KmsPlaneColor,
     },
 };
 
@@ -269,9 +267,7 @@ impl Drop for EglContext {
         {
             self.gl.destroy();
         }
-        let _ = self
-            .instance
-            .make_current(self.display, None, None, None);
+        let _ = self.instance.make_current(self.display, None, None, None);
         let _ = self.instance.destroy_context(self.display, self.context);
         let _ = self.instance.terminate(self.display);
         let _ = self.instance.release_thread();
@@ -303,8 +299,7 @@ fn initialize_context(
         eros::bail!("EGL display does not support DMA-BUF image import");
     }
 
-    let supports_modifiers =
-        has_extension(extensions, "EGL_EXT_image_dma_buf_import_modifiers");
+    let supports_modifiers = has_extension(extensions, "EGL_EXT_image_dma_buf_import_modifiers");
 
     instance
         .bind_api(egl::OPENGL_ES_API)
@@ -312,11 +307,7 @@ fn initialize_context(
     let config = instance
         .choose_first_config(
             display,
-            &[
-                egl::RENDERABLE_TYPE,
-                egl::OPENGL_ES3_BIT,
-                egl::NONE,
-            ],
+            &[egl::RENDERABLE_TYPE, egl::OPENGL_ES3_BIT, egl::NONE],
         )
         .with_context(|| "Failed to choose an OpenGL ES 3 EGL config")?
         .with_context(|| "EGL did not provide an OpenGL ES 3 config")?;

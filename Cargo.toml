@@ -13,6 +13,7 @@ bytes = "1"
 binrw = "0.15"
 futures-core = "0.3"
 futures-channel = "0.3"
+flume = { version = "0.12", default-features = false }
 thiserror = "2.0"
 thin-cell = "0.2"
 kudi = "0.1"

@@ -86,9 +86,7 @@ impl QuicTransport {
     }
 }
 
-async fn write_control_stream_preface(
-    stream: &mut compio::quic::SendStream,
-) -> eros::Result<()> {
+async fn write_control_stream_preface(stream: &mut compio::quic::SendStream) -> eros::Result<()> {
     let mut preface = [Bytes::copy_from_slice(&[TransportChannel::Control.into()])];
 
     stream
@@ -99,9 +97,7 @@ async fn write_control_stream_preface(
     Ok(())
 }
 
-async fn read_control_stream_preface(
-    stream: &mut compio::quic::RecvStream,
-) -> eros::Result<()> {
+async fn read_control_stream_preface(stream: &mut compio::quic::RecvStream) -> eros::Result<()> {
     let Some(preface) = stream
         .read_chunk(size_of::<u8>(), true)
         .await

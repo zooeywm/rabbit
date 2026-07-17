@@ -1,15 +1,12 @@
-use binrw::{
-    BinRead, BinReaderExt, BinWrite, BinWriterExt, binread, binrw, io::Cursor,
-};
+use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binread, binrw, io::Cursor};
 use bytes::Bytes;
 use eros::Context;
 
 use crate::kernel::{
     geometry::PixelSize,
     screen_configuration::{
-        RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome,
-        ScreenResolutionStatus, ScreenStreamRequest, ScreenStreamRequestId,
-        ScreenStreamsConfigured, SetScreenStreams,
+        RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
+        ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
     },
     screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
@@ -573,8 +570,8 @@ fn finish_control_message(writer: Cursor<Vec<u8>>) -> TransportMessage {
 
 fn write_screen_info(writer: &mut Cursor<Vec<u8>>, screen: &Screen) -> eros::Result<()> {
     let name = screen.name.as_bytes();
-    let name_length = u16::try_from(name.len())
-        .with_context(|| "Failed to encode ScreenInfo name length")?;
+    let name_length =
+        u16::try_from(name.len()).with_context(|| "Failed to encode ScreenInfo name length")?;
     let wire = WireScreenInfoRef {
         id: screen.id.0,
         name_length,

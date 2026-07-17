@@ -4,8 +4,7 @@ use niri_ipc::{Request, Response, Transform as NiriTransform, socket::Socket};
 use crate::kernel::{
     geometry::PixelSize,
     screen_manager::{
-        Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect,
-        ScreenTransform,
+        Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
     },
 };
 
@@ -143,8 +142,8 @@ impl NiriScreenLayoutManagerState {
         let mut screens = Vec::with_capacity(mapped_screens.len());
 
         for (index, (name, resolution, layout)) in mapped_screens.into_iter().enumerate() {
-            let id = u8::try_from(index)
-                .with_context(|| "Failed to assign a logical Niri screen ID")?;
+            let id =
+                u8::try_from(index).with_context(|| "Failed to assign a logical Niri screen ID")?;
 
             screens.push(Screen {
                 id: ScreenId(id),

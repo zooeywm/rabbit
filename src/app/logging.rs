@@ -2,8 +2,7 @@ mod file_writer;
 
 use std::{
     fs::{OpenOptions, create_dir_all},
-    io::{self, Write},
-    sync::{Arc, Mutex},
+    io,
 };
 
 use eros::Context;
@@ -16,7 +15,12 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use super::config::{Config, LogLevel};
+use crate::app::{
+    config::{Config, LogLevel},
+    logging::file_writer::start_logger,
+};
+
+pub(crate) use crate::app::logging::file_writer::LoggerGuard;
 
 struct LocalTimeWithOffset;
 
@@ -34,7 +38,7 @@ impl FormatTime for LocalTimeWithOffset {
     }
 }
 
-pub fn init_logging(config: &Config) -> eros::Result<()> {
+pub(crate) fn init_logging(config: &Config) -> eros::Result<LoggerGuard> {
     let log_base_dir = config
         .project_dirs
         .state_dir()
@@ -58,7 +62,8 @@ pub fn init_logging(config: &Config) -> eros::Result<()> {
         .append(true)
         .open(&log_file_path)
         .context("Failed open log file")?;
-    let file_writer = SharedFileWriter::new(log_file);
+    let (file_writer, logger_guard) =
+        start_logger(log_file).context("Failed to start Logger thread")?;
 
     tracing_subscriber::registry()
         .with(
@@ -71,12 +76,12 @@ pub fn init_logging(config: &Config) -> eros::Result<()> {
             fmt::layer()
                 .with_timer(LocalTimeWithOffset)
                 .with_ansi(false)
-                .with_writer(move || file_writer.clone())
+                .with_writer(move || file_writer.make_writer())
                 .with_filter(level_filter(config.logging.file_level)),
         )
         .try_init()
         .context("Failed init logging")?;
-    Ok(())
+    Ok(logger_guard)
 }
 
 fn level_filter(level: LogLevel) -> LevelFilter {
@@ -86,36 +91,5 @@ fn level_filter(level: LogLevel) -> LevelFilter {
         LogLevel::Info => LevelFilter::INFO,
         LogLevel::Warn => LevelFilter::WARN,
         LogLevel::Error => LevelFilter::ERROR,
-    }
-}
-
-#[derive(Clone)]
-struct SharedFileWriter {
-    file: Arc<Mutex<std::fs::File>>,
-}
-
-impl SharedFileWriter {
-    fn new(file: std::fs::File) -> Self {
-        Self {
-            file: Arc::new(Mutex::new(file)),
-        }
-    }
-}
-
-impl Write for SharedFileWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut file = match self.file.lock() {
-            Ok(file) => file,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        file.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let mut file = match self.file.lock() {
-            Ok(file) => file,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        file.flush()
     }
 }

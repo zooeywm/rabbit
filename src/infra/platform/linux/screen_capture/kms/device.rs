@@ -6,9 +6,9 @@ use std::{
 };
 
 use drm::{
+    ClientCapability, Device as _,
     control::{Device as _, connector, crtc},
     node::{DrmNode, NodeType},
-    ClientCapability, Device as _,
 };
 use eros::Context;
 
@@ -57,7 +57,10 @@ impl KmsDevice {
         match device.set_client_capability(ClientCapability::CursorPlaneHotspot, true) {
             Ok(()) => {}
             Err(error)
-                if matches!(error.kind(), ErrorKind::InvalidInput | ErrorKind::Unsupported) => {}
+                if matches!(
+                    error.kind(),
+                    ErrorKind::InvalidInput | ErrorKind::Unsupported
+                ) => {}
             Err(error) => {
                 return Ok(Err(error).with_context(|| {
                     format!(
@@ -80,16 +83,21 @@ impl KmsDevice {
         screen_name: &str,
     ) -> eros::Result<Option<(connector::Handle, crtc::Handle)>> {
         let resources = self.resource_handles().with_context(|| {
-            format!("Failed to enumerate DRM resources on {}", self.path().display())
+            format!(
+                "Failed to enumerate DRM resources on {}",
+                self.path().display()
+            )
         })?;
 
         for connector_handle in resources.connectors() {
-            let connector = self.get_connector(*connector_handle, false).with_context(|| {
-                format!(
-                    "Failed to query DRM connector {connector_handle:?} on {}",
-                    self.path().display()
-                )
-            })?;
+            let connector = self
+                .get_connector(*connector_handle, false)
+                .with_context(|| {
+                    format!(
+                        "Failed to query DRM connector {connector_handle:?} on {}",
+                        self.path().display()
+                    )
+                })?;
 
             if connector.to_string() != screen_name {
                 continue;

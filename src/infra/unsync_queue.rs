@@ -55,11 +55,7 @@ impl<T> UnsyncQueue<T> {
         UnsyncQueuePop { queue: self }
     }
 
-    pub(crate) fn push_latest_by(
-        &self,
-        item: T,
-        mut should_replace: impl FnMut(&T) -> bool,
-    ) {
+    pub(crate) fn push_latest_by(&self, item: T, mut should_replace: impl FnMut(&T) -> bool) {
         let receiver_waker = {
             let mut inner = self.inner.borrow();
 

@@ -77,9 +77,7 @@ impl QuicEndpoint {
                 SERVER_NAME,
                 Some(self.client_config.clone()),
             )
-            .with_context(|| {
-                format!("Failed to start QUIC connection to {remote_address}")
-            })?;
+            .with_context(|| format!("Failed to start QUIC connection to {remote_address}"))?;
         let started_at = Instant::now();
         let connection = connecting
             .await
@@ -107,9 +105,7 @@ impl QuicEndpoint {
         Ok(connection)
     }
 
-    pub(crate) async fn accept_connection(
-        &self,
-    ) -> eros::Result<Option<compio::quic::Connection>> {
+    pub(crate) async fn accept_connection(&self) -> eros::Result<Option<compio::quic::Connection>> {
         let Some(incoming) = self.endpoint.wait_incoming().await else {
             return Ok(None);
         };
@@ -121,9 +117,9 @@ impl QuicEndpoint {
             "QUIC connection started"
         );
         let started_at = Instant::now();
-        let connection = incoming.await.with_context(|| {
-            format!("Failed to accept QUIC connection from {remote_address}")
-        })?;
+        let connection = incoming
+            .await
+            .with_context(|| format!("Failed to accept QUIC connection from {remote_address}"))?;
         let elapsed = started_at.elapsed();
         let rtt = connection.rtt();
 

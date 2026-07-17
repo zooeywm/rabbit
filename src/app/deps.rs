@@ -2,8 +2,8 @@ use super::{App, config::Config};
 
 use crate::{
     infra::{
-        KmsScreenCaptureManagerState, NiriScreenLayoutManager,
-        NiriScreenLayoutManagerState, QuicEndpoint, RayonThreadPool, RayonThreadPoolState,
+        KmsScreenCaptureManagerState, NiriScreenLayoutManager, NiriScreenLayoutManagerState,
+        QuicEndpoint, RayonThreadPool, RayonThreadPoolState,
     },
     kernel::screen_manager::{Screen, ScreenId, ScreenLayoutManager},
 };

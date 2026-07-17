@@ -8,24 +8,20 @@ use tracing::{error, info, warn};
 use winio::prelude::*;
 
 use crate::{
-    app::{App, config::Config, init_logging},
+    app::{App, LoggerGuard, config::Config, init_logging},
     infra::{
-        KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
-        PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportSend,
-        RayonThreadPoolState, connect_transport, create_screen_capture_manager_state,
-        create_screen_layout_manager_state, receive_request,
+        KmsScreenCaptureManagerState, NiriScreenLayoutManagerState, PendingQuicConnectionRequest,
+        QuicEndpoint, QuicTransport, QuicTransportSend, RayonThreadPoolState, connect_transport,
+        create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
     },
     kernel::{
         connection_request::ConnectionRequest,
         screen_configuration::{
-            RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome,
-            ScreenResolutionStatus, ScreenStreamsConfigured, SetScreenStreams,
+            RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
+            ScreenStreamsConfigured, SetScreenStreams,
         },
         screen_manager::{ScreenId, ScreenLayoutManager},
-        session::{
-            Session, SessionId, SessionMessage, SessionRecv, SessionRole,
-            SessionSend,
-        },
+        session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole, SessionSend},
         session_control::{ControlMessage, ScreenInfo},
         transport::TransportRecv,
     },
@@ -57,6 +53,7 @@ pub(crate) struct RootComponent {
     screen_stream_results: HashMap<SessionId, ScreenStreamsConfigured>,
     next_session_id: u32,
     _connection_listener: compio::runtime::JoinHandle<()>,
+    _logger_guard: LoggerGuard,
 }
 
 pub(crate) enum RootMessage {
@@ -79,10 +76,7 @@ pub(crate) enum RootMessage {
 }
 
 impl RootComponent {
-    fn configure_preserved_screens(
-        &self,
-        request: SetScreenStreams,
-    ) -> ScreenStreamsConfigured {
+    fn configure_preserved_screens(&self, request: SetScreenStreams) -> ScreenStreamsConfigured {
         let SetScreenStreams {
             request_id,
             changes,
@@ -228,15 +222,14 @@ impl RootComponent {
     }
 
     fn refresh_connection_request_list(&mut self, selected: Option<usize>) -> eros::Result<()> {
-        self.connection_request_list.set_items(
-            self.pending_connection_requests.iter().map(|request| {
+        self.connection_request_list
+            .set_items(self.pending_connection_requests.iter().map(|request| {
                 format!(
                     "{} - {}",
                     request.request().requester_name,
                     request.remote_address(),
                 )
-            }),
-        )?;
+            }))?;
         let visible = !self.pending_connection_requests.is_empty();
         self.set_connection_request_panel_visible(visible)?;
 
@@ -274,7 +267,7 @@ impl Component for RootComponent {
 
     async fn init(_init: Self::Init<'_>, sender: &ComponentSender<Self>) -> eros::Result<Self> {
         let config = Config::new()?;
-        init_logging(&config)?;
+        let logger_guard = init_logging(&config)?;
         let screen_layout_manager_state = create_screen_layout_manager_state()
             .context("Failed to create the screen layout manager state")?;
         let screen_capture_manager_state = create_screen_capture_manager_state();
@@ -354,6 +347,7 @@ impl Component for RootComponent {
                 quic_endpoint,
                 sender.clone(),
             )),
+            _logger_guard: logger_guard,
         })
     }
 
@@ -446,11 +440,7 @@ impl Component for RootComponent {
                 match result {
                     Ok(Some(transport)) => {
                         let id = self.next_session_id()?;
-                        let session = Session::new(
-                            id,
-                            SessionRole::Controller,
-                            transport,
-                        );
+                        let session = Session::new(id, SessionRole::Controller, transport);
                         let (send, recv) = session.split();
 
                         self.start_session(send, recv, sender);
@@ -488,8 +478,7 @@ impl Component for RootComponent {
                     "Connection request decided"
                 );
                 compio::runtime::spawn(async move {
-                    approval_sender
-                        .post(RootMessage::ConnectionAccepted(request.accept().await));
+                    approval_sender.post(RootMessage::ConnectionAccepted(request.accept().await));
                 })
                 .detach();
 
@@ -509,8 +498,7 @@ impl Component for RootComponent {
                     "Connection request decided"
                 );
                 compio::runtime::spawn(async move {
-                    approval_sender
-                        .post(RootMessage::ConnectionRejected(request.reject().await));
+                    approval_sender.post(RootMessage::ConnectionRejected(request.reject().await));
                 })
                 .detach();
 
@@ -563,12 +551,13 @@ impl Component for RootComponent {
                     }
                     SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
                         let configured = self.configure_preserved_screens(request);
-                        let Some(session) = self
-                            .sessions
-                            .iter()
-                            .find(|session| session.send.id() == id)
+                        let Some(session) =
+                            self.sessions.iter().find(|session| session.send.id() == id)
                         else {
-                            warn!(session_id = id.0, "Session closed before screen stream results could be sent");
+                            warn!(
+                                session_id = id.0,
+                                "Session closed before screen stream results could be sent"
+                            );
                             return Ok(false);
                         };
 
@@ -588,25 +577,23 @@ impl Component for RootComponent {
                             .outcomes
                             .iter()
                             .filter(|outcome| {
-                                matches!(
-                                    &outcome.status,
-                                    ScreenResolutionStatus::Configured(_)
-                                )
+                                matches!(&outcome.status, ScreenResolutionStatus::Configured(_))
                             })
                             .count();
                         let failed_count = configured.outcomes.len() - configured_count;
 
                         self.connection_status.set_text(format!(
                             "Session {} request {}: {} configured, {} failed",
-                            id.0,
-                            configured.request_id.0,
-                            configured_count,
-                            failed_count
+                            id.0, configured.request_id.0, configured_count, failed_count
                         ))?;
                         self.screen_stream_results.insert(id, configured);
                     }
                     message => {
-                        warn!(session_id = id.0, ?message, "Session message is not handled yet")
+                        warn!(
+                            session_id = id.0,
+                            ?message,
+                            "Session message is not handled yet"
+                        )
                     }
                 }
 
@@ -645,8 +632,7 @@ impl Component for RootComponent {
                 if let Some((session_id, screen_id)) = selected {
                     self.connection_status.set_text(format!(
                         "Selected session {} screen {}",
-                        session_id.0,
-                        screen_id.0
+                        session_id.0, screen_id.0
                     ))?;
                 }
 
@@ -704,10 +690,8 @@ async fn receive_connection_requests(
     }
 }
 
-async fn receive_session<R>(
-    mut session: SessionRecv<R>,
-    sender: ComponentSender<RootComponent>,
-) where
+async fn receive_session<R>(mut session: SessionRecv<R>, sender: ComponentSender<RootComponent>)
+where
     R: TransportRecv,
 {
     let id = session.id();

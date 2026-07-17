@@ -25,18 +25,15 @@ impl KmsCapturer {
         Ok(Self { output, allocator })
     }
 
-    pub(crate) fn capture(
-        &self,
-    ) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
+    pub(crate) fn capture(&self) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
         let snapshot = self
             .output
             .snapshot_framebuffers()
             .with_context(|| "Failed to snapshot KMS framebuffers")?;
 
-        Ok(self
-            .allocator
+        self.allocator
             .compose(snapshot)
-            .with_context(|| "Failed to compose KMS framebuffers")?)
+            .with_context(|| "Failed to compose KMS framebuffers")
     }
 }
 

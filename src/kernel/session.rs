@@ -3,8 +3,7 @@ use crate::kernel::{
     screen_manager::{Screen, ScreenId},
     session_control::ControlMessage,
     transport::{
-        Delivery, Transport, TransportChannel, TransportMessage, TransportRecv,
-        TransportSend,
+        Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
     },
 };
 
@@ -112,15 +111,8 @@ where
         self.send_control(screens).await
     }
 
-    pub async fn send_screen_streams_request(
-        &self,
-        request: SetScreenStreams,
-    ) -> eros::Result<()> {
-        require_role(
-            self.role,
-            SessionRole::Controller,
-            "request screen streams",
-        )?;
+    pub async fn send_screen_streams_request(&self, request: SetScreenStreams) -> eros::Result<()> {
+        require_role(self.role, SessionRole::Controller, "request screen streams")?;
         self.send_control(request).await
     }
 
@@ -182,11 +174,7 @@ where
     }
 }
 
-fn require_role(
-    role: SessionRole,
-    expected: SessionRole,
-    operation: &str,
-) -> eros::Result<()> {
+fn require_role(role: SessionRole, expected: SessionRole, operation: &str) -> eros::Result<()> {
     if role != expected {
         eros::bail!(
             "Session role {:?} cannot {operation}; expected {:?}",
@@ -198,10 +186,7 @@ fn require_role(
     Ok(())
 }
 
-fn validate_received_control(
-    role: SessionRole,
-    message: &ControlMessage,
-) -> eros::Result<()> {
+fn validate_received_control(role: SessionRole, message: &ControlMessage) -> eros::Result<()> {
     let (expected, name) = match message {
         ControlMessage::ScreenList(_) => (SessionRole::Controller, "ScreenList"),
         ControlMessage::SetScreenStreams(_) => (SessionRole::Host, "SetScreenStreams"),
