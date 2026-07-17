@@ -116,6 +116,7 @@ pub(crate) struct KmsPlanePlacement {
     pub zpos: u64,
     pub source: KmsSourceRect,
     pub destination: KmsDestinationRect,
+    pub transform: KmsPlaneTransform,
 }
 
 /// Source coordinates in DRM's unsigned 16.16 fixed-point representation.
@@ -133,4 +134,20 @@ pub(crate) struct KmsDestinationRect {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KmsPlaneTransform {
+    pub rotation: KmsRotation,
+    pub reflect_x: bool,
+    pub reflect_y: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KmsRotation {
+    #[default]
+    Rotate0,
+    Rotate90,
+    Rotate180,
+    Rotate270,
 }

@@ -7,7 +7,8 @@ use crate::infra::platform::screen_capture::{
     device::KmsDevice,
         types::{
             KmsActivePlane, KmsDestinationRect, KmsPlaneCaptureError,
-            KmsPlaneIssue, KmsPlanePlacement, KmsPlaneSnapshot, KmsSourceRect,
+            KmsPlaneIssue, KmsPlanePlacement, KmsPlaneSnapshot,
+            KmsPlaneTransform, KmsRotation, KmsSourceRect,
         },
 };
 
@@ -137,6 +138,7 @@ fn query_plane_properties(
             b"CRTC_Y" => values.destination_y = Some(*value),
             b"CRTC_W" => values.destination_width = Some(*value),
             b"CRTC_H" => values.destination_height = Some(*value),
+            b"rotation" => values.rotation = Some(*value),
             _ => {}
         }
     }
@@ -156,6 +158,7 @@ struct RawPlaneProperties {
     destination_y: Option<u64>,
     destination_width: Option<u64>,
     destination_height: Option<u64>,
+    rotation: Option<u64>,
 }
 
 struct KmsPlaneProperties {
@@ -192,6 +195,10 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             width: unsigned_32(values.destination_width, "CRTC_W")?,
             height: unsigned_32(values.destination_height, "CRTC_H")?,
         };
+        let transform = match values.rotation {
+            Some(rotation) => KmsPlaneTransform::try_from(rotation)?,
+            None => KmsPlaneTransform::default(),
+        };
 
         let placement = if source.width == 0
             || source.height == 0
@@ -204,6 +211,7 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
                 zpos,
                 source,
                 destination,
+                transform,
             })
         };
 
@@ -212,6 +220,55 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             placement,
         })
     }
+}
+
+impl TryFrom<u64> for KmsPlaneTransform {
+    type Error = KmsPlaneCaptureError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        let rotation_mask = KmsTransformFlag::Rotate0 as u64
+            | KmsTransformFlag::Rotate90 as u64
+            | KmsTransformFlag::Rotate180 as u64
+            | KmsTransformFlag::Rotate270 as u64;
+        let reflection_mask =
+            KmsTransformFlag::ReflectX as u64 | KmsTransformFlag::ReflectY as u64;
+
+        if value & !(rotation_mask | reflection_mask) != 0 {
+            return Err(KmsPlaneCaptureError::InvalidProperty {
+                property: "rotation",
+                value,
+            });
+        }
+
+        let rotation = match value & rotation_mask {
+            flag if flag == KmsTransformFlag::Rotate0 as u64 => KmsRotation::Rotate0,
+            flag if flag == KmsTransformFlag::Rotate90 as u64 => KmsRotation::Rotate90,
+            flag if flag == KmsTransformFlag::Rotate180 as u64 => KmsRotation::Rotate180,
+            flag if flag == KmsTransformFlag::Rotate270 as u64 => KmsRotation::Rotate270,
+            _ => {
+                return Err(KmsPlaneCaptureError::InvalidProperty {
+                    property: "rotation",
+                    value,
+                });
+            }
+        };
+
+        Ok(Self {
+            rotation,
+            reflect_x: value & KmsTransformFlag::ReflectX as u64 != 0,
+            reflect_y: value & KmsTransformFlag::ReflectY as u64 != 0,
+        })
+    }
+}
+
+#[repr(u64)]
+enum KmsTransformFlag {
+    Rotate0 = 1 << 0,
+    Rotate90 = 1 << 1,
+    Rotate180 = 1 << 2,
+    Rotate270 = 1 << 3,
+    ReflectX = 1 << 4,
+    ReflectY = 1 << 5,
 }
 
 fn required(
