@@ -6,8 +6,9 @@ use eros::Context;
 use crate::infra::platform::screen_capture::{
     device::KmsDevice,
         types::{
-            KmsActivePlane, KmsDestinationRect, KmsPlaneCaptureError,
-            KmsPixelBlendMode, KmsPlaneBlend, KmsPlaneIssue,
+            KmsActivePlane, KmsColorEncoding, KmsColorRange,
+            KmsDestinationRect, KmsPixelBlendMode, KmsPlaneBlend,
+            KmsPlaneCaptureError, KmsPlaneColor, KmsPlaneIssue,
             KmsPlanePlacement, KmsPlaneSnapshot, KmsPlaneTransform,
             KmsRotation, KmsSourceRect,
         },
@@ -106,6 +107,7 @@ impl KmsOutput {
                 framebuffer,
                 placement,
                 blend: properties.blend,
+                color: properties.color,
             });
         }
 
@@ -145,6 +147,12 @@ fn query_plane_properties(
             b"pixel blend mode" => {
                 values.pixel_blend_mode = Some(pixel_blend_mode(&property, *value)?);
             }
+            b"COLOR_ENCODING" => {
+                values.color_encoding = Some(color_encoding(&property, *value)?);
+            }
+            b"COLOR_RANGE" => {
+                values.color_range = Some(color_range(&property, *value)?);
+            }
             _ => {}
         }
     }
@@ -167,12 +175,15 @@ struct RawPlaneProperties {
     rotation: Option<u64>,
     alpha: Option<u64>,
     pixel_blend_mode: Option<KmsPixelBlendMode>,
+    color_encoding: Option<KmsColorEncoding>,
+    color_range: Option<KmsColorRange>,
 }
 
 struct KmsPlaneProperties {
     plane_type: PlaneType,
     placement: Option<KmsPlanePlacement>,
     blend: KmsPlaneBlend,
+    color: KmsPlaneColor,
 }
 
 impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
@@ -221,6 +232,20 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             alpha,
             pixel_mode: values.pixel_blend_mode.unwrap_or_default(),
         };
+        let color = match (values.color_encoding, values.color_range) {
+            (Some(encoding), Some(range)) => KmsPlaneColor { encoding, range },
+            (None, None) => KmsPlaneColor::default(),
+            (Some(_), None) => {
+                return Err(KmsPlaneCaptureError::MissingProperty {
+                    property: "COLOR_RANGE",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(KmsPlaneCaptureError::MissingProperty {
+                    property: "COLOR_ENCODING",
+                });
+            }
+        };
 
         let placement = if source.width == 0
             || source.height == 0
@@ -241,6 +266,7 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             plane_type,
             placement,
             blend,
+            color,
         })
     }
 }
@@ -263,6 +289,51 @@ fn pixel_blend_mode(
         b"Coverage" => Ok(KmsPixelBlendMode::Coverage),
         _ => Err(KmsPlaneCaptureError::InvalidProperty {
             property: "pixel blend mode",
+            value,
+        }),
+    }
+}
+
+fn color_encoding(
+    property: &drm::control::property::Info,
+    value: u64,
+) -> Result<KmsColorEncoding, KmsPlaneCaptureError> {
+    let converted = property.value_type().convert_value(value);
+    let Some(value_name) = converted.as_enum() else {
+        return Err(KmsPlaneCaptureError::InvalidProperty {
+            property: "COLOR_ENCODING",
+            value,
+        });
+    };
+
+    match value_name.name().to_bytes() {
+        b"ITU-R BT.601 YCbCr" => Ok(KmsColorEncoding::Bt601),
+        b"ITU-R BT.709 YCbCr" => Ok(KmsColorEncoding::Bt709),
+        b"ITU-R BT.2020 YCbCr" => Ok(KmsColorEncoding::Bt2020),
+        _ => Err(KmsPlaneCaptureError::InvalidProperty {
+            property: "COLOR_ENCODING",
+            value,
+        }),
+    }
+}
+
+fn color_range(
+    property: &drm::control::property::Info,
+    value: u64,
+) -> Result<KmsColorRange, KmsPlaneCaptureError> {
+    let converted = property.value_type().convert_value(value);
+    let Some(value_name) = converted.as_enum() else {
+        return Err(KmsPlaneCaptureError::InvalidProperty {
+            property: "COLOR_RANGE",
+            value,
+        });
+    };
+
+    match value_name.name().to_bytes() {
+        b"YCbCr limited range" => Ok(KmsColorRange::Limited),
+        b"YCbCr full range" => Ok(KmsColorRange::Full),
+        _ => Err(KmsPlaneCaptureError::InvalidProperty {
+            property: "COLOR_RANGE",
             value,
         }),
     }

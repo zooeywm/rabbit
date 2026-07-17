@@ -90,6 +90,7 @@ pub(crate) struct KmsActivePlane {
     pub framebuffer: framebuffer::Handle,
     pub placement: KmsPlanePlacement,
     pub blend: KmsPlaneBlend,
+    pub color: KmsPlaneColor,
 }
 
 #[derive(Debug)]
@@ -105,6 +106,7 @@ pub(crate) struct KmsFramebufferPlane {
     pub buffer: DmaBufFrame,
     pub placement: KmsPlanePlacement,
     pub blend: KmsPlaneBlend,
+    pub color: KmsPlaneColor,
 }
 
 #[derive(Debug)]
@@ -175,4 +177,25 @@ pub(crate) enum KmsPixelBlendMode {
     #[default]
     PreMultiplied,
     Coverage,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KmsPlaneColor {
+    pub encoding: KmsColorEncoding,
+    pub range: KmsColorRange,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KmsColorEncoding {
+    #[default]
+    Bt601,
+    Bt709,
+    Bt2020,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KmsColorRange {
+    #[default]
+    Limited,
+    Full,
 }
