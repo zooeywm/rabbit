@@ -39,15 +39,18 @@ impl KmsCapturer {
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::platform::screen_capture::kms::capture::KmsCapturer;
+    use crate::infra::platform::screen_capture::kms::worker::KmsCaptureWorker;
 
     #[test]
     #[ignore = "requires a real KMS output and CAP_SYS_ADMIN"]
     fn captures_one_composed_frame() {
         let screen_name = std::env::var("RABBIT_KMS_SCREEN")
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
-        let capturer = KmsCapturer::new(&screen_name).expect("KMS capturer should open");
-        let frame = capturer.capture().expect("KMS should capture one frame");
+        let worker = KmsCaptureWorker::new(screen_name).expect("KMS worker thread should start");
+        let runtime = compio::runtime::Runtime::new().expect("Compio runtime should start");
+        let frame = runtime
+            .block_on(worker.capture())
+            .expect("KMS worker should capture one frame");
 
         for issue in &frame.issues {
             eprintln!("{issue}");
