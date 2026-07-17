@@ -1,3 +1,4 @@
+mod capture;
 mod composition;
 mod device;
 mod egl_context;
