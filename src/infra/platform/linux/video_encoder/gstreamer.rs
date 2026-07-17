@@ -29,6 +29,23 @@ impl GStreamerVideoEncoder {
 
         Ok(factories)
     }
+
+    fn select_hardware_h264_encoder(
+        input_caps: &gstreamer::CapsRef,
+    ) -> eros::Result<gstreamer::ElementFactory> {
+        let factory = Self::find_hardware_h264_encoders()?
+            .into_iter()
+            .find(|factory| factory.can_sink_all_caps(input_caps));
+
+        let Some(factory) = factory else {
+            eros::bail!(
+                "No GStreamer hardware H.264 encoder accepts input caps {}",
+                input_caps
+            );
+        };
+
+        Ok(factory)
+    }
 }
 
 fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
@@ -62,6 +79,34 @@ mod tests {
             assert!(class.split('/').any(|component| component == "Hardware"));
             assert!(factory.can_src_any_caps(&h264_caps()));
         }
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn selects_a_hardware_h264_encoder_for_dmabuf_input() {
+        let _encoder = GStreamerVideoEncoder::new()
+            .expect("GStreamer should initialize before selecting an encoder");
+        let input_caps = registered_dmabuf_input_caps();
+        let factory = GStreamerVideoEncoder::select_hardware_h264_encoder(&input_caps)
+            .expect("A hardware H.264 encoder should accept its advertised DMA-BUF input caps");
+
+        assert!(factory.can_sink_all_caps(&input_caps));
+        assert!(factory.can_src_any_caps(&h264_caps()));
+    }
+
+    fn registered_dmabuf_input_caps() -> gstreamer::Caps {
+        let dmabuf_caps = gstreamer::Caps::builder("video/x-raw")
+            .features(["memory:DMABuf"])
+            .build();
+
+        GStreamerVideoEncoder::find_hardware_h264_encoders()
+            .expect("At least one hardware H.264 encoder should be registered")
+            .into_iter()
+            .flat_map(|factory| factory.static_pad_templates())
+            .filter(|template| template.direction() == gstreamer::PadDirection::Sink)
+            .map(|template| template.caps().intersect(&dmabuf_caps))
+            .find(|caps| !caps.is_empty())
+            .expect("A hardware H.264 encoder should advertise DMA-BUF input caps")
     }
 
     fn h264_caps() -> gstreamer::Caps {
