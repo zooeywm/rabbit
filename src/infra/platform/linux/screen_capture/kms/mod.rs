@@ -16,6 +16,7 @@ mod framebuffer;
 mod gbm_allocator;
 mod gl_context;
 mod output;
+mod subscription;
 mod types;
 mod worker;
 
