@@ -1,4 +1,5 @@
 pub mod connection_request;
+pub mod frame_pipeline;
 pub mod geometry;
 pub mod screen_capture;
 pub mod screen_configuration;
