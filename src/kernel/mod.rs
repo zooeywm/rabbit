@@ -7,3 +7,4 @@ pub mod screen_manager;
 pub mod session;
 pub mod session_control;
 pub mod transport;
+pub mod video_encoder;
