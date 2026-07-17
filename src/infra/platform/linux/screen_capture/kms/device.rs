@@ -179,19 +179,21 @@ mod tests {
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn resolves_the_vblank_pipe_index_from_resource_order() {
-        let first = crtc(10);
-        let second = crtc(20);
+    fn resolves_the_vblank_pipe_index_from_resource_order() -> eros::Result<()> {
+        let first = crtc(10)?;
+        let second = crtc(20)?;
 
-        assert_eq!(
-            vblank_crtc_index(&[first, second], second)
-                .expect("second CRTC should have a vblank pipe index"),
-            1
-        );
+        assert_eq!(vblank_crtc_index(&[first, second], second)?, 1);
         assert!(vblank_crtc_index(&[first], second).is_err());
+
+        Ok(())
     }
 
-    fn crtc(raw: u32) -> crtc::Handle {
-        from_u32(raw).expect("test CRTC handle should be non-zero")
+    fn crtc(raw: u32) -> eros::Result<crtc::Handle> {
+        let Some(handle) = from_u32(raw) else {
+            eros::bail!("Test CRTC handle {} is zero", raw);
+        };
+
+        Ok(handle)
     }
 }

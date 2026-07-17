@@ -40,7 +40,7 @@ pub(crate) struct KmsScreenCaptureManagerState {
 
 #[derive(Debug)]
 struct KmsCaptureSource {
-    capture_task: Option<compio::runtime::JoinHandle<()>>,
+    frame_receiver_task: Option<compio::runtime::JoinHandle<()>>,
     inner: Rc<KmsCaptureSourceInner>,
 }
 
@@ -53,7 +53,7 @@ struct KmsCaptureSourceInner {
 impl KmsCaptureSource {
     fn new(screen_name: String) -> std::io::Result<Self> {
         Ok(Self {
-            capture_task: None,
+            frame_receiver_task: None,
             inner: Rc::new(KmsCaptureSourceInner {
                 worker: KmsCaptureWorker::new(screen_name)?,
                 frames: RefCell::new(KmsFramePublisher::default()),
@@ -61,30 +61,34 @@ impl KmsCaptureSource {
         })
     }
 
-    fn subscribe(&mut self) -> KmsFrameSubscription {
+    fn subscribe(&mut self) -> eros::Result<KmsFrameSubscription> {
         let subscription = self.inner.frames.borrow_mut().subscribe();
 
         if self
-            .capture_task
+            .frame_receiver_task
             .as_ref()
             .is_none_or(compio::runtime::JoinHandle::is_finished)
         {
-            self.capture_task = Some(compio::runtime::spawn(capture_frames(Rc::clone(
-                &self.inner,
-            ))));
+            self.inner.worker.start()?;
+            self.frame_receiver_task = Some(compio::runtime::spawn(receive_captured_frames(
+                Rc::clone(&self.inner),
+            )));
         }
 
-        subscription
+        Ok(subscription)
     }
 }
 
-async fn capture_frames(source: Rc<KmsCaptureSourceInner>) {
+async fn receive_captured_frames(source: Rc<KmsCaptureSourceInner>) {
     loop {
         if !source.frames.borrow_mut().has_subscribers() {
+            if let Err(error) = source.worker.stop() {
+                error!(%error, "Failed to stop KMS capture source");
+            }
             return;
         }
 
-        match source.worker.capture().await {
+        match source.worker.receive_frame().await {
             Ok(frame) => source.frames.borrow_mut().publish(frame),
             Err(error) => {
                 error!(%error, "KMS capture source stopped");
@@ -141,12 +145,14 @@ where
     type Subscription = KmsFrameSubscription;
 
     fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription> {
-        Ok(self.source(screen_id)?.subscribe())
+        self.source(screen_id)?.subscribe()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use eros::Context;
+
     use crate::{
         infra::platform::screen_capture::kms::{
             KmsScreenCaptureManager, KmsScreenCaptureManagerState,
@@ -191,17 +197,19 @@ mod tests {
         }
 
         fn primary_screen(&self) -> eros::Result<&Screen> {
-            Ok(self
-                .screens
-                .first()
-                .expect("test screen layout should not be empty"))
+            let Some(screen) = self.screens.first() else {
+                eros::bail!("Test screen layout is empty");
+            };
+
+            Ok(screen)
         }
     }
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn subscriptions_reuse_one_source_per_physical_screen() {
-        let runtime = compio::runtime::Runtime::new().expect("Compio runtime should start");
+    fn subscriptions_reuse_one_source_per_physical_screen() -> eros::Result<()> {
+        let runtime = compio::runtime::Runtime::new()
+            .with_context(|| "Failed to start the Compio test runtime")?;
 
         runtime.block_on(async {
             let mut deps = TestDeps {
@@ -210,17 +218,17 @@ mod tests {
             };
             let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
 
-            let _first = manager
-                .subscribe(&ScreenId(0))
-                .expect("first KMS subscription should start");
-            let _second = manager
-                .subscribe(&ScreenId(0))
-                .expect("second KMS subscription should reuse the source");
+            let _first = manager.subscribe(&ScreenId(0))?;
+            let _second = manager.subscribe(&ScreenId(0))?;
 
             assert_eq!(manager.sources.len(), 1);
             assert!(manager.subscribe(&ScreenId(2)).is_err());
             assert_eq!(manager.sources.len(), 1);
-        });
+
+            Ok::<(), eros::ErrorUnion>(())
+        })?;
+
+        Ok(())
     }
 
     fn screen(id: u8, name: &str) -> Screen {
