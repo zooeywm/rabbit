@@ -1,11 +1,13 @@
-use super::{App, config::Config};
-
 use crate::{
+    app::{App, config::Config},
     infra::{
-        KmsScreenCaptureManagerState, NiriScreenLayoutManager, NiriScreenLayoutManagerState,
-        QuicEndpoint, RayonThreadPool, RayonThreadPoolState,
+        KmsScreenCaptureManager, KmsScreenCaptureManagerState, NiriScreenLayoutManager,
+        NiriScreenLayoutManagerState, QuicEndpoint, RayonThreadPool, RayonThreadPoolState,
     },
-    kernel::screen_manager::{Screen, ScreenId, ScreenLayoutManager},
+    kernel::{
+        screen_capture::ScreenCaptureManager,
+        screen_manager::{Screen, ScreenId, ScreenLayoutManager},
+    },
 };
 
 impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
@@ -96,5 +98,33 @@ impl<ScreenLayoutManagerState> AsMut<KmsScreenCaptureManagerState>
 {
     fn as_mut(&mut self) -> &mut KmsScreenCaptureManagerState {
         &mut self.screen_capture_manager_state
+    }
+}
+
+impl ScreenCaptureManager for App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState> {
+    type Buffer = <KmsScreenCaptureManager<Self> as ScreenCaptureManager>::Buffer;
+    type Issue = <KmsScreenCaptureManager<Self> as ScreenCaptureManager>::Issue;
+    type Subscription = <KmsScreenCaptureManager<Self> as ScreenCaptureManager>::Subscription;
+
+    fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription> {
+        KmsScreenCaptureManager::inj_ref_mut(self).subscribe(screen_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        app::App,
+        infra::{KmsScreenCaptureManagerState, NiriScreenLayoutManagerState},
+        kernel::screen_capture::ScreenCaptureManager,
+    };
+
+    #[test]
+    fn app_exposes_the_platform_screen_capture_manager() {
+        fn assert_screen_capture_manager<Manager: ScreenCaptureManager>() {}
+
+        assert_screen_capture_manager::<
+            App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState>,
+        >();
     }
 }
