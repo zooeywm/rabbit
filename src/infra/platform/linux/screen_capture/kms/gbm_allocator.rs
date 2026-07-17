@@ -45,7 +45,7 @@ impl GbmFrameAllocator {
         let usage = BufferObjectFlags::RENDERING;
 
         if !self.device.is_format_supported(format, usage) {
-            eros::bail!("GBM does not support rendering to {format:?}");
+            eros::bail!("GBM does not support {format:?} composition targets");
         }
 
         let buffer = self

@@ -14,6 +14,13 @@ use khronos_egl as egl;
 const PLATFORM_GBM: egl::Enum = 0x31D7;
 const LINUX_DMA_BUF: egl::Enum = 0x3270;
 const LINUX_DRM_FOURCC: egl::Attrib = 0x3271;
+const YUV_COLOR_SPACE_HINT: egl::Attrib = 0x327B;
+const SAMPLE_RANGE_HINT: egl::Attrib = 0x327C;
+const ITU_REC601: egl::Attrib = 0x327F;
+const ITU_REC709: egl::Attrib = 0x3280;
+const ITU_REC2020: egl::Attrib = 0x3281;
+const YUV_FULL_RANGE: egl::Attrib = 0x3282;
+const YUV_NARROW_RANGE: egl::Attrib = 0x3283;
 const PLANE_FD: [egl::Attrib; 4] = [0x3272, 0x3275, 0x3278, 0x3440];
 const PLANE_OFFSET: [egl::Attrib; 4] = [0x3273, 0x3276, 0x3279, 0x3441];
 const PLANE_PITCH: [egl::Attrib; 4] = [0x3274, 0x3277, 0x327A, 0x3442];
@@ -22,7 +29,10 @@ const PLANE_MODIFIER_HIGH: [egl::Attrib; 4] = [0x3444, 0x3446, 0x3448, 0x344A];
 
 use crate::infra::platform::screen_capture::kms::{
     gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
-    types::DmaBufFrame,
+    types::{
+        DmaBufFrame, KmsColorEncoding, KmsColorRange, KmsFramebufferPlane,
+        KmsPlaneColor,
+    },
 };
 
 pub(crate) struct EglContext {
@@ -35,11 +45,17 @@ pub(crate) struct EglContext {
 }
 
 #[derive(Debug)]
-pub(crate) struct EglImage<'context> {
+struct EglImage<'context> {
     owner: &'context EglContext,
     image: egl::Image,
     size: crate::kernel::geometry::PixelSize,
 }
+
+#[derive(Debug)]
+pub(crate) struct EglPlaneImage<'context>(EglImage<'context>);
+
+#[derive(Debug)]
+pub(crate) struct EglCompositionImage<'context>(EglImage<'context>);
 
 impl std::fmt::Debug for EglContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,9 +109,27 @@ impl EglContext {
         })
     }
 
-    pub(crate) fn import_dma_buf<'context>(
+    pub(crate) fn import_plane<'context>(
+        &'context self,
+        plane: &KmsFramebufferPlane,
+    ) -> eros::Result<EglPlaneImage<'context>> {
+        Ok(EglPlaneImage(
+            self.import_dma_buf(&plane.buffer, Some(plane.color))
+                .with_context(|| format!("Failed to import KMS plane {:?}", plane.id))?,
+        ))
+    }
+
+    pub(crate) fn import_composition_target<'context>(
         &'context self,
         frame: &DmaBufFrame,
+    ) -> eros::Result<EglCompositionImage<'context>> {
+        Ok(EglCompositionImage(self.import_dma_buf(frame, None)?))
+    }
+
+    fn import_dma_buf<'context>(
+        &'context self,
+        frame: &DmaBufFrame,
+        color: Option<KmsPlaneColor>,
     ) -> eros::Result<EglImage<'context>> {
         if frame.planes.is_empty() {
             eros::bail!("Cannot import a DMA-BUF frame without planes");
@@ -116,6 +150,15 @@ impl EglContext {
             LINUX_DRM_FOURCC,
             frame.format as u32 as egl::Attrib,
         ];
+
+        if let Some(color) = color {
+            attributes.extend_from_slice(&[
+                YUV_COLOR_SPACE_HINT,
+                color_space_hint(color.encoding),
+                SAMPLE_RANGE_HINT,
+                sample_range_hint(color.range),
+            ]);
+        }
 
         for (plane_index, plane) in frame.planes.iter().enumerate() {
             let object = frame.objects.get(plane.object_index).with_context(|| {
@@ -180,24 +223,25 @@ impl EglContext {
 
     pub(crate) fn create_external_texture<'context>(
         &'context self,
-        image: &EglImage<'_>,
+        image: &EglPlaneImage<'_>,
     ) -> eros::Result<GlExternalTexture<'context>> {
-        if !ptr::eq(self, image.owner) {
+        if !ptr::eq(self, image.0.owner) {
             eros::bail!("Cannot bind an EGLImage created by another EGL context");
         }
 
-        self.gl.create_external_texture(image.image)
+        self.gl.create_external_texture(image.0.image)
     }
 
     pub(crate) fn create_composition_target<'context>(
         &'context self,
-        image: &EglImage<'_>,
+        image: &EglCompositionImage<'_>,
     ) -> eros::Result<GlCompositionTarget<'context>> {
-        if !ptr::eq(self, image.owner) {
-            eros::bail!("Cannot render to an EGLImage created by another EGL context");
+        if !ptr::eq(self, image.0.owner) {
+            eros::bail!("Cannot use an EGLImage from another EGL context as a composition target");
         }
 
-        self.gl.create_composition_target(image.image, image.size)
+        self.gl
+            .create_composition_target(image.0.image, image.0.size)
     }
 }
 
@@ -285,4 +329,19 @@ fn has_extension(extensions: &CStr, expected: &str) -> bool {
         .to_bytes()
         .split(|byte| byte.is_ascii_whitespace())
         .any(|extension| extension == expected.as_bytes())
+}
+
+fn color_space_hint(encoding: KmsColorEncoding) -> egl::Attrib {
+    match encoding {
+        KmsColorEncoding::Bt601 => ITU_REC601,
+        KmsColorEncoding::Bt709 => ITU_REC709,
+        KmsColorEncoding::Bt2020 => ITU_REC2020,
+    }
+}
+
+fn sample_range_hint(range: KmsColorRange) -> egl::Attrib {
+    match range {
+        KmsColorRange::Limited => YUV_NARROW_RANGE,
+        KmsColorRange::Full => YUV_FULL_RANGE,
+    }
 }
