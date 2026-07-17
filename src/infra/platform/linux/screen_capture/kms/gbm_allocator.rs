@@ -1,4 +1,4 @@
-use std::os::fd::{AsFd, OwnedFd};
+use std::{fs::OpenOptions, os::fd::OwnedFd};
 
 use eros::Context;
 use gbm::{BufferObjectFlags, Device, Format};
@@ -21,16 +21,22 @@ pub(crate) struct GbmFrameAllocator {
 
 impl GbmFrameAllocator {
     pub(crate) fn new(device: &KmsDevice) -> eros::Result<Self> {
-        let device_fd = device.as_fd().try_clone_to_owned().with_context(|| {
+        let render_node_path = device.render_node_path()?;
+        let render_node = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&render_node_path)
+            .with_context(|| {
+                format!(
+                    "Failed to open DRM render node {}",
+                    render_node_path.display()
+                )
+            })?;
+        let render_node = OwnedFd::from(render_node);
+        let device = Device::new(render_node).with_context(|| {
             format!(
-                "Failed to duplicate DRM device {} for GBM",
-                device.path().display()
-            )
-        })?;
-        let device = Device::new(device_fd).with_context(|| {
-            format!(
-                "Failed to create GBM device for {}",
-                device.path().display()
+                "Failed to create GBM device from {}",
+                render_node_path.display()
             )
         })?;
         let egl = EglContext::new(&device)?;

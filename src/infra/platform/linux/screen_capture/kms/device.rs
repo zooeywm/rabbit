@@ -78,6 +78,19 @@ impl KmsDevice {
         &self.path
     }
 
+    pub(crate) fn render_node_path(&self) -> eros::Result<PathBuf> {
+        let node = DrmNode::from_file(&self.file).with_context(|| {
+            format!("Failed to inspect DRM primary node {}", self.path.display())
+        })?;
+
+        Ok(node.dev_path_with_type(NodeType::Render).with_context(|| {
+            format!(
+                "DRM device {} does not provide a render node",
+                self.path.display()
+            )
+        })?)
+    }
+
     pub(crate) fn find_active_output(
         &self,
         screen_name: &str,
