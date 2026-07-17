@@ -159,6 +159,10 @@ impl TransportRecv for QuicTransportRecv {
 }
 
 impl TransportSend for QuicTransportSend {
+    fn max_unreliable_payload_size(&self) -> Option<usize> {
+        max_tlv_payload_size(self.connection.max_datagram_size())
+    }
+
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
         self.send_message(message)
     }
@@ -508,4 +512,21 @@ fn decode_tlv(mut tlv: Bytes, delivery: Delivery) -> eros::Result<TransportMessa
         delivery,
         payload: tlv,
     })
+}
+
+fn max_tlv_payload_size(max_datagram_size: Option<usize>) -> Option<usize> {
+    max_datagram_size.map(|size| size.saturating_sub(TLV_HEADER_SIZE).min(u16::MAX as usize))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::infra::transport::quic::max_tlv_payload_size;
+
+    #[test]
+    fn reserves_the_quic_tlv_header_from_unreliable_payloads() {
+        assert_eq!(max_tlv_payload_size(None), None);
+        assert_eq!(max_tlv_payload_size(Some(2)), Some(0));
+        assert_eq!(max_tlv_payload_size(Some(1200)), Some(1197));
+        assert_eq!(max_tlv_payload_size(Some(usize::MAX)), Some(65535));
+    }
 }
