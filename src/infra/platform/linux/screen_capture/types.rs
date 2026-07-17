@@ -2,7 +2,7 @@ use std::{io, os::fd::OwnedFd};
 
 use drm::{
     buffer::{DrmFourcc, DrmModifier},
-    control::{GetPlanarFramebufferError, framebuffer, plane},
+    control::{GetPlanarFramebufferError, PlaneType, framebuffer, plane},
 };
 
 use crate::kernel::geometry::PixelSize;
@@ -27,13 +27,6 @@ pub(crate) struct DmaBufFrame {
     pub objects: Vec<DmaBufObject>,
     pub planes: Vec<DmaBufPlane>,
     pub readiness_fence: Option<OwnedFd>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KmsPlaneType {
-    Primary,
-    Overlay,
-    Cursor,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,7 +65,20 @@ pub(crate) enum KmsPlaneCaptureError {
 #[error("KMS {plane_type:?} plane {plane_id:?}: {error}")]
 pub(crate) struct KmsPlaneIssue {
     pub plane_id: plane::Handle,
-    pub plane_type: KmsPlaneType,
+    pub plane_type: Option<PlaneType>,
     #[source]
     pub error: KmsPlaneCaptureError,
+}
+
+#[derive(Debug)]
+pub(crate) struct KmsActivePlane {
+    pub id: plane::Handle,
+    pub plane_type: PlaneType,
+    pub framebuffer: framebuffer::Handle,
+}
+
+#[derive(Debug)]
+pub(crate) struct KmsPlaneSnapshot {
+    pub planes: Vec<KmsActivePlane>,
+    pub issues: Vec<KmsPlaneIssue>,
 }

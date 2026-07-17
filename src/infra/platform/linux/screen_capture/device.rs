@@ -7,6 +7,7 @@ use std::{
 use drm::{
     control::{Device as _, connector, crtc},
     node::{DrmNode, NodeType},
+    ClientCapability, Device as _,
 };
 use eros::Context;
 
@@ -30,10 +31,29 @@ impl KmsDevice {
             eros::bail!("DRM device {} is not a primary node", path.display());
         }
 
-        Ok(Self {
+        let device = Self {
             file,
             path: path.into(),
-        })
+        };
+
+        device
+            .set_client_capability(ClientCapability::UniversalPlanes, true)
+            .with_context(|| {
+                format!(
+                    "Failed to enable universal DRM planes on {}",
+                    device.path().display()
+                )
+            })?;
+        device
+            .set_client_capability(ClientCapability::Atomic, true)
+            .with_context(|| {
+                format!(
+                    "Failed to enable atomic DRM properties on {}",
+                    device.path().display()
+                )
+            })?;
+
+        Ok(device)
     }
 
     pub(crate) fn path(&self) -> &Path {
