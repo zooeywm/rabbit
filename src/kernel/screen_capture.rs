@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::kernel::screen_manager::ScreenId;
 
@@ -14,7 +14,7 @@ pub trait ScreenCaptureManager {
     type Buffer;
     type Issue;
     type Subscription: futures_core::Stream<
-        Item = eros::Result<Arc<CapturedFrame<Self::Buffer, Self::Issue>>>,
+        Item = eros::Result<Rc<CapturedFrame<Self::Buffer, Self::Issue>>>,
     >;
 
     fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription>;
@@ -22,7 +22,7 @@ pub trait ScreenCaptureManager {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::rc::Rc;
 
     use crate::kernel::screen_capture::CapturedFrame;
 
@@ -31,12 +31,12 @@ mod tests {
 
     #[test]
     fn one_captured_frame_can_be_shared_without_cloning_its_buffer() {
-        let frame = Arc::new(CapturedFrame {
+        let frame = Rc::new(CapturedFrame {
             buffer: NonCloneBuffer,
             issues: Vec::<()>::new(),
         });
-        let other_subscriber = Arc::clone(&frame);
+        let other_subscriber = Rc::clone(&frame);
 
-        assert!(Arc::ptr_eq(&frame, &other_subscriber));
+        assert!(Rc::ptr_eq(&frame, &other_subscriber));
     }
 }
