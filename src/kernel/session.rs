@@ -1,3 +1,5 @@
+use eros::Context as _;
+
 use crate::kernel::{
     screen_configuration::{ScreenStreamsConfigured, SetScreenStreams},
     screen_manager::{Screen, ScreenId},
@@ -106,6 +108,25 @@ where
         self.role
     }
 
+    pub fn max_video_packet_size(&self) -> Option<usize> {
+        self.send.max_unreliable_payload_size()
+    }
+
+    pub async fn send_video(&self, message: VideoMessage) -> eros::Result<()> {
+        require_role(self.role, SessionRole::Host, "send video")?;
+        let screen_id = message.screen_id;
+
+        Ok(self
+            .send
+            .send(TransportMessage {
+                channel: TransportChannel::Video(screen_id),
+                delivery: Delivery::Unreliable,
+                payload: message.payload,
+            })
+            .await
+            .with_context(|| format!("Failed to send video packet for screen {}", screen_id.0))?)
+    }
+
     pub async fn send_screen_list(&self, screens: &[Screen]) -> eros::Result<()> {
         require_role(self.role, SessionRole::Host, "send a screen list")?;
         self.send_control(screens).await
@@ -204,4 +225,64 @@ fn validate_received_control(role: SessionRole, message: &ControlMessage) -> ero
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, future::ready};
+
+    use bytes::Bytes;
+    use eros::Context;
+
+    use crate::kernel::{
+        screen_manager::ScreenId,
+        session::{SessionId, SessionRole, SessionSend, VideoMessage},
+        transport::{Delivery, TransportChannel, TransportMessage, TransportSend},
+    };
+
+    struct TestTransportSend {
+        messages: RefCell<Vec<TransportMessage>>,
+    }
+
+    impl TransportSend for TestTransportSend {
+        fn max_unreliable_payload_size(&self) -> Option<usize> {
+            Some(1173)
+        }
+
+        fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
+            self.messages.borrow_mut().push(message);
+            ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn host_sends_one_video_packet_through_the_screen_channel() -> eros::Result<()> {
+        let session = SessionSend {
+            id: SessionId(7),
+            role: SessionRole::Host,
+            send: TestTransportSend {
+                messages: RefCell::new(Vec::new()),
+            },
+        };
+        let packet = Bytes::from_static(b"standard RTP packet");
+        let runtime = compio::runtime::Runtime::new()
+            .with_context(|| "Failed to start the Compio test runtime")?;
+
+        runtime.block_on(session.send_video(VideoMessage {
+            screen_id: ScreenId(3),
+            payload: packet,
+        }))?;
+
+        assert_eq!(session.max_video_packet_size(), Some(1173));
+        assert_eq!(
+            session.send.messages.borrow().as_slice(),
+            &[TransportMessage {
+                channel: TransportChannel::Video(ScreenId(3)),
+                delivery: Delivery::Unreliable,
+                payload: Bytes::from_static(b"standard RTP packet"),
+            }]
+        );
+
+        Ok(())
+    }
 }
