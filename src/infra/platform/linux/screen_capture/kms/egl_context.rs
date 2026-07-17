@@ -23,7 +23,7 @@ use crate::infra::platform::screen_capture::kms::{
     gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
     types::{
         DmaBufFrame, KmsColorEncoding, KmsColorRange, KmsFramebufferPlane,
-        KmsPlaneColor,
+        KmsPlaneBlend, KmsPlaneColor,
     },
 };
 
@@ -234,6 +234,30 @@ impl EglContext {
 
         self.gl
             .create_composition_target(image.0.image, image.0.size)
+    }
+
+    pub(crate) fn clear_composition_target(
+        &self,
+        target: &GlCompositionTarget<'_>,
+    ) -> eros::Result<()> {
+        self.gl.clear_composition_target(target)
+    }
+
+    pub(crate) fn compose_plane(
+        &self,
+        target: &GlCompositionTarget<'_>,
+        texture: &GlExternalTexture<'_>,
+        position_transform: &[f32; 9],
+        texture_transform: &[f32; 9],
+        blend: KmsPlaneBlend,
+    ) -> eros::Result<()> {
+        self.gl.compose_plane(
+            target,
+            texture,
+            position_transform,
+            texture_transform,
+            blend,
+        )
     }
 }
 
