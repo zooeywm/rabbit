@@ -1,4 +1,5 @@
 mod device;
+mod framebuffer;
 mod output;
 mod types;
 

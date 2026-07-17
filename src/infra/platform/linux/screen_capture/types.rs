@@ -2,7 +2,7 @@ use std::{io, os::fd::OwnedFd};
 
 use drm::{
     buffer::{DrmFourcc, DrmModifier},
-    control::{GetPlanarFramebufferError, PlaneType, framebuffer, plane},
+    control::{GetPlanarFramebufferError, PlaneType, crtc, framebuffer, plane},
 };
 
 use crate::kernel::geometry::PixelSize;
@@ -37,20 +37,33 @@ pub(crate) enum KmsPlaneCaptureError {
     QueryProperties(#[source] io::Error),
     #[error("failed to query the plane framebuffer")]
     QueryFramebuffer(#[source] GetPlanarFramebufferError),
-    #[error("failed to export framebuffer plane {plane_index} as DMA-BUF")]
+    #[error("failed to export framebuffer object {object_index} as DMA-BUF")]
     ExportBuffer {
-        plane_index: usize,
+        object_index: usize,
         #[source]
         source: io::Error,
     },
+    #[error("failed to close temporary GEM handle for framebuffer object {object_index}")]
+    CloseBuffer {
+        object_index: usize,
+        #[source]
+        source: io::Error,
+    },
+    #[error("GETFB2 did not return a GEM handle for framebuffer plane {plane_index}")]
+    MissingBufferHandle { plane_index: usize },
     #[error("active plane is missing required property {property}")]
     MissingProperty { property: &'static str },
     #[error("active plane has invalid {property} value {value}")]
     InvalidProperty { property: &'static str, value: u64 },
-    #[error("framebuffer changed from {expected:?} to {actual:?} during capture")]
+    #[error(
+        "plane state changed during capture: CRTC {expected_crtc:?} -> {actual_crtc:?}, \
+         framebuffer {expected_framebuffer:?} -> {actual_framebuffer:?}"
+    )]
     SnapshotChanged {
-        expected: framebuffer::Handle,
-        actual: Option<framebuffer::Handle>,
+        expected_crtc: crtc::Handle,
+        actual_crtc: Option<crtc::Handle>,
+        expected_framebuffer: framebuffer::Handle,
+        actual_framebuffer: Option<framebuffer::Handle>,
     },
     #[error("GPU composition does not support format {format:?} with modifier {modifier:?}")]
     UnsupportedFormat {
@@ -80,5 +93,18 @@ pub(crate) struct KmsActivePlane {
 #[derive(Debug)]
 pub(crate) struct KmsPlaneSnapshot {
     pub planes: Vec<KmsActivePlane>,
+    pub issues: Vec<KmsPlaneIssue>,
+}
+
+#[derive(Debug)]
+pub(crate) struct KmsFramebufferPlane {
+    pub id: plane::Handle,
+    pub plane_type: PlaneType,
+    pub buffer: DmaBufFrame,
+}
+
+#[derive(Debug)]
+pub(crate) struct KmsFramebufferSnapshot {
+    pub planes: Vec<KmsFramebufferPlane>,
     pub issues: Vec<KmsPlaneIssue>,
 }
