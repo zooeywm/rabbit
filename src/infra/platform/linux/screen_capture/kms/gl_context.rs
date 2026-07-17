@@ -5,7 +5,10 @@ use glow::HasContext as _;
 use khronos_egl as egl;
 
 use crate::{
-    infra::platform::screen_capture::kms::types::{KmsPixelBlendMode, KmsPlaneBlend},
+    infra::platform::screen_capture::kms::{
+        composition::KmsCompositionTransform,
+        types::{KmsPixelBlendMode, KmsPlaneBlend},
+    },
     kernel::geometry::PixelSize,
 };
 
@@ -305,8 +308,7 @@ impl GlContext {
         &self,
         target: &GlCompositionTarget<'_>,
         texture: &GlExternalTexture<'_>,
-        position_transform: &[f32; 9],
-        texture_transform: &[f32; 9],
+        transform: &KmsCompositionTransform,
         blend: KmsPlaneBlend,
     ) -> eros::Result<()> {
         if !ptr::eq(self, target.owner) {
@@ -330,12 +332,12 @@ impl GlContext {
             self.api.uniform_matrix_3_f32_slice(
                 Some(&program.position_transform),
                 false,
-                position_transform,
+                &transform.position,
             );
             self.api.uniform_matrix_3_f32_slice(
                 Some(&program.texture_transform),
                 false,
-                texture_transform,
+                &transform.texture,
             );
             self.api.uniform_1_f32(
                 Some(&program.plane_alpha),

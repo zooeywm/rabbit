@@ -12,6 +12,7 @@ use gbm::{AsRaw as _, Device};
 use khronos_egl as egl;
 
 use crate::infra::platform::screen_capture::kms::{
+    composition::KmsCompositionTransform,
     egl_ext::{
         DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT,
         DMA_BUF_PLANE_MODIFIER_LO_EXT, DMA_BUF_PLANE_OFFSET_EXT,
@@ -247,17 +248,10 @@ impl EglContext {
         &self,
         target: &GlCompositionTarget<'_>,
         texture: &GlExternalTexture<'_>,
-        position_transform: &[f32; 9],
-        texture_transform: &[f32; 9],
+        transform: &KmsCompositionTransform,
         blend: KmsPlaneBlend,
     ) -> eros::Result<()> {
-        self.gl.compose_plane(
-            target,
-            texture,
-            position_transform,
-            texture_transform,
-            blend,
-        )
+        self.gl.compose_plane(target, texture, transform, blend)
     }
 }
 

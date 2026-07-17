@@ -1,3 +1,4 @@
+mod composition;
 mod device;
 mod egl_context;
 mod egl_ext;
