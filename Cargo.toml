@@ -7,8 +7,8 @@ edition = "2024"
 toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 directories = "6.0"
-eros = "0.6"
-compio = { version = "0.18", features = ["quic", "ring"] }
+eros = "0.7"
+compio = { version = "0.19", features = ["quic", "ring"] }
 bytes = "1"
 binrw = "0.15"
 futures-core = "0.3"
@@ -27,4 +27,4 @@ time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 # niri-ipc does not guarantee Rust API compatibility across version updates.
 drm = "0.15"
 niri-ipc = "26.4.0"
-winio = { version = "0.11" }
+winio = { version = "0.12.0-rc.7", features = ["compio-compat"] }
