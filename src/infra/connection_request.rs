@@ -1,9 +1,16 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Instant,
+};
 
-use crate::infra::{QuicEndpoint, QuicTransport};
-use crate::kernel::connection_request::{ConnectionRequest, ConnectionResponse};
 use bytes::{BufMut, Bytes, BytesMut};
 use eros::Context;
+use tracing::{debug, info};
+
+use crate::{
+    infra::{QuicEndpoint, QuicTransport},
+    kernel::connection_request::{ConnectionRequest, ConnectionResponse},
+};
 
 const REQUESTER_NAME_LENGTH_SIZE: usize = size_of::<u16>();
 const RESPONSE_SIZE: usize = size_of::<u8>();
@@ -50,6 +57,7 @@ pub(crate) async fn request_transport(
     connection: compio::quic::Connection,
     request: ConnectionRequest,
 ) -> eros::Result<Option<QuicTransport>> {
+    let remote_address = connection.remote_address();
     let (mut request_stream, mut response_stream) = connection
         .open_bi_wait()
         .await
@@ -57,7 +65,19 @@ pub(crate) async fn request_transport(
 
     send_request(&mut request_stream, request).await?;
 
-    match recv_response(&mut response_stream).await? {
+    let response = recv_response(&mut response_stream).await?;
+    let decision = match response {
+        ConnectionResponse::Accepted => "accepted",
+        ConnectionResponse::Rejected => "rejected",
+    };
+    info!(
+        event = "connection_response_received",
+        %remote_address,
+        decision,
+        "Connection response received"
+    );
+
+    match response {
         ConnectionResponse::Accepted => Ok(Some(QuicTransport::open(connection).await?)),
         ConnectionResponse::Rejected => Ok(None),
     }
@@ -67,11 +87,25 @@ pub(crate) async fn receive_request(
     connection: compio::quic::Connection,
 ) -> eros::Result<PendingQuicConnectionRequest> {
     let remote_address = connection.remote_address();
+    let started_at = Instant::now();
     let (response_stream, mut request_stream) = connection
         .accept_bi()
         .await
         .with_context(|| "Failed to accept QUIC connection request stream")?;
     let request = recv_request(&mut request_stream).await?;
+
+    info!(
+        event = "connection_request_received",
+        %remote_address,
+        requester_name = %request.requester_name,
+        "Connection request received"
+    );
+    debug!(
+        %remote_address,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        stats = ?connection.stats(),
+        "Received QUIC connection request"
+    );
 
     Ok(PendingQuicConnectionRequest {
         request,

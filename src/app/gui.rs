@@ -126,6 +126,12 @@ impl RootComponent {
     ) where
         R: TransportRecv + 'static,
     {
+        info!(
+            event = "session_started",
+            session_id = send.id().0,
+            role = ?send.role(),
+            "Session started"
+        );
         self.sessions.push(RunningSession {
             send,
             _receiver: compio::runtime::spawn(receive_session(recv, sender.clone())),
@@ -280,7 +286,11 @@ impl Component for RootComponent {
         let local_address = quic_endpoint.local_address()?;
         let requester_name = format!("{} ({})", config.app_name, local_address.port());
 
-        info!(%local_address, "Listening for direct QUIC connections");
+        info!(
+            event = "listener_started",
+            %local_address,
+            "Connection listener started"
+        );
 
         let mut app = App::new(
             config,
@@ -412,6 +422,12 @@ impl Component for RootComponent {
                 };
                 let connection_sender = sender.clone();
 
+                info!(
+                    event = "direct_connection_started",
+                    %remote_ip,
+                    ?remote_port,
+                    "Direct connection started"
+                );
                 self.connect_button.set_enabled(false)?;
                 self.connection_status.set_text("Connecting...")?;
 
@@ -464,6 +480,13 @@ impl Component for RootComponent {
                 };
                 let approval_sender = sender.clone();
 
+                info!(
+                    event = "connection_request_decided",
+                    remote_address = %request.remote_address(),
+                    requester_name = %request.request().requester_name,
+                    decision = "accepted",
+                    "Connection request decided"
+                );
                 compio::runtime::spawn(async move {
                     approval_sender
                         .post(RootMessage::ConnectionAccepted(request.accept().await));
@@ -478,6 +501,13 @@ impl Component for RootComponent {
                 };
                 let approval_sender = sender.clone();
 
+                info!(
+                    event = "connection_request_decided",
+                    remote_address = %request.remote_address(),
+                    requester_name = %request.request().requester_name,
+                    decision = "rejected",
+                    "Connection request decided"
+                );
                 compio::runtime::spawn(async move {
                     approval_sender
                         .post(RootMessage::ConnectionRejected(request.reject().await));
@@ -584,6 +614,11 @@ impl Component for RootComponent {
             }
             RootMessage::SessionClosed(id) => {
                 self.remove_session(id)?;
+                info!(
+                    event = "session_closed",
+                    session_id = id.0,
+                    "Session closed"
+                );
                 self.connection_status
                     .set_text(format!("Session {} closed", id.0))?;
                 Ok(true)

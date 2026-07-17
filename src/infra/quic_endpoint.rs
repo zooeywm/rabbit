@@ -2,9 +2,12 @@ use std::{
     io::ErrorKind,
     net::{IpAddr, Ipv6Addr, SocketAddr},
     ops::RangeInclusive,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use eros::Context;
+use tracing::{debug, info};
 
 const BASE_PORT: u16 = 52731;
 const LAST_PORT: u16 = BASE_PORT + 4;
@@ -18,11 +21,14 @@ pub(crate) struct QuicEndpoint {
 
 impl QuicEndpoint {
     pub(crate) async fn new() -> eros::Result<Self> {
+        let mut transport_config = compio::quic::TransportConfig::default();
+        transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
+        let transport_config = Arc::new(transport_config);
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec!["rabbit".into()])
                 .with_context(|| "Failed to generate temporary QUIC certificate")?;
         let certificate = cert.der().clone();
-        let server_config = compio::quic::ServerBuilder::new_with_single_cert(
+        let mut server_config = compio::quic::ServerBuilder::new_with_single_cert(
             vec![certificate],
             signing_key
                 .serialize_der()
@@ -31,9 +37,11 @@ impl QuicEndpoint {
         )
         .with_context(|| "Failed to configure QUIC server certificate")?
         .build();
+        server_config.transport_config(transport_config.clone());
         let endpoint = bind_endpoint(server_config).await?;
-        let client_config =
+        let mut client_config =
             compio::quic::ClientBuilder::new_with_no_server_verification().build();
+        client_config.transport_config(transport_config);
 
         Ok(Self {
             endpoint,
@@ -56,6 +64,12 @@ impl QuicEndpoint {
         &self,
         remote_address: SocketAddr,
     ) -> eros::Result<compio::quic::Connection> {
+        info!(
+            event = "quic_connection_started",
+            direction = "outgoing",
+            %remote_address,
+            "QUIC connection started"
+        );
         let connecting = self
             .endpoint
             .connect(
@@ -66,10 +80,31 @@ impl QuicEndpoint {
             .with_context(|| {
                 format!("Failed to start QUIC connection to {remote_address}")
             })?;
-
-        Ok(connecting
+        let started_at = Instant::now();
+        let connection = connecting
             .await
-            .with_context(|| format!("Failed to connect QUIC peer {remote_address}"))?)
+            .with_context(|| format!("Failed to connect QUIC peer {remote_address}"))?;
+        let elapsed = started_at.elapsed();
+        let rtt = connection.rtt();
+
+        info!(
+            event = "quic_connection_established",
+            direction = "outgoing",
+            %remote_address,
+            elapsed_ms = elapsed.as_millis(),
+            rtt_ms = rtt.as_millis(),
+            "QUIC connection established"
+        );
+
+        debug!(
+            %remote_address,
+            elapsed_ms = elapsed.as_millis(),
+            rtt_ms = rtt.as_millis(),
+            stats = ?connection.stats(),
+            "Established outgoing QUIC connection"
+        );
+
+        Ok(connection)
     }
 
     pub(crate) async fn accept_connection(
@@ -79,10 +114,37 @@ impl QuicEndpoint {
             return Ok(None);
         };
         let remote_address = incoming.remote_address();
-
-        Ok(Some(incoming.await.with_context(|| {
+        info!(
+            event = "quic_connection_started",
+            direction = "incoming",
+            %remote_address,
+            "QUIC connection started"
+        );
+        let started_at = Instant::now();
+        let connection = incoming.await.with_context(|| {
             format!("Failed to accept QUIC connection from {remote_address}")
-        })?))
+        })?;
+        let elapsed = started_at.elapsed();
+        let rtt = connection.rtt();
+
+        info!(
+            event = "quic_connection_established",
+            direction = "incoming",
+            %remote_address,
+            elapsed_ms = elapsed.as_millis(),
+            rtt_ms = rtt.as_millis(),
+            "QUIC connection established"
+        );
+
+        debug!(
+            %remote_address,
+            elapsed_ms = elapsed.as_millis(),
+            rtt_ms = rtt.as_millis(),
+            stats = ?connection.stats(),
+            "Established incoming QUIC connection"
+        );
+
+        Ok(Some(connection))
     }
 }
 
