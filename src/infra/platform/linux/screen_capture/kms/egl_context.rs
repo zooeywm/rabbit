@@ -247,6 +247,13 @@ impl EglContext {
 
 impl Drop for EglContext {
     fn drop(&mut self) {
+        if self
+            .instance
+            .make_current(self.display, None, None, Some(self.context))
+            .is_ok()
+        {
+            self.gl.destroy();
+        }
         let _ = self
             .instance
             .make_current(self.display, None, None, None);

@@ -10,10 +10,61 @@ const TEXTURE_EXTERNAL: u32 = 0x8D65;
 
 type ImageTargetTexture = unsafe extern "system" fn(u32, *const c_void);
 
+const COMPOSITION_VERTEX_SHADER: &str = r#"#version 300 es
+layout(location = 0) in vec2 position;
+layout(location = 1) in vec2 texture_coordinate;
+
+uniform mat3 position_transform;
+uniform mat3 texture_transform;
+
+out vec2 sampled_coordinate;
+
+void main() {
+    vec3 transformed_position = position_transform * vec3(position, 1.0);
+    gl_Position = vec4(transformed_position.xy, 0.0, 1.0);
+    sampled_coordinate = (texture_transform * vec3(texture_coordinate, 1.0)).xy;
+}
+"#;
+
+const COMPOSITION_FRAGMENT_SHADER: &str = r#"#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+
+uniform samplerExternalOES plane_texture;
+uniform float plane_alpha;
+uniform int pixel_blend_mode;
+
+in vec2 sampled_coordinate;
+out vec4 composed_color;
+
+void main() {
+    vec4 sampled_color = texture(plane_texture, sampled_coordinate);
+
+    if (pixel_blend_mode == 0) {
+        composed_color = vec4(sampled_color.rgb * plane_alpha, plane_alpha);
+    } else if (pixel_blend_mode == 1) {
+        composed_color = sampled_color * plane_alpha;
+    } else {
+        float alpha = sampled_color.a * plane_alpha;
+        composed_color = vec4(sampled_color.rgb * alpha, alpha);
+    }
+}
+"#;
+
 pub(crate) struct GlContext {
     api: glow::Context,
     image_target_texture: ImageTargetTexture,
+    composition_program: GlCompositionProgram,
     thread_affinity: PhantomData<Rc<()>>,
+}
+
+struct GlCompositionProgram {
+    program: glow::Program,
+    position_transform: glow::UniformLocation,
+    texture_transform: glow::UniformLocation,
+    plane_texture: glow::UniformLocation,
+    plane_alpha: glow::UniformLocation,
+    pixel_blend_mode: glow::UniformLocation,
 }
 
 #[derive(Debug)]
@@ -59,6 +110,12 @@ impl GlContext {
         {
             eros::bail!("OpenGL ES does not support external EGLImage textures");
         }
+        if !api
+            .supported_extensions()
+            .contains("GL_OES_EGL_image_external_essl3")
+        {
+            eros::bail!("OpenGL ES 3 does not support external EGLImage samplers");
+        }
 
         let image_target_texture = instance
             .get_proc_address("glEGLImageTargetTexture2DOES")
@@ -66,12 +123,20 @@ impl GlContext {
         let image_target_texture = unsafe {
             std::mem::transmute::<extern "system" fn(), ImageTargetTexture>(image_target_texture)
         };
+        let composition_program = create_composition_program(&api)?;
 
         Ok(Self {
             api,
             image_target_texture,
+            composition_program,
             thread_affinity: PhantomData,
         })
+    }
+
+    pub(crate) fn destroy(&mut self) {
+        unsafe {
+            self.api.delete_program(self.composition_program.program);
+        }
     }
 
     pub(crate) fn create_external_texture(
@@ -201,4 +266,95 @@ impl Drop for GlCompositionTarget<'_> {
             self.owner.api.delete_texture(self.texture);
         }
     }
+}
+
+fn create_composition_program(api: &glow::Context) -> eros::Result<GlCompositionProgram> {
+    let vertex = compile_shader(api, glow::VERTEX_SHADER, COMPOSITION_VERTEX_SHADER)?;
+    let fragment = match compile_shader(api, glow::FRAGMENT_SHADER, COMPOSITION_FRAGMENT_SHADER) {
+        Ok(fragment) => fragment,
+        Err(error) => {
+            unsafe { api.delete_shader(vertex) };
+            return Err(error);
+        }
+    };
+    let program = match unsafe { api.create_program() } {
+        Ok(program) => program,
+        Err(error) => {
+            unsafe {
+                api.delete_shader(vertex);
+                api.delete_shader(fragment);
+            }
+            eros::bail!("Failed to create the KMS composition program: {error}");
+        }
+    };
+
+    unsafe {
+        api.attach_shader(program, vertex);
+        api.attach_shader(program, fragment);
+        api.link_program(program);
+        api.detach_shader(program, vertex);
+        api.detach_shader(program, fragment);
+        api.delete_shader(vertex);
+        api.delete_shader(fragment);
+    }
+
+    if !unsafe { api.get_program_link_status(program) } {
+        let log = unsafe { api.get_program_info_log(program) };
+        unsafe { api.delete_program(program) };
+        eros::bail!("Failed to link the KMS composition program: {log}");
+    }
+
+    match composition_program(api, program) {
+        Ok(program) => Ok(program),
+        Err(error) => {
+            unsafe { api.delete_program(program) };
+            Err(error)
+        }
+    }
+}
+
+fn composition_program(
+    api: &glow::Context,
+    program: glow::Program,
+) -> eros::Result<GlCompositionProgram> {
+    Ok(GlCompositionProgram {
+        program,
+        position_transform: uniform(api, program, "position_transform")?,
+        texture_transform: uniform(api, program, "texture_transform")?,
+        plane_texture: uniform(api, program, "plane_texture")?,
+        plane_alpha: uniform(api, program, "plane_alpha")?,
+        pixel_blend_mode: uniform(api, program, "pixel_blend_mode")?,
+    })
+}
+
+fn compile_shader(
+    api: &glow::Context,
+    shader_type: u32,
+    source: &str,
+) -> eros::Result<glow::Shader> {
+    let shader = match unsafe { api.create_shader(shader_type) } {
+        Ok(shader) => shader,
+        Err(error) => eros::bail!("Failed to create a KMS composition shader: {error}"),
+    };
+    unsafe {
+        api.shader_source(shader, source);
+        api.compile_shader(shader);
+    }
+
+    if !unsafe { api.get_shader_compile_status(shader) } {
+        let log = unsafe { api.get_shader_info_log(shader) };
+        unsafe { api.delete_shader(shader) };
+        eros::bail!("Failed to compile a KMS composition shader: {log}");
+    }
+
+    Ok(shader)
+}
+
+fn uniform(
+    api: &glow::Context,
+    program: glow::Program,
+    name: &'static str,
+) -> eros::Result<glow::UniformLocation> {
+    unsafe { api.get_uniform_location(program, name) }
+        .with_context(|| format!("KMS composition program does not expose uniform {name}"))
 }
