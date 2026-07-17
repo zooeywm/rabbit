@@ -1,3 +1,5 @@
+mod file_writer;
+
 use std::{
     fs::{OpenOptions, create_dir_all},
     io::{self, Write},
