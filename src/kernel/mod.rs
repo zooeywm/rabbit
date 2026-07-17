@@ -4,6 +4,7 @@ pub mod geometry;
 pub mod screen_capture;
 pub mod screen_configuration;
 pub mod screen_manager;
+pub mod screen_stream;
 pub mod session;
 pub mod session_control;
 pub mod transport;
