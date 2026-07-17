@@ -55,7 +55,6 @@ mod tests {
         task::{Context, Poll},
     };
 
-    use eros::Context as _;
     use futures_core::Stream;
 
     use crate::kernel::{
@@ -110,25 +109,29 @@ mod tests {
     }
 
     #[test]
-    fn processes_one_captured_frame_into_encoder_packets() -> eros::Result<()> {
+    fn processes_one_captured_frame_into_encoder_packets() {
         let mut stream = ScreenStream::new(
             OneFrameCapture(Some(CapturedFrame(11))),
             EmptyPipeline,
             EmptyEncoder,
         );
-        let runtime = compio::runtime::Runtime::new()
-            .with_context(|| "Failed to start the Compio test runtime")?;
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime.block_on(async {
             assert_eq!(
-                stream.process_next().await?,
+                stream
+                    .process_next()
+                    .await
+                    .expect("Screen stream should process one frame"),
                 Some(vec![EncodedPacket(11), EncodedPacket(12)])
             );
-            assert_eq!(stream.process_next().await?, None);
-
-            Ok::<(), eros::ErrorUnion>(())
-        })?;
-
-        Ok(())
+            assert_eq!(
+                stream
+                    .process_next()
+                    .await
+                    .expect("Closed capture should not fail"),
+                None
+            );
+        });
     }
 }

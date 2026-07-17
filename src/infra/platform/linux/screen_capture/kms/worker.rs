@@ -178,12 +178,11 @@ mod tests {
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn worker_starts_without_opening_the_kms_output() -> std::io::Result<()> {
-        let worker = KmsCaptureWorker::new("not-a-real-output".to_owned())?;
+    fn worker_starts_without_opening_the_kms_output() {
+        let worker = KmsCaptureWorker::new("not-a-real-output".to_owned())
+            .expect("KMS worker thread should start without opening the output");
 
         drop(worker);
-
-        Ok(())
     }
 
     #[test]

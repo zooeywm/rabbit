@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn slow_subscribers_share_only_the_latest_frame() -> eros::Result<()> {
+    fn slow_subscribers_share_only_the_latest_frame() {
         let mut publisher = KmsFramePublisher::default();
         let mut first = publisher.subscribe();
         let mut second = publisher.subscribe();
@@ -139,8 +139,8 @@ mod tests {
 
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
-        let first_frame = ready_frame(&mut first, &mut context)?;
-        let second_frame = ready_frame(&mut second, &mut context)?;
+        let first_frame = ready_frame(&mut first, &mut context);
+        let second_frame = ready_frame(&mut second, &mut context);
 
         assert_eq!(first_frame.buffer.size.width, 2);
         assert!(Rc::ptr_eq(&first_frame, &second_frame));
@@ -148,8 +148,6 @@ mod tests {
             Pin::new(&mut first).poll_next(&mut context),
             Poll::Pending
         ));
-
-        Ok(())
     }
 
     #[test]
@@ -188,11 +186,12 @@ mod tests {
     fn ready_frame(
         subscription: &mut KmsFrameSubscription,
         context: &mut Context<'_>,
-    ) -> eros::Result<SharedKmsFrame> {
+    ) -> SharedKmsFrame {
         match Pin::new(subscription).poll_next(context) {
-            Poll::Ready(Some(frame)) => frame,
-            Poll::Ready(None) => eros::bail!("KMS frame subscription closed unexpectedly"),
-            Poll::Pending => eros::bail!("KMS frame subscription has no published frame"),
+            Poll::Ready(frame) => frame
+                .expect("KMS frame subscription should remain open")
+                .expect("KMS frame subscription should publish a valid frame"),
+            Poll::Pending => panic!("KMS frame subscription should have a published frame"),
         }
     }
 }

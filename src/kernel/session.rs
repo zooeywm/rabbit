@@ -231,14 +231,12 @@ fn validate_received_control(role: SessionRole, message: &ControlMessage) -> ero
 mod tests {
     use std::{cell::RefCell, future::ready};
 
-    use bytes::Bytes;
-    use eros::Context;
-
     use crate::kernel::{
         screen_manager::ScreenId,
         session::{SessionId, SessionRole, SessionSend, VideoMessage},
         transport::{Delivery, TransportChannel, TransportMessage, TransportSend},
     };
+    use bytes::Bytes;
 
     struct TestTransportSend {
         messages: RefCell<Vec<TransportMessage>>,
@@ -256,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn host_sends_one_video_packet_through_the_screen_channel() -> eros::Result<()> {
+    fn host_sends_one_video_packet_through_the_screen_channel() {
         let session = SessionSend {
             id: SessionId(7),
             role: SessionRole::Host,
@@ -265,13 +263,14 @@ mod tests {
             },
         };
         let packet = Bytes::from_static(b"standard RTP packet");
-        let runtime = compio::runtime::Runtime::new()
-            .with_context(|| "Failed to start the Compio test runtime")?;
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
-        runtime.block_on(session.send_video(VideoMessage {
-            screen_id: ScreenId(3),
-            payload: packet,
-        }))?;
+        runtime
+            .block_on(session.send_video(VideoMessage {
+                screen_id: ScreenId(3),
+                payload: packet,
+            }))
+            .expect("Host should send one video packet");
 
         assert_eq!(session.max_video_packet_size(), Some(1173));
         assert_eq!(
@@ -282,7 +281,5 @@ mod tests {
                 payload: Bytes::from_static(b"standard RTP packet"),
             }]
         );
-
-        Ok(())
     }
 }

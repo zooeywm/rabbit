@@ -151,8 +151,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use eros::Context;
-
     use crate::{
         infra::platform::screen_capture::kms::{
             KmsScreenCaptureManager, KmsScreenCaptureManagerState,
@@ -197,19 +195,17 @@ mod tests {
         }
 
         fn primary_screen(&self) -> eros::Result<&Screen> {
-            let Some(screen) = self.screens.first() else {
-                eros::bail!("Test screen layout is empty");
-            };
-
-            Ok(screen)
+            Ok(self
+                .screens
+                .first()
+                .expect("Test screen layout should not be empty"))
         }
     }
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn subscriptions_reuse_one_source_per_physical_screen() -> eros::Result<()> {
-        let runtime = compio::runtime::Runtime::new()
-            .with_context(|| "Failed to start the Compio test runtime")?;
+    fn subscriptions_reuse_one_source_per_physical_screen() {
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime.block_on(async {
             let mut deps = TestDeps {
@@ -218,17 +214,17 @@ mod tests {
             };
             let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
 
-            let _first = manager.subscribe(&ScreenId(0))?;
-            let _second = manager.subscribe(&ScreenId(0))?;
+            let _first = manager
+                .subscribe(&ScreenId(0))
+                .expect("First KMS subscription should start");
+            let _second = manager
+                .subscribe(&ScreenId(0))
+                .expect("Second KMS subscription should reuse the source");
 
             assert_eq!(manager.sources.len(), 1);
             assert!(manager.subscribe(&ScreenId(2)).is_err());
             assert_eq!(manager.sources.len(), 1);
-
-            Ok::<(), eros::ErrorUnion>(())
-        })?;
-
-        Ok(())
+        });
     }
 
     fn screen(id: u8, name: &str) -> Screen {

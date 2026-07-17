@@ -15,8 +15,6 @@ pub trait VideoEncoder {
 mod tests {
     use std::future::{Future, ready};
 
-    use eros::Context;
-
     use crate::kernel::video_encoder::VideoEncoder;
 
     struct NonCloneFrame(u8);
@@ -42,16 +40,15 @@ mod tests {
     }
 
     #[test]
-    fn encoder_can_move_a_frame_into_multiple_packets() -> eros::Result<()> {
+    fn encoder_can_move_a_frame_into_multiple_packets() {
         let mut encoder = EmptyVideoEncoder;
         let frame = NonCloneFrame(9);
-        let runtime = compio::runtime::Runtime::new()
-            .with_context(|| "Failed to start the Compio test runtime")?;
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
-        let packets = runtime.block_on(encoder.encode(frame))?;
+        let packets = runtime
+            .block_on(encoder.encode(frame))
+            .expect("Encoder should return packet batch");
 
         assert_eq!(packets, vec![NonClonePacket(9), NonClonePacket(10)]);
-
-        Ok(())
     }
 }

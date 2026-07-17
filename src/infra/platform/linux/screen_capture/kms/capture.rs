@@ -44,33 +44,28 @@ impl KmsCapturer {
 mod tests {
     use std::{future::poll_fn, pin::Pin};
 
-    use eros::Context;
     use futures_core::Stream;
 
     use crate::infra::platform::screen_capture::kms::KmsCaptureSource;
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn captures_one_composed_frame() -> eros::Result<()> {
+    fn captures_one_composed_frame() {
         let screen_name = std::env::var("RABBIT_KMS_SCREEN")
-            .with_context(|| "RABBIT_KMS_SCREEN must name the DRM connector to capture")?;
-        let runtime = compio::runtime::Runtime::new()
-            .with_context(|| "Failed to start the Compio test runtime")?;
+            .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
         let frame = runtime.block_on(async move {
-            let mut source = KmsCaptureSource::new(screen_name)
-                .with_context(|| "Failed to start the KMS capture source")?;
+            let mut source =
+                KmsCaptureSource::new(screen_name).expect("KMS capture source should start");
             let mut subscription = source
                 .subscribe()
-                .with_context(|| "Failed to start the KMS capture subscription")?;
+                .expect("KMS capture subscription should start");
 
-            let Some(frame) =
-                poll_fn(|context| Pin::new(&mut subscription).poll_next(context)).await
-            else {
-                eros::bail!("KMS capture subscription closed before publishing a frame");
-            };
-
-            frame
-        })?;
+            poll_fn(|context| Pin::new(&mut subscription).poll_next(context))
+                .await
+                .expect("KMS capture subscription should remain open")
+                .expect("KMS capture subscription should publish one frame")
+        });
 
         for issue in &frame.issues {
             eprintln!("{issue}");
@@ -82,7 +77,5 @@ mod tests {
         assert!(!frame.buffer.objects.is_empty());
         assert!(!frame.buffer.planes.is_empty());
         assert!(frame.buffer.readiness_fence.is_some());
-
-        Ok(())
     }
 }
