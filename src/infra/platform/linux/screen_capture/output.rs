@@ -7,10 +7,10 @@ use crate::infra::platform::screen_capture::{
     device::KmsDevice,
         types::{
             KmsActivePlane, KmsColorEncoding, KmsColorRange,
-            KmsDestinationRect, KmsPixelBlendMode, KmsPlaneBlend,
-            KmsPlaneCaptureError, KmsPlaneColor, KmsPlaneIssue,
-            KmsPlanePlacement, KmsPlaneSnapshot, KmsPlaneTransform,
-            KmsRotation, KmsSourceRect,
+            KmsCursorHotspot, KmsDestinationRect, KmsPixelBlendMode,
+            KmsPlaneBlend, KmsPlaneCaptureError, KmsPlaneColor,
+            KmsPlaneIssue, KmsPlanePlacement, KmsPlaneSnapshot,
+            KmsPlaneTransform, KmsRotation, KmsSourceRect,
         },
 };
 
@@ -108,6 +108,7 @@ impl KmsOutput {
                 placement,
                 blend: properties.blend,
                 color: properties.color,
+                cursor_hotspot: properties.cursor_hotspot,
             });
         }
 
@@ -153,6 +154,8 @@ fn query_plane_properties(
             b"COLOR_RANGE" => {
                 values.color_range = Some(color_range(&property, *value)?);
             }
+            b"HOTSPOT_X" => values.hotspot_x = Some(*value),
+            b"HOTSPOT_Y" => values.hotspot_y = Some(*value),
             _ => {}
         }
     }
@@ -177,6 +180,8 @@ struct RawPlaneProperties {
     pixel_blend_mode: Option<KmsPixelBlendMode>,
     color_encoding: Option<KmsColorEncoding>,
     color_range: Option<KmsColorRange>,
+    hotspot_x: Option<u64>,
+    hotspot_y: Option<u64>,
 }
 
 struct KmsPlaneProperties {
@@ -184,6 +189,7 @@ struct KmsPlaneProperties {
     placement: Option<KmsPlanePlacement>,
     blend: KmsPlaneBlend,
     color: KmsPlaneColor,
+    cursor_hotspot: Option<KmsCursorHotspot>,
 }
 
 impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
@@ -246,6 +252,36 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
                 });
             }
         };
+        let cursor_hotspot = match plane_type {
+            PlaneType::Cursor => match (values.hotspot_x, values.hotspot_y) {
+                (Some(x), Some(y)) => Some(KmsCursorHotspot {
+                    x: u32::try_from(x).map_err(|_| {
+                        KmsPlaneCaptureError::InvalidProperty {
+                            property: "HOTSPOT_X",
+                            value: x,
+                        }
+                    })?,
+                    y: u32::try_from(y).map_err(|_| {
+                        KmsPlaneCaptureError::InvalidProperty {
+                            property: "HOTSPOT_Y",
+                            value: y,
+                        }
+                    })?,
+                }),
+                (None, None) => Some(KmsCursorHotspot::default()),
+                (Some(_), None) => {
+                    return Err(KmsPlaneCaptureError::MissingProperty {
+                        property: "HOTSPOT_Y",
+                    });
+                }
+                (None, Some(_)) => {
+                    return Err(KmsPlaneCaptureError::MissingProperty {
+                        property: "HOTSPOT_X",
+                    });
+                }
+            },
+            PlaneType::Primary | PlaneType::Overlay => None,
+        };
 
         let placement = if source.width == 0
             || source.height == 0
@@ -267,6 +303,7 @@ impl TryFrom<RawPlaneProperties> for KmsPlaneProperties {
             placement,
             blend,
             color,
+            cursor_hotspot,
         })
     }
 }

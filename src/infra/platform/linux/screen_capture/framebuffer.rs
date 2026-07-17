@@ -33,6 +33,7 @@ impl KmsOutput {
                         placement: active_plane.placement,
                         blend: active_plane.blend,
                         color: active_plane.color,
+                        cursor_hotspot: active_plane.cursor_hotspot,
                     }),
                     Err(error) => issues.push(KmsPlaneIssue {
                         plane_id: active_plane.id,

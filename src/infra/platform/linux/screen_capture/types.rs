@@ -91,6 +91,7 @@ pub(crate) struct KmsActivePlane {
     pub placement: KmsPlanePlacement,
     pub blend: KmsPlaneBlend,
     pub color: KmsPlaneColor,
+    pub cursor_hotspot: Option<KmsCursorHotspot>,
 }
 
 #[derive(Debug)]
@@ -107,6 +108,7 @@ pub(crate) struct KmsFramebufferPlane {
     pub placement: KmsPlanePlacement,
     pub blend: KmsPlaneBlend,
     pub color: KmsPlaneColor,
+    pub cursor_hotspot: Option<KmsCursorHotspot>,
 }
 
 #[derive(Debug)]
@@ -198,4 +200,10 @@ pub(crate) enum KmsColorRange {
     #[default]
     Limited,
     Full,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KmsCursorHotspot {
+    pub x: u32,
+    pub y: u32,
 }

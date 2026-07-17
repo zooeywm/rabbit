@@ -1,5 +1,6 @@
 use std::{
     fs::{File, OpenOptions},
+    io::ErrorKind,
     os::fd::{AsFd, BorrowedFd},
     path::{Path, PathBuf},
 };
@@ -52,6 +53,20 @@ impl KmsDevice {
                     device.path().display()
                 )
             })?;
+
+        match device.set_client_capability(ClientCapability::CursorPlaneHotspot, true) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(error.kind(), ErrorKind::InvalidInput | ErrorKind::Unsupported) => {}
+            Err(error) => {
+                return Ok(Err(error).with_context(|| {
+                    format!(
+                        "Failed to enable DRM cursor hotspot support on {}",
+                        device.path().display()
+                    )
+                })?);
+            }
+        }
 
         Ok(device)
     }
