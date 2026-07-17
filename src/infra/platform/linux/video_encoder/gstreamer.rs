@@ -1,6 +1,6 @@
 use eros::Context as _;
 use gstreamer::glib::prelude::ObjectExt as _;
-use gstreamer::prelude::{Cast as _, GstBinExtManual as _, GstObjectExt as _};
+use gstreamer::prelude::{Cast as _, ElementExt as _, GstBinExtManual as _, GstObjectExt as _};
 
 #[derive(Debug)]
 pub(crate) struct GStreamerVideoEncoder {
@@ -45,6 +45,7 @@ impl GStreamerVideoEncoder {
             eros::bail!("GStreamer appsink factory returned an unexpected element type");
         };
         sink.set_caps(Some(&h264_rtp_caps()));
+        sink.set_async(false);
         sink.set_sync(false);
 
         let pipeline = gstreamer::Pipeline::new();
@@ -67,6 +68,22 @@ impl GStreamerVideoEncoder {
             element,
             sink,
         })
+    }
+
+    pub(crate) fn start(&self) -> eros::Result<()> {
+        self.pipeline
+            .set_state(gstreamer::State::Playing)
+            .with_context(|| "Failed to start GStreamer H.264 encoding pipeline")?;
+
+        Ok(())
+    }
+
+    pub(crate) fn stop(&self) -> eros::Result<()> {
+        self.pipeline
+            .set_state(gstreamer::State::Null)
+            .with_context(|| "Failed to stop GStreamer H.264 encoding pipeline")?;
+
+        Ok(())
     }
 
     fn find_hardware_h264_encoders() -> eros::Result<Vec<gstreamer::ElementFactory>> {
@@ -114,7 +131,7 @@ impl GStreamerVideoEncoder {
     }
 
     fn is_nv12_dmabuf_input_caps(caps: &gstreamer::CapsRef) -> bool {
-        if caps.size() != 1 {
+        if caps.size() != 1 || !caps.is_fixed() {
             return false;
         }
 
@@ -283,6 +300,33 @@ mod tests {
         assert!(error.to_string().contains("at least 28 bytes"));
     }
 
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn starts_and_stops_hardware_h264_pipeline() {
+        gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
+        let input_caps = registered_nv12_dmabuf_input_caps();
+        let encoder = GStreamerVideoEncoder::new(&input_caps, 1_200)
+            .expect("The hardware H.264 pipeline should be created");
+
+        encoder
+            .start()
+            .expect("The hardware H.264 pipeline should start");
+        let (started, current, _) = encoder
+            .pipeline
+            .state(gstreamer::ClockTime::from_seconds(5));
+        started.expect("The hardware H.264 pipeline should finish starting");
+        assert_eq!(current, gstreamer::State::Playing);
+
+        encoder
+            .stop()
+            .expect("The hardware H.264 pipeline should stop");
+        let (stopped, current, _) = encoder
+            .pipeline
+            .state(gstreamer::ClockTime::from_seconds(5));
+        stopped.expect("The hardware H.264 pipeline should finish stopping");
+        assert_eq!(current, gstreamer::State::Null);
+    }
+
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
         GStreamerVideoEncoder::find_hardware_h264_encoders()
             .expect("At least one hardware H.264 encoder should be registered")
@@ -297,6 +341,10 @@ mod tests {
                         gstreamer::Caps::builder_full()
                             .structure_with_features(structure.to_owned(), features.to_owned())
                             .build()
+                    })
+                    .map(|mut caps| {
+                        caps.fixate();
+                        caps
                     })
                     .find(|caps| GStreamerVideoEncoder::is_nv12_dmabuf_input_caps(caps))
             })
