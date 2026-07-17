@@ -1,4 +1,5 @@
 use eros::Context as _;
+use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{Cast as _, GstBinExtManual as _, GstObjectExt as _};
 
 #[derive(Debug)]
@@ -10,8 +11,12 @@ pub(crate) struct GStreamerVideoEncoder {
 }
 
 impl GStreamerVideoEncoder {
-    pub(crate) fn new(input_caps: &gstreamer::Caps) -> eros::Result<Self> {
+    pub(crate) fn new(
+        input_caps: &gstreamer::Caps,
+        max_rtp_packet_size: usize,
+    ) -> eros::Result<Self> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
+        let rtp_mtu = rtp_mtu(max_rtp_packet_size)?;
         let factory = Self::select_hardware_h264_encoder(input_caps)?;
         let factory_name = factory.name();
         let element = factory
@@ -34,6 +39,7 @@ impl GStreamerVideoEncoder {
 
         let parser = create_required_element("h264parse", "h264-parser")?;
         let payloader = create_required_element("rtph264pay", "rtp-payloader")?;
+        payloader.set_property("mtu", rtp_mtu);
         let sink = create_required_element("appsink", "rtp-output")?;
         let Ok(sink) = sink.downcast::<gstreamer_app::AppSink>() else {
             eros::bail!("GStreamer appsink factory returned an unexpected element type");
@@ -126,6 +132,24 @@ impl GStreamerVideoEncoder {
     }
 }
 
+fn rtp_mtu(max_rtp_packet_size: usize) -> eros::Result<u32> {
+    let Ok(rtp_mtu) = u32::try_from(max_rtp_packet_size) else {
+        eros::bail!(
+            "GStreamer RTP packet size exceeds u32: {}",
+            max_rtp_packet_size
+        );
+    };
+
+    if rtp_mtu < 28 {
+        eros::bail!(
+            "GStreamer RTP packet size must be at least 28 bytes, got {}",
+            max_rtp_packet_size
+        );
+    }
+
+    Ok(rtp_mtu)
+}
+
 fn create_required_element(factory: &str, name: &str) -> eros::Result<gstreamer::Element> {
     Ok(gstreamer::ElementFactory::make(factory)
         .name(name)
@@ -153,6 +177,7 @@ fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use gstreamer::glib::prelude::ObjectExt as _;
     use gstreamer::prelude::{ElementExt as _, GstBinExt as _};
 
     use crate::infra::platform::{GStreamerVideoEncoder, video_encoder::gstreamer::h264_rtp_caps};
@@ -178,9 +203,11 @@ mod tests {
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
     fn creates_a_hardware_h264_rtp_pipeline_for_nv12_dmabuf_input() {
+        const MAX_RTP_PACKET_SIZE: usize = 1_200;
+
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let input_caps = registered_nv12_dmabuf_input_caps();
-        let encoder = GStreamerVideoEncoder::new(&input_caps)
+        let encoder = GStreamerVideoEncoder::new(&input_caps, MAX_RTP_PACKET_SIZE)
             .expect("A hardware H.264 encoder element should be created for NV12 DMA-BUF input");
         let factory = encoder
             .element
@@ -202,6 +229,14 @@ mod tests {
                 .caps()
                 .expect("The pipeline appsink should retain its output caps"),
             h264_rtp_caps()
+        );
+        assert_eq!(
+            encoder
+                .pipeline
+                .by_name("rtp-payloader")
+                .expect("The encoding pipeline should contain its RTP payloader")
+                .property::<u32>("mtu"),
+            1_200
         );
 
         for name in [
@@ -228,8 +263,24 @@ mod tests {
             .field("drm-format", "P010")
             .build();
 
-        GStreamerVideoEncoder::new(&input_caps)
+        GStreamerVideoEncoder::new(&input_caps, 1_200)
             .expect_err("The first-version encoder should reject P010 input");
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn rejects_rtp_packet_size_below_payloader_minimum() {
+        gstreamer::init().expect("GStreamer should initialize before constructing input caps");
+        let input_caps = gstreamer::Caps::builder("video/x-raw")
+            .features(["memory:DMABuf"])
+            .field("format", "DMA_DRM")
+            .field("drm-format", "NV12")
+            .build();
+
+        let error = GStreamerVideoEncoder::new(&input_caps, 27)
+            .expect_err("The RTP payloader should reject packet sizes below 28 bytes");
+
+        assert!(error.to_string().contains("at least 28 bytes"));
     }
 
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
