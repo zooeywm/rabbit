@@ -1,24 +1,66 @@
 use eros::Context as _;
-use gstreamer::prelude::GstObjectExt as _;
+use gstreamer::prelude::{Cast as _, GstBinExtManual as _, GstObjectExt as _};
 
 #[derive(Debug)]
 pub(crate) struct GStreamerVideoEncoder {
+    pipeline: gstreamer::Pipeline,
+    source: gstreamer_app::AppSrc,
     element: gstreamer::Element,
+    sink: gstreamer_app::AppSink,
 }
 
 impl GStreamerVideoEncoder {
-    pub(crate) fn new(input_caps: &gstreamer::CapsRef) -> eros::Result<Self> {
+    pub(crate) fn new(input_caps: &gstreamer::Caps) -> eros::Result<Self> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
         let factory = Self::select_hardware_h264_encoder(input_caps)?;
         let factory_name = factory.name();
-        let element = factory.create().build().with_context(|| {
-            format!(
-                "Failed to create GStreamer hardware H.264 encoder element from {}",
-                factory_name
-            )
-        })?;
+        let element = factory
+            .create()
+            .name("h264-encoder")
+            .build()
+            .with_context(|| {
+                format!(
+                    "Failed to create GStreamer hardware H.264 encoder element from {}",
+                    factory_name
+                )
+            })?;
+        let source = create_required_element("appsrc", "video-input")?;
+        let Ok(source) = source.downcast::<gstreamer_app::AppSrc>() else {
+            eros::bail!("GStreamer appsrc factory returned an unexpected element type");
+        };
+        source.set_caps(Some(input_caps));
+        source.set_format(gstreamer::Format::Time);
+        source.set_is_live(true);
 
-        Ok(Self { element })
+        let parser = create_required_element("h264parse", "h264-parser")?;
+        let payloader = create_required_element("rtph264pay", "rtp-payloader")?;
+        let sink = create_required_element("appsink", "rtp-output")?;
+        let Ok(sink) = sink.downcast::<gstreamer_app::AppSink>() else {
+            eros::bail!("GStreamer appsink factory returned an unexpected element type");
+        };
+        sink.set_caps(Some(&h264_rtp_caps()));
+        sink.set_sync(false);
+
+        let pipeline = gstreamer::Pipeline::new();
+        let elements = [
+            source.upcast_ref(),
+            &element,
+            &parser,
+            &payloader,
+            sink.upcast_ref(),
+        ];
+        pipeline
+            .add_many(elements)
+            .with_context(|| "Failed to add H.264 encoding elements to GStreamer pipeline")?;
+        gstreamer::Element::link_many(elements)
+            .with_context(|| "Failed to link GStreamer H.264 RTP encoding pipeline")?;
+
+        Ok(Self {
+            pipeline,
+            source,
+            element,
+            sink,
+        })
     }
 
     fn find_hardware_h264_encoders() -> eros::Result<Vec<gstreamer::ElementFactory>> {
@@ -84,6 +126,21 @@ impl GStreamerVideoEncoder {
     }
 }
 
+fn create_required_element(factory: &str, name: &str) -> eros::Result<gstreamer::Element> {
+    Ok(gstreamer::ElementFactory::make(factory)
+        .name(name)
+        .build()
+        .with_context(|| format!("Failed to create required GStreamer element {factory}"))?)
+}
+
+fn h264_rtp_caps() -> gstreamer::Caps {
+    gstreamer::Caps::builder("application/x-rtp")
+        .field("media", "video")
+        .field("encoding-name", "H264")
+        .field("clock-rate", 90_000_i32)
+        .build()
+}
+
 fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
     let Some(class) = factory.metadata("klass") else {
         return false;
@@ -96,9 +153,9 @@ fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use gstreamer::prelude::ElementExt as _;
+    use gstreamer::prelude::{ElementExt as _, GstBinExt as _};
 
-    use crate::infra::platform::GStreamerVideoEncoder;
+    use crate::infra::platform::{GStreamerVideoEncoder, video_encoder::gstreamer::h264_rtp_caps};
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
@@ -120,7 +177,7 @@ mod tests {
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
-    fn creates_a_hardware_h264_encoder_for_nv12_dmabuf_input() {
+    fn creates_a_hardware_h264_rtp_pipeline_for_nv12_dmabuf_input() {
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let input_caps = registered_nv12_dmabuf_input_caps();
         let encoder = GStreamerVideoEncoder::new(&input_caps)
@@ -132,6 +189,33 @@ mod tests {
 
         assert!(factory.can_sink_all_caps(&input_caps));
         assert!(factory.can_src_any_caps(&h264_caps()));
+        assert_eq!(
+            encoder
+                .source
+                .caps()
+                .expect("The pipeline appsrc should retain its input caps"),
+            input_caps
+        );
+        assert_eq!(
+            encoder
+                .sink
+                .caps()
+                .expect("The pipeline appsink should retain its output caps"),
+            h264_rtp_caps()
+        );
+
+        for name in [
+            "video-input",
+            "h264-encoder",
+            "h264-parser",
+            "rtp-payloader",
+            "rtp-output",
+        ] {
+            encoder
+                .pipeline
+                .by_name(name)
+                .expect("The encoding pipeline should contain every required element");
+        }
     }
 
     #[test]
