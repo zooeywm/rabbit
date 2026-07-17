@@ -211,31 +211,50 @@ impl RootComponent {
         Ok(())
     }
 
-    fn take_selected_connection_request(
-        &mut self,
-    ) -> eros::Result<Option<PendingQuicConnectionRequest>> {
-        let mut selected = None;
-
+    fn selected_connection_request_index(&self) -> eros::Result<Option<usize>> {
         for index in 0..self.pending_connection_requests.len() {
             if self.connection_request_list.is_selected(index)? {
-                selected = Some(index);
-                break;
+                return Ok(Some(index));
             }
         }
 
-        let Some(selected) = selected else {
+        Ok(None)
+    }
+
+    fn refresh_connection_request_list(&mut self, selected: Option<usize>) -> eros::Result<()> {
+        self.connection_request_list.set_items(
+            self.pending_connection_requests.iter().map(|request| {
+                format!(
+                    "{} - {}",
+                    request.request().requester_name,
+                    request.remote_address(),
+                )
+            }),
+        )?;
+        let visible = !self.pending_connection_requests.is_empty();
+        self.set_connection_request_panel_visible(visible)?;
+
+        if let Some(selected) = selected {
+            self.connection_request_list.set_selected(selected, true)?;
+        }
+
+        Ok(())
+    }
+
+    fn take_selected_connection_request(
+        &mut self,
+    ) -> eros::Result<Option<PendingQuicConnectionRequest>> {
+        let Some(selected) = self.selected_connection_request_index()? else {
             return Ok(None);
         };
 
-        self.connection_request_list.remove(selected)?;
         let request = self.pending_connection_requests.remove(selected);
-
-        if self.pending_connection_requests.is_empty() {
-            self.set_connection_request_panel_visible(false)?;
+        let next = if self.pending_connection_requests.is_empty() {
+            None
         } else {
-            let next = selected.min(self.pending_connection_requests.len() - 1);
-            self.connection_request_list.set_selected(next, true)?;
-        }
+            Some(selected.min(self.pending_connection_requests.len() - 1))
+        };
+        self.refresh_connection_request_list(next)?;
 
         Ok(Some(request))
     }
@@ -431,19 +450,10 @@ impl Component for RootComponent {
             }
             RootMessage::ConnectionRequest(request) => {
                 let first_request = self.pending_connection_requests.is_empty();
-                let item = format!(
-                    "{} - {}",
-                    request.request().requester_name,
-                    request.remote_address(),
-                );
+                let selected = self.selected_connection_request_index()?;
 
                 self.pending_connection_requests.push(request);
-                self.connection_request_list.push(item)?;
-
-                if first_request {
-                    self.set_connection_request_panel_visible(true)?;
-                    self.connection_request_list.set_selected(0, true)?;
-                }
+                self.refresh_connection_request_list(selected.or(first_request.then_some(0)))?;
 
                 Ok(true)
             }
