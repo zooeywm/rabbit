@@ -8,6 +8,7 @@ mod gbm_allocator;
 mod gl_context;
 mod output;
 mod types;
+mod worker;
 
 #[derive(Debug, kudi::DepInj)]
 #[target(KmsScreenCaptureManager)]
