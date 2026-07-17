@@ -11,21 +11,37 @@ Thank you for contributing to Rabbit. The project values small, reviewable, and 
 ## Workflow
 
 1. State the assumptions, scope, and acceptance criteria before making changes.
-2. Implement the smallest change that can be reviewed independently.
-3. Run only the verification relevant to the affected area.
-4. Inspect the diff and remove unrelated changes.
-5. Wait for approval before starting the next independent change.
+2. Establish the focused test described below before implementing a new module.
+3. Implement the smallest change that can be reviewed independently.
+4. Run the focused test for the affected module.
+5. Inspect the diff and remove unrelated changes.
+6. Wait for approval before starting the next independent change.
+
+## Test-First Module Development
+
+Before implementing or integrating a new module:
+
+1. Add the smallest compilable module boundary with a deterministic no-op or empty implementation.
+2. Add a focused unit test alongside the module that imports its boundary and runs successfully.
+3. Record the exact command that runs only that test target.
+4. Replace the empty implementation incrementally while keeping the test executable and passing.
+
+Every commit that changes the module must be preceded by a successful run of its focused test. Do not create the commit when that test fails or cannot run. Keep the test after the module is integrated into the application.
+
+Keep tests for private implementation modules as co-located unit tests so they can exercise private boundaries without widening the production API. Use integration tests under `tests/` only when testing an intended public boundary or behavior spanning multiple modules.
 
 ## Rust Verification
 
-Choose verification commands based on the risk of the change. At minimum, keep formatting and compilation checks passing:
+Run the affected module's focused test before every commit. A compilation-only command is not a substitute for that test.
+
+Choose other verification commands based on the risk of the change and the current review instructions:
 
 ```shell
 cargo fmt --check
 cargo check
 ```
 
-Run relevant tests when adding or changing behavior. For changes involving linting, concurrency, security boundaries, or public interfaces, run the following as appropriate:
+For changes involving linting, concurrency, security boundaries, or public interfaces, run the following as appropriate:
 
 ```shell
 cargo test
