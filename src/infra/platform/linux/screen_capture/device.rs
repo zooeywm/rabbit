@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use drm::node::{DrmNode, NodeType};
+use drm::{
+    control::{Device as _, connector, crtc},
+    node::{DrmNode, NodeType},
+};
 use eros::Context;
 
 #[derive(Debug)]
@@ -35,6 +38,59 @@ impl KmsDevice {
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn find_active_output(
+        &self,
+        screen_name: &str,
+    ) -> eros::Result<Option<(connector::Handle, crtc::Handle)>> {
+        let resources = self.resource_handles().with_context(|| {
+            format!("Failed to enumerate DRM resources on {}", self.path().display())
+        })?;
+
+        for connector_handle in resources.connectors() {
+            let connector = self.get_connector(*connector_handle, false).with_context(|| {
+                format!(
+                    "Failed to query DRM connector {connector_handle:?} on {}",
+                    self.path().display()
+                )
+            })?;
+
+            if connector.to_string() != screen_name {
+                continue;
+            }
+
+            if connector.state() != connector::State::Connected {
+                eros::bail!(
+                    "DRM connector {screen_name} on {} is not connected",
+                    self.path().display()
+                );
+            }
+
+            let encoder_handle = connector.current_encoder().with_context(|| {
+                format!(
+                    "DRM connector {screen_name} on {} has no current encoder",
+                    self.path().display()
+                )
+            })?;
+            let encoder = self.get_encoder(encoder_handle).with_context(|| {
+                format!(
+                    "Failed to query current encoder {encoder_handle:?} for DRM connector \
+                     {screen_name} on {}",
+                    self.path().display()
+                )
+            })?;
+            let crtc_handle = encoder.crtc().with_context(|| {
+                format!(
+                    "DRM connector {screen_name} on {} has no active CRTC",
+                    self.path().display()
+                )
+            })?;
+
+            return Ok(Some((connector.handle(), crtc_handle)));
+        }
+
+        Ok(None)
     }
 }
 
