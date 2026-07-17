@@ -11,23 +11,15 @@ use eros::Context as _;
 use gbm::{AsRaw as _, Device};
 use khronos_egl as egl;
 
-const PLATFORM_GBM: egl::Enum = 0x31D7;
-const LINUX_DMA_BUF: egl::Enum = 0x3270;
-const LINUX_DRM_FOURCC: egl::Attrib = 0x3271;
-const YUV_COLOR_SPACE_HINT: egl::Attrib = 0x327B;
-const SAMPLE_RANGE_HINT: egl::Attrib = 0x327C;
-const ITU_REC601: egl::Attrib = 0x327F;
-const ITU_REC709: egl::Attrib = 0x3280;
-const ITU_REC2020: egl::Attrib = 0x3281;
-const YUV_FULL_RANGE: egl::Attrib = 0x3282;
-const YUV_NARROW_RANGE: egl::Attrib = 0x3283;
-const PLANE_FD: [egl::Attrib; 4] = [0x3272, 0x3275, 0x3278, 0x3440];
-const PLANE_OFFSET: [egl::Attrib; 4] = [0x3273, 0x3276, 0x3279, 0x3441];
-const PLANE_PITCH: [egl::Attrib; 4] = [0x3274, 0x3277, 0x327A, 0x3442];
-const PLANE_MODIFIER_LOW: [egl::Attrib; 4] = [0x3443, 0x3445, 0x3447, 0x3449];
-const PLANE_MODIFIER_HIGH: [egl::Attrib; 4] = [0x3444, 0x3446, 0x3448, 0x344A];
-
 use crate::infra::platform::screen_capture::kms::{
+    egl_ext::{
+        DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT,
+        DMA_BUF_PLANE_MODIFIER_LO_EXT, DMA_BUF_PLANE_OFFSET_EXT,
+        DMA_BUF_PLANE_PITCH_EXT, ITU_REC601_EXT, ITU_REC709_EXT,
+        ITU_REC2020_EXT, LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT,
+        PLATFORM_GBM_KHR, SAMPLE_RANGE_HINT_EXT, YUV_COLOR_SPACE_HINT_EXT,
+        YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
+    },
     gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
     types::{
         DmaBufFrame, KmsColorEncoding, KmsColorRange, KmsFramebufferPlane,
@@ -83,7 +75,7 @@ impl EglContext {
 
         let native_display = device.as_raw_mut().cast::<c_void>();
         let display = unsafe {
-            instance.get_platform_display(PLATFORM_GBM, native_display, &[egl::ATTRIB_NONE])
+            instance.get_platform_display(PLATFORM_GBM_KHR, native_display, &[egl::ATTRIB_NONE])
         }
         .with_context(|| "Failed to create an EGL display from the GBM device")?;
         let version = instance
@@ -134,11 +126,11 @@ impl EglContext {
         if frame.planes.is_empty() {
             eros::bail!("Cannot import a DMA-BUF frame without planes");
         }
-        if frame.planes.len() > PLANE_FD.len() {
+        if frame.planes.len() > DMA_BUF_PLANE_FD_EXT.len() {
             eros::bail!(
                 "Cannot import a DMA-BUF frame with {} planes; EGL supports at most {}",
                 frame.planes.len(),
-                PLANE_FD.len()
+                DMA_BUF_PLANE_FD_EXT.len()
             );
         }
 
@@ -147,15 +139,15 @@ impl EglContext {
             frame.size.width as egl::Attrib,
             egl::HEIGHT as egl::Attrib,
             frame.size.height as egl::Attrib,
-            LINUX_DRM_FOURCC,
+            LINUX_DRM_FOURCC_EXT,
             frame.format as u32 as egl::Attrib,
         ];
 
         if let Some(color) = color {
             attributes.extend_from_slice(&[
-                YUV_COLOR_SPACE_HINT,
+                YUV_COLOR_SPACE_HINT_EXT,
                 color_space_hint(color.encoding),
-                SAMPLE_RANGE_HINT,
+                SAMPLE_RANGE_HINT_EXT,
                 sample_range_hint(color.range),
             ]);
         }
@@ -169,11 +161,11 @@ impl EglContext {
             })?;
 
             attributes.extend_from_slice(&[
-                PLANE_FD[plane_index],
+                DMA_BUF_PLANE_FD_EXT[plane_index],
                 object.fd.as_raw_fd() as egl::Attrib,
-                PLANE_OFFSET[plane_index],
+                DMA_BUF_PLANE_OFFSET_EXT[plane_index],
                 plane.offset as egl::Attrib,
-                PLANE_PITCH[plane_index],
+                DMA_BUF_PLANE_PITCH_EXT[plane_index],
                 plane.stride as egl::Attrib,
             ]);
 
@@ -187,9 +179,9 @@ impl EglContext {
 
                 let modifier: u64 = plane.modifier.into();
                 attributes.extend_from_slice(&[
-                    PLANE_MODIFIER_LOW[plane_index],
+                    DMA_BUF_PLANE_MODIFIER_LO_EXT[plane_index],
                     (modifier as u32) as egl::Attrib,
-                    PLANE_MODIFIER_HIGH[plane_index],
+                    DMA_BUF_PLANE_MODIFIER_HI_EXT[plane_index],
                     ((modifier >> 32) as u32) as egl::Attrib,
                 ]);
             }
@@ -203,7 +195,7 @@ impl EglContext {
             .create_image(
                 self.display,
                 no_context,
-                LINUX_DMA_BUF,
+                LINUX_DMA_BUF_EXT,
                 no_buffer,
                 &attributes,
             )
@@ -340,15 +332,15 @@ fn has_extension(extensions: &CStr, expected: &str) -> bool {
 
 fn color_space_hint(encoding: KmsColorEncoding) -> egl::Attrib {
     match encoding {
-        KmsColorEncoding::Bt601 => ITU_REC601,
-        KmsColorEncoding::Bt709 => ITU_REC709,
-        KmsColorEncoding::Bt2020 => ITU_REC2020,
+        KmsColorEncoding::Bt601 => ITU_REC601_EXT,
+        KmsColorEncoding::Bt709 => ITU_REC709_EXT,
+        KmsColorEncoding::Bt2020 => ITU_REC2020_EXT,
     }
 }
 
 fn sample_range_hint(range: KmsColorRange) -> egl::Attrib {
     match range {
-        KmsColorRange::Limited => YUV_NARROW_RANGE,
-        KmsColorRange::Full => YUV_FULL_RANGE,
+        KmsColorRange::Limited => YUV_NARROW_RANGE_EXT,
+        KmsColorRange::Full => YUV_FULL_RANGE_EXT,
     }
 }
