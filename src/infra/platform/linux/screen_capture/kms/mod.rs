@@ -2,6 +2,7 @@ mod device;
 mod egl_context;
 mod framebuffer;
 mod gbm_allocator;
+mod gl_context;
 mod output;
 mod types;
 

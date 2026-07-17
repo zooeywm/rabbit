@@ -1,16 +1,43 @@
-use std::{ffi::c_void, marker::PhantomData, rc::Rc};
+use std::{
+    ffi::{CStr, c_void},
+    marker::PhantomData,
+    os::fd::AsRawFd as _,
+    ptr,
+    rc::Rc,
+};
 
+use drm::buffer::DrmModifier;
 use eros::Context as _;
 use gbm::{AsRaw as _, Device};
 use khronos_egl as egl;
 
 const PLATFORM_GBM: egl::Enum = 0x31D7;
+const LINUX_DMA_BUF: egl::Enum = 0x3270;
+const LINUX_DRM_FOURCC: egl::Attrib = 0x3271;
+const PLANE_FD: [egl::Attrib; 4] = [0x3272, 0x3275, 0x3278, 0x3440];
+const PLANE_OFFSET: [egl::Attrib; 4] = [0x3273, 0x3276, 0x3279, 0x3441];
+const PLANE_PITCH: [egl::Attrib; 4] = [0x3274, 0x3277, 0x327A, 0x3442];
+const PLANE_MODIFIER_LOW: [egl::Attrib; 4] = [0x3443, 0x3445, 0x3447, 0x3449];
+const PLANE_MODIFIER_HIGH: [egl::Attrib; 4] = [0x3444, 0x3446, 0x3448, 0x344A];
+
+use crate::infra::platform::screen_capture::kms::{
+    gl_context::{GlContext, GlExternalTexture},
+    types::DmaBufFrame,
+};
 
 pub(crate) struct EglContext {
     instance: egl::DynamicInstance<egl::EGL1_5>,
     display: egl::Display,
     context: egl::Context,
+    gl: GlContext,
+    supports_modifiers: bool,
     thread_affinity: PhantomData<Rc<()>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct EglImage<'context> {
+    owner: &'context EglContext,
+    image: egl::Image,
 }
 
 impl std::fmt::Debug for EglContext {
@@ -46,20 +73,115 @@ impl EglContext {
             .initialize(display)
             .with_context(|| "Failed to initialize the GBM EGL display")?;
 
-        let context = match create_current_context(&instance, display, version) {
-            Ok(context) => context,
-            Err(error) => {
-                let _ = instance.terminate(display);
-                return Err(error);
-            }
-        };
+        let (context, gl, supports_modifiers) =
+            match initialize_context(&instance, display, version) {
+                Ok(initialized) => initialized,
+                Err(error) => {
+                    let _ = instance.terminate(display);
+                    return Err(error);
+                }
+            };
 
         Ok(Self {
             instance,
             display,
             context,
+            gl,
+            supports_modifiers,
             thread_affinity: PhantomData,
         })
+    }
+
+    pub(crate) fn import_dma_buf<'context>(
+        &'context self,
+        frame: &DmaBufFrame,
+    ) -> eros::Result<EglImage<'context>> {
+        if frame.planes.is_empty() {
+            eros::bail!("Cannot import a DMA-BUF frame without planes");
+        }
+        if frame.planes.len() > PLANE_FD.len() {
+            eros::bail!(
+                "Cannot import a DMA-BUF frame with {} planes; EGL supports at most {}",
+                frame.planes.len(),
+                PLANE_FD.len()
+            );
+        }
+
+        let mut attributes = vec![
+            egl::WIDTH as egl::Attrib,
+            frame.size.width as egl::Attrib,
+            egl::HEIGHT as egl::Attrib,
+            frame.size.height as egl::Attrib,
+            LINUX_DRM_FOURCC,
+            frame.format as u32 as egl::Attrib,
+        ];
+
+        for (plane_index, plane) in frame.planes.iter().enumerate() {
+            let object = frame.objects.get(plane.object_index).with_context(|| {
+                format!(
+                    "DMA-BUF plane {plane_index} references missing object {}",
+                    plane.object_index
+                )
+            })?;
+
+            attributes.extend_from_slice(&[
+                PLANE_FD[plane_index],
+                object.fd.as_raw_fd() as egl::Attrib,
+                PLANE_OFFSET[plane_index],
+                plane.offset as egl::Attrib,
+                PLANE_PITCH[plane_index],
+                plane.stride as egl::Attrib,
+            ]);
+
+            if plane.modifier != DrmModifier::Invalid {
+                if !self.supports_modifiers {
+                    eros::bail!(
+                        "EGL cannot import DMA-BUF plane {plane_index} modifier {:?}",
+                        plane.modifier
+                    );
+                }
+
+                let modifier: u64 = plane.modifier.into();
+                attributes.extend_from_slice(&[
+                    PLANE_MODIFIER_LOW[plane_index],
+                    (modifier as u32) as egl::Attrib,
+                    PLANE_MODIFIER_HIGH[plane_index],
+                    ((modifier >> 32) as u32) as egl::Attrib,
+                ]);
+            }
+        }
+
+        attributes.push(egl::ATTRIB_NONE);
+        let no_context = unsafe { egl::Context::from_ptr(ptr::null_mut()) };
+        let no_buffer = unsafe { egl::ClientBuffer::from_ptr(ptr::null_mut()) };
+        let image = self
+            .instance
+            .create_image(
+                self.display,
+                no_context,
+                LINUX_DMA_BUF,
+                no_buffer,
+                &attributes,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to import {}x{} {:?} DMA-BUF as an EGLImage",
+                    frame.size.width, frame.size.height, frame.format
+                )
+            })?;
+
+        Ok(EglImage { owner: self, image })
+    }
+
+    pub(crate) fn create_external_texture<'context>(
+        &'context self,
+        image: &EglImage<'_>,
+    ) -> eros::Result<GlExternalTexture<'context>> {
+        if !ptr::eq(self, image.owner) {
+            eros::bail!("Cannot bind an EGLImage created by another EGL context");
+        }
+
+        self.gl.create_external_texture(image.image)
     }
 }
 
@@ -74,20 +196,33 @@ impl Drop for EglContext {
     }
 }
 
-fn create_current_context(
+impl Drop for EglImage<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .owner
+            .instance
+            .destroy_image(self.owner.display, self.image);
+    }
+}
+
+fn initialize_context(
     instance: &egl::DynamicInstance<egl::EGL1_5>,
     display: egl::Display,
     version: (egl::Int, egl::Int),
-) -> eros::Result<egl::Context> {
-    if version < (1, 5) {
-        let extensions = instance
-            .query_string(Some(display), egl::EXTENSIONS)
-            .with_context(|| "Failed to query EGL display extensions")?;
+) -> eros::Result<(egl::Context, GlContext, bool)> {
+    let extensions = instance
+        .query_string(Some(display), egl::EXTENSIONS)
+        .with_context(|| "Failed to query EGL display extensions")?;
 
-        if !has_extension(extensions, "EGL_KHR_surfaceless_context") {
-            eros::bail!("EGL display does not support surfaceless contexts");
-        }
+    if version < (1, 5) && !has_extension(extensions, "EGL_KHR_surfaceless_context") {
+        eros::bail!("EGL display does not support surfaceless contexts");
     }
+    if !has_extension(extensions, "EGL_EXT_image_dma_buf_import") {
+        eros::bail!("EGL display does not support DMA-BUF image import");
+    }
+
+    let supports_modifiers =
+        has_extension(extensions, "EGL_EXT_image_dma_buf_import_modifiers");
 
     instance
         .bind_api(egl::OPENGL_ES_API)
@@ -117,10 +252,19 @@ fn create_current_context(
         return Ok(Err(error).with_context(|| "Failed to make the EGL context current")?);
     }
 
-    Ok(context)
+    let gl = match GlContext::new(instance) {
+        Ok(gl) => gl,
+        Err(error) => {
+            let _ = instance.make_current(display, None, None, None);
+            let _ = instance.destroy_context(display, context);
+            return Err(error);
+        }
+    };
+
+    Ok((context, gl, supports_modifiers))
 }
 
-fn has_extension(extensions: &std::ffi::CStr, expected: &str) -> bool {
+fn has_extension(extensions: &CStr, expected: &str) -> bool {
     extensions
         .to_bytes()
         .split(|byte| byte.is_ascii_whitespace())
