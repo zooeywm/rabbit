@@ -53,14 +53,14 @@ impl GbmFrameAllocator {
             .create_buffer_object::<()>(size.width, size.height, format, usage)
             .with_context(|| {
                 format!(
-                    "Failed to allocate {format:?} GBM render target {}x{}",
+                    "Failed to allocate {format:?} GBM composition target {}x{}",
                     size.width, size.height
                 )
             })?;
         let plane_count = buffer.plane_count();
 
         if plane_count == 0 {
-            eros::bail!("GBM allocated a render target without DMA-BUF planes");
+            eros::bail!("GBM allocated a composition target without DMA-BUF planes");
         }
 
         let modifier = buffer.modifier();
@@ -74,7 +74,7 @@ impl GbmFrameAllocator {
 
             let gbm_plane_index = plane_index as i32;
             let fd = buffer.fd_for_plane(gbm_plane_index).with_context(|| {
-                format!("Failed to export GBM render target plane {plane_index} as DMA-BUF")
+                format!("Failed to export GBM composition target plane {plane_index} as DMA-BUF")
             })?;
             let object_index = objects.len();
 

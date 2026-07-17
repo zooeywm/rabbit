@@ -21,7 +21,7 @@ const PLANE_MODIFIER_LOW: [egl::Attrib; 4] = [0x3443, 0x3445, 0x3447, 0x3449];
 const PLANE_MODIFIER_HIGH: [egl::Attrib; 4] = [0x3444, 0x3446, 0x3448, 0x344A];
 
 use crate::infra::platform::screen_capture::kms::{
-    gl_context::{GlContext, GlExternalTexture},
+    gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
     types::DmaBufFrame,
 };
 
@@ -38,6 +38,7 @@ pub(crate) struct EglContext {
 pub(crate) struct EglImage<'context> {
     owner: &'context EglContext,
     image: egl::Image,
+    size: crate::kernel::geometry::PixelSize,
 }
 
 impl std::fmt::Debug for EglContext {
@@ -170,7 +171,11 @@ impl EglContext {
                 )
             })?;
 
-        Ok(EglImage { owner: self, image })
+        Ok(EglImage {
+            owner: self,
+            image,
+            size: frame.size,
+        })
     }
 
     pub(crate) fn create_external_texture<'context>(
@@ -182,6 +187,17 @@ impl EglContext {
         }
 
         self.gl.create_external_texture(image.image)
+    }
+
+    pub(crate) fn create_composition_target<'context>(
+        &'context self,
+        image: &EglImage<'_>,
+    ) -> eros::Result<GlCompositionTarget<'context>> {
+        if !ptr::eq(self, image.owner) {
+            eros::bail!("Cannot render to an EGLImage created by another EGL context");
+        }
+
+        self.gl.create_composition_target(image.image, image.size)
     }
 }
 
