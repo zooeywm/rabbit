@@ -1,4 +1,7 @@
+use std::{future::poll_fn, pin::Pin};
+
 use eros::Context as _;
+use futures_core::Stream as _;
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{Cast as _, ElementExt as _, GstBinExtManual as _, GstObjectExt as _};
 
@@ -67,6 +70,7 @@ pub(crate) struct GStreamerVideoEncoder {
     source: gstreamer_app::AppSrc,
     element: gstreamer::Element,
     sink: gstreamer_app::AppSink,
+    output: gstreamer_app::app_sink::AppSinkStream,
     terminal_messages: flume::Receiver<gstreamer::Message>,
 }
 
@@ -107,6 +111,7 @@ impl GStreamerVideoEncoder {
         sink.set_caps(Some(&h264_rtp_caps()));
         sink.set_async(false);
         sink.set_sync(false);
+        let output = sink.stream();
 
         let pipeline = gstreamer::Pipeline::new();
         let elements = [
@@ -128,6 +133,7 @@ impl GStreamerVideoEncoder {
             source,
             element,
             sink,
+            output,
             terminal_messages,
         })
     }
@@ -162,6 +168,15 @@ impl GStreamerVideoEncoder {
             .with_context(|| "Failed to submit DMA-BUF frame to GStreamer H.264 encoder")?;
 
         Ok(())
+    }
+
+    pub(crate) async fn receive_packet(&mut self) -> eros::Result<Option<GStreamerRtpPacket>> {
+        let Some(sample) = poll_fn(|context| Pin::new(&mut self.output).poll_next(context)).await
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(GStreamerRtpPacket::try_from(sample)?))
     }
 
     pub(crate) async fn wait_terminal(&self) -> eros::Result<()> {
@@ -522,6 +537,35 @@ mod tests {
         encoder
             .finish()
             .expect("The hardware H.264 input should accept EOS");
+        runtime
+            .block_on(encoder.wait_terminal())
+            .expect("EOS should finish the hardware H.264 pipeline normally");
+        encoder
+            .stop()
+            .expect("The hardware H.264 pipeline should stop");
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn closes_rtp_output_when_hardware_pipeline_reaches_eos() {
+        gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
+        let input_caps = registered_nv12_dmabuf_input_caps();
+        let mut encoder = GStreamerVideoEncoder::new(&input_caps, 1_200)
+            .expect("The hardware H.264 pipeline should be created");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        encoder
+            .start()
+            .expect("The hardware H.264 pipeline should start");
+        encoder
+            .finish()
+            .expect("The hardware H.264 input should accept EOS");
+        assert!(
+            runtime
+                .block_on(encoder.receive_packet())
+                .expect("The H.264 RTP output should close normally")
+                .is_none()
+        );
         runtime
             .block_on(encoder.wait_terminal())
             .expect("EOS should finish the hardware H.264 pipeline normally");
