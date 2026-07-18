@@ -174,6 +174,30 @@ fn terminal_messages(
     Ok(receiver)
 }
 
+fn terminal_message_result(message: &gstreamer::MessageRef) -> eros::Result<()> {
+    match message.view() {
+        gstreamer::MessageView::Eos(_) => Ok(()),
+        gstreamer::MessageView::Error(error) => {
+            let source = match error.src() {
+                Some(source) => source.path_string().to_string(),
+                None => String::from("unknown source"),
+            };
+            let message = error.error();
+
+            match error.debug() {
+                Some(debug) => eros::bail!(
+                    "GStreamer H.264 pipeline failed at {}: {}; debug: {}",
+                    source,
+                    message,
+                    debug
+                ),
+                None => eros::bail!("GStreamer H.264 pipeline failed at {}: {}", source, message),
+            }
+        }
+        _ => eros::bail!("GStreamer terminal channel received a non-terminal message"),
+    }
+}
+
 fn rtp_mtu(max_rtp_packet_size: usize) -> eros::Result<u32> {
     let Ok(rtp_mtu) = u32::try_from(max_rtp_packet_size) else {
         eros::bail!(
@@ -222,7 +246,10 @@ mod tests {
     use gstreamer::glib::prelude::ObjectExt as _;
     use gstreamer::prelude::{ElementExt as _, GstBinExt as _};
 
-    use crate::infra::platform::{GStreamerVideoEncoder, video_encoder::gstreamer::h264_rtp_caps};
+    use crate::infra::platform::{
+        GStreamerVideoEncoder,
+        video_encoder::gstreamer::{h264_rtp_caps, terminal_message_result},
+    };
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
@@ -373,6 +400,7 @@ mod tests {
             .block_on(encoder.terminal_messages.recv_async())
             .expect("The EOS message should reach the async terminal channel");
         assert!(matches!(eos.view(), gstreamer::MessageView::Eos(_)));
+        terminal_message_result(&eos).expect("EOS should complete the pipeline normally");
 
         encoder
             .pipeline
@@ -391,6 +419,10 @@ mod tests {
             .expect("The error message should reach the async terminal channel");
 
         assert!(matches!(error.view(), gstreamer::MessageView::Error(_)));
+        let error = terminal_message_result(&error)
+            .expect_err("A GStreamer error message should fail the pipeline");
+        assert!(error.to_string().contains("test pipeline failure"));
+        assert!(error.to_string().contains("test debug details"));
     }
 
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
