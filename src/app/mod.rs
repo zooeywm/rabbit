@@ -7,9 +7,7 @@ mod logging;
 use tracing::{info, warn};
 
 use crate::{
-    app::config::Config,
-    infra::{QuicEndpoint, RayonThreadPoolState},
-    kernel::screen_manager::ScreenLayoutManager,
+    app::config::Config, infra::QuicEndpoint, kernel::screen_manager::ScreenLayoutManager,
 };
 
 pub(crate) use gui::RootComponent;
@@ -20,7 +18,6 @@ pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState> {
     config: Config,
     screen_layout_manager_state: ScreenLayoutManagerState,
     screen_capture_manager_state: ScreenCaptureManagerState,
-    rayon_thread_pool_state: RayonThreadPoolState,
     quic_endpoint: QuicEndpoint,
 }
 
@@ -32,14 +29,12 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
         config: Config,
         screen_layout_manager_state: ScreenLayoutManagerState,
         screen_capture_manager_state: ScreenCaptureManagerState,
-        rayon_thread_pool_state: RayonThreadPoolState,
         quic_endpoint: QuicEndpoint,
     ) -> Self {
         Self {
             config,
             screen_layout_manager_state,
             screen_capture_manager_state,
-            rayon_thread_pool_state,
             quic_endpoint,
         }
     }

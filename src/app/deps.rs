@@ -2,7 +2,7 @@ use crate::{
     app::{App, config::Config},
     infra::{
         KmsScreenCaptureManager, KmsScreenCaptureManagerState, NiriScreenLayoutManager,
-        NiriScreenLayoutManagerState, QuicEndpoint, RayonThreadPool, RayonThreadPoolState,
+        NiriScreenLayoutManagerState, QuicEndpoint,
     },
     kernel::{
         screen_capture::ScreenCaptureManager,
@@ -10,34 +10,11 @@ use crate::{
     },
 };
 
-impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
-    App<ScreenLayoutManagerState, ScreenCaptureManagerState>
-{
-    pub(crate) fn spawn_cpu<Task, Output>(
-        &self,
-        task: Task,
-    ) -> futures_channel::oneshot::Receiver<Output>
-    where
-        Task: FnOnce() -> Output + Send + 'static,
-        Output: Send + 'static,
-    {
-        RayonThreadPool::inj_ref(self).spawn(task)
-    }
-}
-
 impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsRef<Config>
     for App<ScreenLayoutManagerState, ScreenCaptureManagerState>
 {
     fn as_ref(&self) -> &Config {
         &self.config
-    }
-}
-
-impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsRef<RayonThreadPoolState>
-    for App<ScreenLayoutManagerState, ScreenCaptureManagerState>
-{
-    fn as_ref(&self) -> &RayonThreadPoolState {
-        &self.rayon_thread_pool_state
     }
 }
 
