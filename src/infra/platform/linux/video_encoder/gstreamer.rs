@@ -8,6 +8,7 @@ pub(crate) struct GStreamerVideoEncoder {
     source: gstreamer_app::AppSrc,
     element: gstreamer::Element,
     sink: gstreamer_app::AppSink,
+    terminal_messages: flume::Receiver<gstreamer::Message>,
 }
 
 impl GStreamerVideoEncoder {
@@ -61,12 +62,14 @@ impl GStreamerVideoEncoder {
             .with_context(|| "Failed to add H.264 encoding elements to GStreamer pipeline")?;
         gstreamer::Element::link_many(elements)
             .with_context(|| "Failed to link GStreamer H.264 RTP encoding pipeline")?;
+        let terminal_messages = terminal_messages(&pipeline)?;
 
         Ok(Self {
             pipeline,
             source,
             element,
             sink,
+            terminal_messages,
         })
     }
 
@@ -147,6 +150,28 @@ impl GStreamerVideoEncoder {
                 .get::<&str>("drm-format")
                 .is_ok_and(|format| format == "NV12" || format.starts_with("NV12:"))
     }
+}
+
+fn terminal_messages(
+    pipeline: &gstreamer::Pipeline,
+) -> eros::Result<flume::Receiver<gstreamer::Message>> {
+    let Some(bus) = pipeline.bus() else {
+        eros::bail!("GStreamer H.264 encoding pipeline has no Bus");
+    };
+    let (sender, receiver) = flume::bounded(1);
+
+    bus.set_sync_handler(move |_, message| {
+        if matches!(
+            message.view(),
+            gstreamer::MessageView::Error(_) | gstreamer::MessageView::Eos(_)
+        ) {
+            let _ = sender.try_send(message.to_owned());
+        }
+
+        gstreamer::BusSyncReply::Drop
+    });
+
+    Ok(receiver)
 }
 
 fn rtp_mtu(max_rtp_packet_size: usize) -> eros::Result<u32> {
@@ -325,6 +350,47 @@ mod tests {
             .state(gstreamer::ClockTime::from_seconds(5));
         stopped.expect("The hardware H.264 pipeline should finish stopping");
         assert_eq!(current, gstreamer::State::Null);
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn receives_gstreamer_eos_and_error_messages_asynchronously() {
+        gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
+        let input_caps = registered_nv12_dmabuf_input_caps();
+        let encoder = GStreamerVideoEncoder::new(&input_caps, 1_200)
+            .expect("The hardware H.264 pipeline should be created");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        encoder
+            .pipeline
+            .post_message(
+                gstreamer::message::Eos::builder()
+                    .src(&encoder.pipeline)
+                    .build(),
+            )
+            .expect("The test EOS message should be posted");
+        let eos = runtime
+            .block_on(encoder.terminal_messages.recv_async())
+            .expect("The EOS message should reach the async terminal channel");
+        assert!(matches!(eos.view(), gstreamer::MessageView::Eos(_)));
+
+        encoder
+            .pipeline
+            .post_message(
+                gstreamer::message::Error::builder(
+                    gstreamer::CoreError::Failed,
+                    "test pipeline failure",
+                )
+                .src(&encoder.pipeline)
+                .debug("test debug details")
+                .build(),
+            )
+            .expect("The test error message should be posted");
+        let error = runtime
+            .block_on(encoder.terminal_messages.recv_async())
+            .expect("The error message should reach the async terminal channel");
+
+        assert!(matches!(error.view(), gstreamer::MessageView::Error(_)));
     }
 
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
