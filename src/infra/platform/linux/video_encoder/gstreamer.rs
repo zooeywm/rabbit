@@ -89,6 +89,14 @@ impl GStreamerVideoEncoder {
         Ok(())
     }
 
+    pub(crate) fn finish(&self) -> eros::Result<()> {
+        self.source
+            .end_of_stream()
+            .with_context(|| "Failed to finish GStreamer H.264 encoding input")?;
+
+        Ok(())
+    }
+
     pub(crate) async fn wait_terminal(&self) -> eros::Result<()> {
         let message = self
             .terminal_messages
@@ -424,6 +432,29 @@ mod tests {
             .expect_err("A GStreamer error message should fail the pipeline");
         assert!(error.to_string().contains("test pipeline failure"));
         assert!(error.to_string().contains("test debug details"));
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn finishes_hardware_h264_pipeline_through_appsrc() {
+        gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
+        let input_caps = registered_nv12_dmabuf_input_caps();
+        let encoder = GStreamerVideoEncoder::new(&input_caps, 1_200)
+            .expect("The hardware H.264 pipeline should be created");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        encoder
+            .start()
+            .expect("The hardware H.264 pipeline should start");
+        encoder
+            .finish()
+            .expect("The hardware H.264 input should accept EOS");
+        runtime
+            .block_on(encoder.wait_terminal())
+            .expect("EOS should finish the hardware H.264 pipeline normally");
+        encoder
+            .stop()
+            .expect("The hardware H.264 pipeline should stop");
     }
 
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
