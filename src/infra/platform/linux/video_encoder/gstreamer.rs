@@ -89,6 +89,16 @@ impl GStreamerVideoEncoder {
         Ok(())
     }
 
+    pub(crate) async fn wait_terminal(&self) -> eros::Result<()> {
+        let message = self
+            .terminal_messages
+            .recv_async()
+            .await
+            .with_context(|| "GStreamer H.264 terminal message channel disconnected")?;
+
+        terminal_message_result(&message)
+    }
+
     fn find_hardware_h264_encoders() -> eros::Result<Vec<gstreamer::ElementFactory>> {
         let h264_caps = gstreamer::Caps::builder("video/x-h264").build();
 
@@ -246,10 +256,7 @@ mod tests {
     use gstreamer::glib::prelude::ObjectExt as _;
     use gstreamer::prelude::{ElementExt as _, GstBinExt as _};
 
-    use crate::infra::platform::{
-        GStreamerVideoEncoder,
-        video_encoder::gstreamer::{h264_rtp_caps, terminal_message_result},
-    };
+    use crate::infra::platform::{GStreamerVideoEncoder, video_encoder::gstreamer::h264_rtp_caps};
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
@@ -396,11 +403,9 @@ mod tests {
                     .build(),
             )
             .expect("The test EOS message should be posted");
-        let eos = runtime
-            .block_on(encoder.terminal_messages.recv_async())
-            .expect("The EOS message should reach the async terminal channel");
-        assert!(matches!(eos.view(), gstreamer::MessageView::Eos(_)));
-        terminal_message_result(&eos).expect("EOS should complete the pipeline normally");
+        runtime
+            .block_on(encoder.wait_terminal())
+            .expect("EOS should complete the pipeline normally");
 
         encoder
             .pipeline
@@ -415,11 +420,7 @@ mod tests {
             )
             .expect("The test error message should be posted");
         let error = runtime
-            .block_on(encoder.terminal_messages.recv_async())
-            .expect("The error message should reach the async terminal channel");
-
-        assert!(matches!(error.view(), gstreamer::MessageView::Error(_)));
-        let error = terminal_message_result(&error)
+            .block_on(encoder.wait_terminal())
             .expect_err("A GStreamer error message should fail the pipeline");
         assert!(error.to_string().contains("test pipeline failure"));
         assert!(error.to_string().contains("test debug details"));
