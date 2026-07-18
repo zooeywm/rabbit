@@ -3,6 +3,40 @@ use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{Cast as _, ElementExt as _, GstBinExtManual as _, GstObjectExt as _};
 
 #[derive(Debug)]
+pub(crate) struct GStreamerVideoFrame {
+    buffer: gstreamer::Buffer,
+}
+
+impl TryFrom<gstreamer::Buffer> for GStreamerVideoFrame {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(buffer: gstreamer::Buffer) -> Result<Self, Self::Error> {
+        if buffer.n_memory() == 0 {
+            eros::bail!("GStreamer video frame does not contain DMA-BUF memory");
+        }
+
+        for (index, memory) in buffer.iter_memories().enumerate() {
+            if !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>() {
+                eros::bail!("GStreamer video frame memory {} is not DMA-BUF", index);
+            }
+        }
+
+        let Some(video) = buffer.meta::<gstreamer_video::VideoMeta>() else {
+            eros::bail!("GStreamer DMA-BUF video frame is missing VideoMeta");
+        };
+
+        if video.format() != gstreamer_video::VideoFormat::DmaDrm {
+            eros::bail!(
+                "GStreamer DMA-BUF video frame has non-DRM format {}",
+                video.format()
+            );
+        }
+
+        Ok(Self { buffer })
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct GStreamerVideoEncoder {
     pipeline: gstreamer::Pipeline,
     source: gstreamer_app::AppSrc,
@@ -261,10 +295,15 @@ fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+
     use gstreamer::glib::prelude::ObjectExt as _;
     use gstreamer::prelude::{ElementExt as _, GstBinExt as _};
+    use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
-    use crate::infra::platform::{GStreamerVideoEncoder, video_encoder::gstreamer::h264_rtp_caps};
+    use crate::infra::platform::{
+        GStreamerVideoEncoder, GStreamerVideoFrame, video_encoder::gstreamer::h264_rtp_caps,
+    };
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
@@ -457,6 +496,24 @@ mod tests {
             .expect("The hardware H.264 pipeline should stop");
     }
 
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn accepts_dmabuf_video_frames() {
+        gstreamer::init().expect("GStreamer should initialize before constructing a frame");
+
+        let _frame = dmabuf_video_frame();
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn rejects_system_memory_video_frames() {
+        gstreamer::init().expect("GStreamer should initialize before constructing a frame");
+        let buffer = gstreamer::Buffer::from_slice([0_u8; 16]);
+
+        GStreamerVideoFrame::try_from(buffer)
+            .expect_err("The hardware encoder input should reject system memory");
+    }
+
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
         GStreamerVideoEncoder::find_hardware_h264_encoders()
             .expect("At least one hardware H.264 encoder should be registered")
@@ -483,5 +540,38 @@ mod tests {
 
     fn h264_caps() -> gstreamer::Caps {
         gstreamer::Caps::builder("video/x-h264").build()
+    }
+
+    fn dmabuf_video_frame() -> GStreamerVideoFrame {
+        const WIDTH: u32 = 16;
+        const HEIGHT: u32 = 16;
+        const Y_SIZE: usize = WIDTH as usize * HEIGHT as usize;
+        const BUFFER_SIZE: usize = Y_SIZE + Y_SIZE / 2;
+
+        let allocator = gstreamer_allocators::DmaBufAllocator::new();
+        let file = File::open("/dev/zero").expect("The test DMA-BUF fd should open");
+        let memory = unsafe {
+            allocator
+                .alloc_dmabuf(file, BUFFER_SIZE)
+                .expect("The test fd should be wrapped as GStreamer DMA-BUF memory")
+        };
+        let mut buffer = gstreamer::Buffer::new();
+        let buffer = buffer
+            .get_mut()
+            .expect("A newly allocated GStreamer buffer should be writable");
+        buffer.append_memory(memory);
+        gstreamer_video::VideoMeta::add_full(
+            buffer,
+            gstreamer_video::VideoFrameFlags::empty(),
+            gstreamer_video::VideoFormat::DmaDrm,
+            WIDTH,
+            HEIGHT,
+            &[0, Y_SIZE],
+            &[WIDTH as i32, WIDTH as i32],
+        )
+        .expect("The test DMA-BUF should accept NV12 plane metadata");
+
+        GStreamerVideoFrame::try_from(buffer.to_owned())
+            .expect("The test buffer should satisfy the encoder input boundary")
     }
 }
