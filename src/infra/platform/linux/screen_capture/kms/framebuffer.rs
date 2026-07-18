@@ -128,7 +128,13 @@ impl KmsOutput {
                 .device
                 .buffer_to_prime_fd(handle, drm::CLOEXEC | drm::RDWR)
             {
-                Ok(fd) => objects.push(DmaBufObject { fd }),
+                Ok(fd) => match DmaBufObject::try_from(fd) {
+                    Ok(object) => objects.push(object),
+                    Err(source) => errors.push(KmsPlaneCaptureError::QueryBufferSize {
+                        object_index,
+                        source,
+                    }),
+                },
                 Err(source) => errors.push(KmsPlaneCaptureError::ExportBuffer {
                     object_index,
                     source,

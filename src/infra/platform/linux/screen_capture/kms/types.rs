@@ -1,4 +1,4 @@
-use std::{io, os::fd::OwnedFd};
+use std::{fs::File, io, os::fd::OwnedFd};
 
 use drm::{
     buffer::{DrmFourcc, DrmModifier},
@@ -10,6 +10,33 @@ use crate::kernel::geometry::PixelSize;
 #[derive(Debug)]
 pub(crate) struct DmaBufObject {
     pub fd: OwnedFd,
+    pub size: usize,
+}
+
+impl TryFrom<OwnedFd> for DmaBufObject {
+    type Error = io::Error;
+
+    fn try_from(fd: OwnedFd) -> Result<Self, Self::Error> {
+        let file = File::from(fd);
+        let size = usize::try_from(file.metadata()?.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DMA-BUF object length exceeds usize",
+            )
+        })?;
+
+        if size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DMA-BUF object has zero length",
+            ));
+        }
+
+        Ok(Self {
+            fd: OwnedFd::from(file),
+            size,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +66,12 @@ pub(crate) enum KmsPlaneCaptureError {
     QueryFramebuffer(#[source] GetPlanarFramebufferError),
     #[error("failed to export framebuffer object {object_index} as DMA-BUF")]
     ExportBuffer {
+        object_index: usize,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to determine DMA-BUF object {object_index} length")]
+    QueryBufferSize {
         object_index: usize,
         #[source]
         source: io::Error,

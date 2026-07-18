@@ -82,7 +82,9 @@ impl GbmFrameAllocator {
             })?;
             let object_index = objects.len();
 
-            objects.push(DmaBufObject { fd });
+            objects.push(DmaBufObject::try_from(fd).with_context(|| {
+                format!("Failed to determine GBM composition target plane {plane_index} length")
+            })?);
             planes.push(DmaBufPlane {
                 object_index,
                 offset: buffer.offset(gbm_plane_index),
