@@ -37,6 +37,31 @@ impl TryFrom<gstreamer::Buffer> for GStreamerVideoFrame {
 }
 
 #[derive(Debug)]
+pub(crate) struct GStreamerRtpPacket {
+    buffer: gstreamer::Buffer,
+}
+
+impl TryFrom<gstreamer::Sample> for GStreamerRtpPacket {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(sample: gstreamer::Sample) -> Result<Self, Self::Error> {
+        let Some(caps) = sample.caps() else {
+            eros::bail!("GStreamer encoded packet sample is missing caps");
+        };
+
+        if !caps.is_subset(&h264_rtp_caps()) {
+            eros::bail!("GStreamer encoded packet has non-H.264 RTP caps {}", caps);
+        }
+
+        let Some(buffer) = sample.buffer_owned() else {
+            eros::bail!("GStreamer H.264 RTP sample is missing its buffer");
+        };
+
+        Ok(Self { buffer })
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct GStreamerVideoEncoder {
     pipeline: gstreamer::Pipeline,
     source: gstreamer_app::AppSrc,
@@ -310,7 +335,8 @@ mod tests {
     use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
     use crate::infra::platform::{
-        GStreamerVideoEncoder, GStreamerVideoFrame, video_encoder::gstreamer::h264_rtp_caps,
+        GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
+        video_encoder::gstreamer::h264_rtp_caps,
     };
 
     #[test]
@@ -535,6 +561,41 @@ mod tests {
 
         GStreamerVideoFrame::try_from(buffer)
             .expect_err("The hardware encoder input should reject system memory");
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn accepts_h264_rtp_packet_samples() {
+        gstreamer::init().expect("GStreamer should initialize before constructing a packet");
+        let buffer = gstreamer::Buffer::from_slice([1_u8, 2, 3, 4]);
+        let sample = gstreamer::Sample::builder()
+            .buffer(&buffer)
+            .caps(&h264_rtp_caps())
+            .build();
+
+        let packet = GStreamerRtpPacket::try_from(sample)
+            .expect("An H.264 RTP sample should satisfy the encoded packet boundary");
+
+        assert_eq!(packet.buffer.size(), 4);
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn rejects_non_h264_rtp_packet_samples() {
+        gstreamer::init().expect("GStreamer should initialize before constructing a packet");
+        let buffer = gstreamer::Buffer::from_slice([0_u8; 4]);
+        let caps = gstreamer::Caps::builder("application/x-rtp")
+            .field("media", "audio")
+            .field("encoding-name", "OPUS")
+            .field("clock-rate", 48_000_i32)
+            .build();
+        let sample = gstreamer::Sample::builder()
+            .buffer(&buffer)
+            .caps(&caps)
+            .build();
+
+        GStreamerRtpPacket::try_from(sample)
+            .expect_err("A non-H.264 RTP sample should be rejected");
     }
 
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {

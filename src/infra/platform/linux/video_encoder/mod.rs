@@ -1,3 +1,3 @@
 mod gstreamer;
 
-pub(crate) use gstreamer::{GStreamerVideoEncoder, GStreamerVideoFrame};
+pub(crate) use gstreamer::{GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame};

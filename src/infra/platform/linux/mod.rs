@@ -8,4 +8,4 @@ pub(crate) use screen_capture::{
 pub(crate) use screen_layout::{
     NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_screen_layout_manager_state,
 };
-pub(crate) use video_encoder::{GStreamerVideoEncoder, GStreamerVideoFrame};
+pub(crate) use video_encoder::{GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame};
