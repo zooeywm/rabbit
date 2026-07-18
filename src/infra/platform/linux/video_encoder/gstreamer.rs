@@ -131,6 +131,14 @@ impl GStreamerVideoEncoder {
         Ok(())
     }
 
+    pub(crate) fn submit_frame(&self, frame: GStreamerVideoFrame) -> eros::Result<()> {
+        self.source
+            .push_buffer(frame.buffer)
+            .with_context(|| "Failed to submit DMA-BUF frame to GStreamer H.264 encoder")?;
+
+        Ok(())
+    }
+
     pub(crate) async fn wait_terminal(&self) -> eros::Result<()> {
         let message = self
             .terminal_messages
@@ -502,6 +510,21 @@ mod tests {
         gstreamer::init().expect("GStreamer should initialize before constructing a frame");
 
         let _frame = dmabuf_video_frame();
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn submits_a_dmabuf_video_frame_to_appsrc() {
+        gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
+        let input_caps = registered_nv12_dmabuf_input_caps();
+        let encoder = GStreamerVideoEncoder::new(&input_caps, 1_200)
+            .expect("The hardware H.264 pipeline should be created");
+
+        encoder
+            .submit_frame(dmabuf_video_frame())
+            .expect("The appsrc should accept one DMA-BUF video frame");
+
+        assert_eq!(encoder.source.current_level_buffers(), 1);
     }
 
     #[test]
