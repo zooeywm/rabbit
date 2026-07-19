@@ -309,11 +309,7 @@ mod tests {
 
         let error = GpuContext::new(&gpu).expect_err("Missing render node should fail");
 
-        assert!(
-            error
-                .to_string()
-                .contains("/dev/dri/rabbit-missing-render-node")
-        );
+        assert!(format!("{error:?}").contains("/dev/dri/rabbit-missing-render-node"));
     }
 
     #[test]
