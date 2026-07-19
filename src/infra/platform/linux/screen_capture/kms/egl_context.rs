@@ -20,8 +20,8 @@ use crate::infra::platform::{
             DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, DupNativeFenceFdAndroid,
             ITU_REC601_EXT, ITU_REC709_EXT, ITU_REC2020_EXT, LINUX_DMA_BUF_EXT,
             LINUX_DRM_FOURCC_EXT, NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR,
-            SAMPLE_RANGE_HINT_EXT, SYNC_NATIVE_FENCE_ANDROID, YUV_COLOR_SPACE_HINT_EXT,
-            YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
+            SAMPLE_RANGE_HINT_EXT, SYNC_NATIVE_FENCE_ANDROID, SYNC_NATIVE_FENCE_FD_ANDROID,
+            YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
         },
         gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
         types::{
@@ -53,6 +53,9 @@ pub(crate) struct EglPlaneImage<'context>(EglImage<'context>);
 
 #[derive(Debug)]
 pub(crate) struct EglCompositionImage<'context>(EglImage<'context>);
+
+#[derive(Debug)]
+pub(crate) struct EglDmaBufImage<'context>(EglImage<'context>);
 
 impl std::fmt::Debug for EglContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -124,6 +127,46 @@ impl EglContext {
             self.import_dma_buf(frame, None)
                 .with_context(|| "Failed to import the KMS composition target")?,
         ))
+    }
+
+    pub(crate) fn import_dma_buf_frame<'context>(
+        &'context self,
+        frame: &DmaBufFrame,
+    ) -> eros::Result<EglDmaBufImage<'context>> {
+        Ok(EglDmaBufImage(
+            self.import_dma_buf(frame, None)
+                .with_context(|| "Failed to import DMA-BUF frame into EGL")?,
+        ))
+    }
+
+    pub(crate) fn wait_on_native_fence(&self, fence: OwnedFd) -> eros::Result<()> {
+        let raw_fd = fence.as_raw_fd();
+        let sync = unsafe {
+            self.instance.create_sync(
+                self.display,
+                SYNC_NATIVE_FENCE_ANDROID,
+                &[
+                    SYNC_NATIVE_FENCE_FD_ANDROID,
+                    raw_fd as egl::Attrib,
+                    egl::ATTRIB_NONE,
+                ],
+            )
+        }
+        .with_context(|| "Failed to import DMA-BUF readiness fence into EGL")?;
+
+        std::mem::forget(fence);
+
+        if let Err(error) = self.instance.wait_sync(self.display, sync, 0) {
+            let _ = unsafe { self.instance.destroy_sync(self.display, sync) };
+            return Ok(
+                Err(error).with_context(|| "Failed to enqueue the DMA-BUF readiness fence wait")?
+            );
+        }
+
+        unsafe { self.instance.destroy_sync(self.display, sync) }
+            .with_context(|| "Failed to destroy the imported DMA-BUF readiness fence")?;
+
+        Ok(())
     }
 
     fn import_dma_buf<'context>(

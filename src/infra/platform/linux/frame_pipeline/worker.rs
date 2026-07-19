@@ -12,7 +12,7 @@ use crate::{
     infra::platform::{
         frame_pipeline::GbmFramePipelineFrame,
         gpu::{GpuContext, GpuDevice},
-        screen_capture::{KmsCapturedFrame, KmsFrameReceiver},
+        screen_capture::{EglDmaBufImage, KmsCapturedFrame, KmsFrameReceiver},
     },
     kernel::{frame_pipeline::FramePipelineParameters, screen_manager::ScreenId},
 };
@@ -362,12 +362,56 @@ fn wait_for_event(
 fn process_screen_frame(
     context: &GpuContext,
     screen_id: ScreenId,
-    frame: KmsCapturedFrame,
+    mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
 ) {
+    let source = match prepare_pipeline_source(context, screen_id, &mut frame) {
+        Ok(source) => source,
+        Err(error) => {
+            let failure = error.to_string();
+            route_screen_frame(screen_id, frame, pipelines, |_, _| {
+                Err(eros::error!("{}", failure))
+            });
+            return;
+        }
+    };
+
     route_screen_frame(screen_id, frame, pipelines, |parameters, frame| {
-        process_pipeline_frame(context, parameters, frame)
+        process_pipeline_frame(context, &source, parameters, frame)
     });
+}
+
+fn prepare_pipeline_source<'context>(
+    context: &'context GpuContext,
+    screen_id: ScreenId,
+    frame: &mut KmsCapturedFrame,
+) -> eros::Result<EglDmaBufImage<'context>> {
+    if frame.buffer.format != Format::Xrgb8888 {
+        eros::bail!(
+            "First-version frame pipeline requires an XRGB8888 source for screen {}, got {:?}",
+            screen_id.0,
+            frame.buffer.format
+        );
+    }
+
+    if let Some(fence) = frame.buffer.readiness_fence.take() {
+        context.egl().wait_on_native_fence(fence).with_context(|| {
+            format!(
+                "Failed to wait for screen {} {:?} source readiness",
+                screen_id.0, frame.buffer.format
+            )
+        })?;
+    }
+
+    Ok(context
+        .egl()
+        .import_dma_buf_frame(&frame.buffer)
+        .with_context(|| {
+            format!(
+                "Failed to import screen {} {:?} source frame",
+                screen_id.0, frame.buffer.format
+            )
+        })?)
 }
 
 fn route_screen_frame(
@@ -393,6 +437,7 @@ fn route_screen_frame(
 
 fn process_pipeline_frame(
     context: &GpuContext,
+    _source: &EglDmaBufImage<'_>,
     parameters: &FramePipelineParameters,
     _frame: &KmsCapturedFrame,
 ) -> eros::Result<GbmFramePipelineFrame> {

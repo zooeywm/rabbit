@@ -3,8 +3,8 @@ mod kms;
 #[cfg(test)]
 pub(crate) use kms::empty_kms_frame;
 pub(crate) use kms::{
-    EglContext, KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver, KmsScreenCaptureManager,
-    KmsScreenCaptureManagerState,
+    EglContext, EglDmaBufImage, KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver,
+    KmsScreenCaptureManager, KmsScreenCaptureManagerState,
 };
 
 /// Creates the screen-capture manager state selected for Linux.

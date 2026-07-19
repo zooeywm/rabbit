@@ -2,6 +2,7 @@ use khronos_egl as egl;
 
 // EGL_ANDROID_native_fence_sync
 pub(crate) const SYNC_NATIVE_FENCE_ANDROID: egl::Enum = 0x3144;
+pub(crate) const SYNC_NATIVE_FENCE_FD_ANDROID: egl::Attrib = 0x3145;
 pub(crate) const NO_NATIVE_FENCE_FD_ANDROID: egl::Int = -1;
 pub(crate) type DupNativeFenceFdAndroid =
     unsafe extern "system" fn(egl::EGLDisplay, egl::EGLSync) -> egl::Int;

@@ -55,7 +55,7 @@ impl KmsCapturer {
 #[cfg(test)]
 mod tests {
     use crate::{
-        infra::platform::screen_capture::kms::KmsCaptureLease,
+        infra::platform::{gpu::GpuContext, screen_capture::kms::KmsCaptureLease},
         kernel::screen_capture::ScreenCaptureSource,
     };
 
@@ -66,8 +66,12 @@ mod tests {
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
         let ScreenCaptureSource { lease, receiver } =
             KmsCaptureLease::new(screen_name).expect("KMS capture source should start");
-        let (_device, frames) = receiver.into_parts();
-        let frame = frames
+        let (device, frames) = receiver.into_parts();
+        let device = device
+            .recv()
+            .expect("KMS capture worker should report its GPU")
+            .expect("KMS capture GPU discovery should succeed");
+        let mut frame = frames
             .recv()
             .expect("KMS capture worker should remain connected")
             .expect("KMS capture worker should publish one frame");
@@ -83,6 +87,21 @@ mod tests {
         assert!(frame.buffer.objects.iter().all(|object| object.size > 0));
         assert!(!frame.buffer.planes.is_empty());
         assert!(frame.buffer.readiness_fence.is_some());
+
+        let context = GpuContext::new(&device).expect("Pipeline GPU context should initialize");
+        let fence = frame
+            .buffer
+            .readiness_fence
+            .take()
+            .expect("Composed KMS frame should carry a readiness fence");
+        context
+            .egl()
+            .wait_on_native_fence(fence)
+            .expect("Pipeline GPU context should enqueue the source readiness wait");
+        let _image = context
+            .egl()
+            .import_dma_buf_frame(&frame.buffer)
+            .expect("Pipeline GPU context should import the composed KMS frame");
 
         drop(lease);
     }
