@@ -5,7 +5,9 @@ mod screen_capture;
 mod screen_layout;
 mod video_encoder;
 
-pub(crate) use frame_pipeline::{GbmFramePipelineManager, GbmFramePipelineManagerState};
+pub(crate) use frame_pipeline::{
+    GbmFramePipelineFrame, GbmFramePipelineManager, GbmFramePipelineManagerState,
+};
 pub(crate) use screen_capture::{
     KmsScreenCaptureManager, KmsScreenCaptureManagerState, create_screen_capture_manager_state,
 };

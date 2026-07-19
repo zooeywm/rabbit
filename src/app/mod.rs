@@ -3,6 +3,7 @@ pub(crate) mod config;
 mod deps;
 mod gui;
 mod logging;
+mod screen_stream;
 
 use tracing::{info, warn};
 

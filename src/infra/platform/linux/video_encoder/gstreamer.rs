@@ -1,8 +1,13 @@
-use std::{future::poll_fn, pin::Pin, rc::Rc};
+use std::{
+    future::{Future, poll_fn},
+    pin::Pin,
+    rc::Rc,
+};
 
 use drm::buffer::{DrmFourcc, DrmModifier};
 use eros::Context as _;
 use futures_core::Stream as _;
+use futures_util::future::{Either, select};
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{Cast as _, ElementExt as _, GstBinExtManual as _, GstObjectExt as _};
 use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
@@ -244,6 +249,41 @@ pub(crate) struct GStreamerVideoEncoder {
 }
 
 impl GStreamerVideoEncoder {
+    pub(crate) async fn run<Frames, SendPacket, SendFuture>(
+        mut frames: Frames,
+        max_rtp_packet_size: usize,
+        mut send_packet: SendPacket,
+    ) -> eros::Result<()>
+    where
+        Frames: futures_core::Stream<Item = eros::Result<Rc<GbmFramePipelineFrame>>> + Unpin,
+        SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
+        let Some(first_frame) = poll_fn(|context| Pin::new(&mut frames).poll_next(context)).await
+        else {
+            return Ok(());
+        };
+        let first_frame = GStreamerVideoFrame::try_from(
+            first_frame.with_context(|| "Failed to receive first frame-pipeline output")?,
+        )?;
+        let mut encoder = Self::new(first_frame, max_rtp_packet_size)?;
+        let result = encoder.drive(&mut frames, &mut send_packet).await;
+        let stop = encoder
+            .stop()
+            .with_context(|| "Failed to stop GStreamer video encoder");
+
+        match (result, stop) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(stop_error)) => eros::bail!(
+                "Video encoding failed: {}; additionally failed to stop encoder: {}",
+                error,
+                stop_error
+            ),
+        }
+    }
+
     pub(crate) fn new(
         first_frame: GStreamerVideoFrame,
         max_rtp_packet_size: usize,
@@ -360,12 +400,21 @@ impl GStreamerVideoEncoder {
     }
 
     pub(crate) async fn receive_packet(&mut self) -> eros::Result<Option<GStreamerRtpPacket>> {
-        let Some(sample) = poll_fn(|context| Pin::new(&mut self.output).poll_next(context)).await
-        else {
-            return Ok(None);
-        };
+        let output = poll_fn(|context| Pin::new(&mut self.output).poll_next(context));
+        let terminal = self.terminal_messages.recv_async();
+        futures_util::pin_mut!(output, terminal);
 
-        Ok(Some(GStreamerRtpPacket::try_from(sample)?))
+        match select(output, terminal).await {
+            Either::Left((Some(sample), _)) => Ok(Some(GStreamerRtpPacket::try_from(sample)?)),
+            Either::Left((None, _)) => Ok(None),
+            Either::Right((Ok(message), _)) => {
+                terminal_message_result(&message)?;
+                Ok(None)
+            }
+            Either::Right((Err(_), _)) => {
+                eros::bail!("GStreamer H.264 terminal message channel disconnected")
+            }
+        }
     }
 
     pub(crate) async fn wait_terminal(&self) -> eros::Result<()> {
@@ -438,6 +487,62 @@ impl GStreamerVideoEncoder {
             && structure
                 .get::<&str>("drm-format")
                 .is_ok_and(|format| format == "NV12" || format.starts_with("NV12:"))
+    }
+
+    async fn drive<Frames, SendPacket, SendFuture>(
+        &mut self,
+        frames: &mut Frames,
+        send_packet: &mut SendPacket,
+    ) -> eros::Result<()>
+    where
+        Frames: futures_core::Stream<Item = eros::Result<Rc<GbmFramePipelineFrame>>> + Unpin,
+        SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
+        enum Event {
+            Frame(Option<eros::Result<Rc<GbmFramePipelineFrame>>>),
+            Packet(eros::Result<Option<GStreamerRtpPacket>>),
+        }
+
+        let mut input_open = true;
+
+        loop {
+            if !input_open {
+                let Some(packet) = self.receive_packet().await? else {
+                    return Ok(());
+                };
+                send_packet(packet).await?;
+                continue;
+            }
+
+            let event = {
+                let next_frame = poll_fn(|context| Pin::new(&mut *frames).poll_next(context));
+                let next_packet = self.receive_packet();
+                futures_util::pin_mut!(next_frame, next_packet);
+
+                match select(next_frame, next_packet).await {
+                    Either::Left((frame, _)) => Event::Frame(frame),
+                    Either::Right((packet, _)) => Event::Packet(packet),
+                }
+            };
+
+            match event {
+                Event::Frame(Some(frame)) => {
+                    let frame = GStreamerVideoFrame::try_from(
+                        frame.with_context(|| "Failed to receive frame-pipeline output")?,
+                    )?;
+                    self.submit_frame(frame)?;
+                }
+                Event::Frame(None) => {
+                    self.finish()?;
+                    input_open = false;
+                }
+                Event::Packet(packet) => match packet? {
+                    Some(packet) => send_packet(packet).await?,
+                    None => return Ok(()),
+                },
+            }
+        }
     }
 }
 

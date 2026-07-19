@@ -11,10 +11,10 @@ pub(crate) use connection_request::{
     PendingQuicConnectionRequest, connect_transport, receive_request,
 };
 pub(crate) use platform::{
-    GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
-    KmsScreenCaptureManagerState, NiriScreenLayoutManager, NiriScreenLayoutManagerState,
-    create_frame_pipeline_manager_state, create_screen_capture_manager_state,
-    create_screen_layout_manager_state,
+    GStreamerVideoEncoder, GbmFramePipelineFrame, GbmFramePipelineManager,
+    GbmFramePipelineManagerState, KmsScreenCaptureManager, KmsScreenCaptureManagerState,
+    NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_frame_pipeline_manager_state,
+    create_screen_capture_manager_state, create_screen_layout_manager_state,
 };
 pub(crate) use quic_endpoint::QuicEndpoint;
 pub(crate) use rayon_thread_pool::{RayonThreadPool, RayonThreadPoolState};
