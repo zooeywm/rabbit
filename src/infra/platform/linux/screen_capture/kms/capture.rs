@@ -1,3 +1,6 @@
+#[cfg(test)]
+use std::time::Instant;
+
 use eros::Context;
 
 use crate::{
@@ -16,6 +19,13 @@ pub(crate) struct KmsCapturer {
     output: KmsOutput,
     allocator: GbmFrameAllocator,
     gpu_device: GpuDevice,
+}
+
+#[cfg(test)]
+pub(crate) struct KmsCaptureTiming {
+    pub(crate) vblank_wait_started: Instant,
+    pub(crate) capture_started: Instant,
+    pub(crate) capture_completed: Instant,
 }
 
 impl KmsCapturer {
@@ -38,9 +48,19 @@ impl KmsCapturer {
     }
 
     pub(crate) fn capture(&self) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
+        self.wait_for_vblank()?;
+        self.capture_current_frame()
+    }
+
+    fn wait_for_vblank(&self) -> eros::Result<()> {
         self.output
             .wait_for_vblank()
             .with_context(|| "Failed to synchronize KMS capture with the display refresh")?;
+
+        Ok(())
+    }
+
+    fn capture_current_frame(&self) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
         let snapshot = self
             .output
             .snapshot_framebuffers()
@@ -49,6 +69,26 @@ impl KmsCapturer {
         self.allocator
             .compose(snapshot)
             .with_context(|| "Failed to compose KMS framebuffers")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_with_timing(
+        &self,
+    ) -> eros::Result<(CapturedFrame<DmaBufFrame, KmsPlaneIssue>, KmsCaptureTiming)> {
+        let vblank_wait_started = Instant::now();
+        self.wait_for_vblank()?;
+        let capture_started = Instant::now();
+        let frame = self.capture_current_frame()?;
+        let capture_completed = Instant::now();
+
+        Ok((
+            frame,
+            KmsCaptureTiming {
+                vblank_wait_started,
+                capture_started,
+                capture_completed,
+            },
+        ))
     }
 }
 

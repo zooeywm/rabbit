@@ -178,11 +178,10 @@ fn run_capture_loop(
             Err(TryRecvError::Empty) => {}
         }
 
-        #[cfg(test)]
-        let capture_started = Instant::now();
+        #[cfg(not(test))]
         let frame = capturer.capture();
         #[cfg(test)]
-        let frame = frame.map(|frame| {
+        let frame = capturer.capture_with_timing().map(|(frame, timing)| {
             let frame = KmsCapturedFrame {
                 buffer: frame.buffer,
                 issues: frame.issues,
@@ -190,7 +189,9 @@ fn run_capture_loop(
                     crate::infra::platform::video_probe::HostVideoFrameProbe::new(
                         next_frame_id,
                         capture_epoch,
-                        capture_started,
+                        timing.vblank_wait_started,
+                        timing.capture_started,
+                        timing.capture_completed,
                     ),
                 ),
             };

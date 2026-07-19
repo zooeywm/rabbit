@@ -1033,6 +1033,7 @@ mod tests {
 
     #[derive(Default)]
     struct HostVideoStageTotals {
+        vblank_wait: Duration,
         capture: Duration,
         capture_queue: Duration,
         gpu_process: Duration,
@@ -1041,10 +1042,11 @@ mod tests {
         vpp_queue: Duration,
         vpp: Duration,
         encode: Duration,
-        total: Duration,
+        host_latency: Duration,
     }
 
     struct HostVideoTimings {
+        vblank_wait: Duration,
         capture: Duration,
         capture_queue: Duration,
         gpu_process: Duration,
@@ -1053,7 +1055,7 @@ mod tests {
         vpp_queue: Duration,
         vpp: Duration,
         encode: Duration,
-        total: Duration,
+        host_latency: Duration,
     }
 
     #[derive(Default)]
@@ -1137,6 +1139,7 @@ mod tests {
             };
 
             Self {
+                vblank_wait: elapsed(probe.vblank_wait_started, probe.capture_started),
                 capture: elapsed(probe.capture_started, probe.capture_completed),
                 capture_queue: elapsed(probe.capture_completed, gpu_received),
                 gpu_process: elapsed(gpu_received, gpu_submitted),
@@ -1145,13 +1148,14 @@ mod tests {
                 vpp_queue,
                 vpp,
                 encode: elapsed(encode_started, encoded),
-                total: elapsed(probe.capture_started, encoded),
+                host_latency: elapsed(probe.capture_started, encoded),
             }
         }
     }
 
     impl HostVideoStageTotals {
         fn add(&mut self, timings: &HostVideoTimings) {
+            self.vblank_wait += timings.vblank_wait;
             self.capture += timings.capture;
             self.capture_queue += timings.capture_queue;
             self.gpu_process += timings.gpu_process;
@@ -1160,7 +1164,7 @@ mod tests {
             self.vpp_queue += timings.vpp_queue;
             self.vpp += timings.vpp;
             self.encode += timings.encode;
-            self.total += timings.total;
+            self.host_latency += timings.host_latency;
         }
     }
 
@@ -1210,6 +1214,7 @@ mod tests {
                 target: "rabbit::host_video_probe",
                 frame_id = probe.frame_id,
                 pts_ns,
+                vblank_wait_ms = duration_ms(timings.vblank_wait),
                 capture_ms = duration_ms(timings.capture),
                 capture_queue_ms = duration_ms(timings.capture_queue),
                 gpu_process_ms = duration_ms(timings.gpu_process),
@@ -1218,7 +1223,7 @@ mod tests {
                 vpp_queue_ms = duration_ms(timings.vpp_queue),
                 vpp_ms = duration_ms(timings.vpp),
                 encode_ms = duration_ms(timings.encode),
-                total_ms = duration_ms(timings.total),
+                host_latency_ms = duration_ms(timings.host_latency),
                 rtp_packets = stats.packets,
                 rtp_bytes = stats.bytes,
                 "Host video frame encoded"
@@ -1246,7 +1251,8 @@ mod tests {
                 window_ms = duration_ms(elapsed),
                 frames,
                 fps,
-                avg_frame_ms = average_ms(self.window_totals.total, frames),
+                avg_host_latency_ms = average_ms(self.window_totals.host_latency, frames),
+                avg_vblank_wait_ms = average_ms(self.window_totals.vblank_wait, frames),
                 avg_capture_ms = average_ms(self.window_totals.capture, frames),
                 avg_capture_queue_ms = average_ms(self.window_totals.capture_queue, frames),
                 avg_gpu_process_ms = average_ms(self.window_totals.gpu_process, frames),
