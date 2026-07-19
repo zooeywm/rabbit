@@ -10,7 +10,7 @@ use gbm::{Format, Modifier};
 
 use crate::{
     infra::platform::{
-        frame_pipeline::GbmFramePipelineFrame,
+        frame_pipeline::{GbmFramePipelineFrame, SharedFramePipelineError},
         gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
         screen_capture::{EglDmaBufImage, KmsCapturedFrame, KmsFrameReceiver},
         video_encoder::{hardware_h264_encoder_for, va_vpp_input_modifier},
@@ -381,9 +381,9 @@ fn process_screen_frame(
     let source = match prepare_pipeline_source(context, screen_id, &mut frame) {
         Ok(source) => source,
         Err(error) => {
-            let failure = error.to_string();
+            let failure = SharedFramePipelineError::from(error);
             route_screen_frame(screen_id, frame, pipelines, |_, _| {
-                Err(eros::error!("{}", failure))
+                Err(eros::error!(failure.clone()))
             });
             return;
         }

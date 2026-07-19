@@ -1,8 +1,10 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    fmt,
     pin::Pin,
     rc::{Rc, Weak},
+    sync::Arc,
     task::{Context, Poll, Waker},
 };
 
@@ -43,6 +45,23 @@ struct FramePipelineSourceKey {
     parameters: FramePipelineParameters,
 }
 
+#[derive(Debug, Clone)]
+struct SharedFramePipelineError(Arc<eros::ErrorUnion>);
+
+impl From<eros::ErrorUnion> for SharedFramePipelineError {
+    fn from(error: eros::ErrorUnion) -> Self {
+        Self(Arc::new(error))
+    }
+}
+
+impl fmt::Display for SharedFramePipelineError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.0.as_ref(), formatter)
+    }
+}
+
+impl std::error::Error for SharedFramePipelineError {}
+
 #[derive(Debug)]
 struct FramePipelineSource {
     frames: RefCell<LatestFramePublisher<GbmFramePipelineFrame>>,
@@ -59,7 +78,7 @@ struct CapturedScreenSource {
 #[derive(Debug)]
 struct LatestFramePublisher<Frame> {
     subscribers: Vec<Weak<RefCell<LatestFrameSubscriptionState<Frame>>>>,
-    failure: Option<Rc<str>>,
+    failure: Option<SharedFramePipelineError>,
     closed: bool,
 }
 
@@ -71,7 +90,7 @@ struct LatestFrameSubscription<Frame> {
 #[derive(Debug)]
 struct LatestFrameSubscriptionState<Frame> {
     latest: Option<Rc<Frame>>,
-    failure: Option<Rc<str>>,
+    failure: Option<SharedFramePipelineError>,
     waker: Option<Waker>,
     closed: bool,
 }
@@ -163,8 +182,8 @@ impl<Frame> LatestFramePublisher<Frame> {
         }
     }
 
-    fn fail(&mut self, failure: Rc<str>) {
-        self.failure = Some(Rc::clone(&failure));
+    fn fail(&mut self, failure: SharedFramePipelineError) {
+        self.failure = Some(failure.clone());
         self.closed = true;
 
         for subscriber in self.subscribers.drain(..) {
@@ -174,7 +193,7 @@ impl<Frame> LatestFramePublisher<Frame> {
             let waker = {
                 let mut state = state.borrow_mut();
                 state.latest = None;
-                state.failure = Some(Rc::clone(&failure));
+                state.failure = Some(failure.clone());
                 state.closed = true;
                 state.waker.take()
             };
@@ -213,8 +232,8 @@ impl<Frame> futures_core::Stream for LatestFrameSubscription<Frame> {
     }
 }
 
-fn failed_frame<Frame>(failure: &str) -> eros::Result<Rc<Frame>> {
-    Err(eros::error!("{}", failure))
+fn failed_frame<Frame>(failure: &SharedFramePipelineError) -> eros::Result<Rc<Frame>> {
+    Err(eros::error!(failure.clone()))
 }
 
 impl CapturedScreenSource {
@@ -251,11 +270,10 @@ impl FramePipelineSource {
                 match frame {
                     Ok(frame) => source.frames.borrow_mut().publish(frame),
                     Err(error) => {
-                        tracing::error!(%error, "GPU frame pipeline failed");
                         source
                             .frames
                             .borrow_mut()
-                            .fail(format!("GPU frame pipeline failed: {error}").into());
+                            .fail(error.with_context(|| "GPU frame pipeline failed").into());
                         return;
                     }
                 }
@@ -416,9 +434,9 @@ fn handle_worker_notification(
 ) {
     match notification {
         GpuWorkerNotification::ScreenFailed { screen_id, error } => {
-            tracing::error!(screen_id = screen_id.0, %error, "Screen capture source failed");
-            let failure: Rc<str> =
-                format!("Screen {} capture source failed: {error}", screen_id.0).into();
+            let failure = SharedFramePipelineError::from(
+                error.with_context(|| format!("Screen {} capture source failed", screen_id.0)),
+            );
             let failed_sources = {
                 let mut sources = sources.borrow_mut();
                 let keys = sources
@@ -433,7 +451,7 @@ fn handle_worker_notification(
             };
 
             for source in failed_sources {
-                source.frames.borrow_mut().fail(Rc::clone(&failure));
+                source.frames.borrow_mut().fail(failure.clone());
             }
 
             if let Some(captured_screen) = captured_screens.borrow_mut().remove(&screen_id) {
@@ -730,7 +748,9 @@ mod tests {
                 .expect("Test capture sender should exist");
 
             sender
-                .send(Err(eros::error!("test capture failure")))
+                .send(Err(
+                    eros::error!("test capture failure").context("Test capture backend context")
+                ))
                 .expect("Capture failure should be sent");
 
             let first_error = poll_fn(|context| Pin::new(&mut first).poll_next(context))
@@ -744,6 +764,8 @@ mod tests {
 
             assert!(first_error.to_string().contains("test capture failure"));
             assert!(second_error.to_string().contains("test capture failure"));
+            assert!(format!("{first_error:?}").contains("Test capture backend context"));
+            assert!(format!("{second_error:?}").contains("Test capture backend context"));
             assert!(deps.frame_pipeline.sources.borrow().is_empty());
             assert!(deps.frame_pipeline.captured_screens.borrow().is_empty());
             assert!(deps.frame_pipeline.worker_thread_id().is_none());
