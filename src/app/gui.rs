@@ -1,22 +1,25 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
+    rc::Rc,
 };
 
 use eros::Context;
-use tracing::{error, info, warn};
+use tracing::{error, info, trace, warn};
 use winio::prelude::*;
 
 use crate::{
-    app::{App, LoggerGuard, config::Config, init_logging},
+    app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
     infra::{
         GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
         PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportSend,
         connect_transport, create_frame_pipeline_manager_state,
         create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
+        unsync_queue::UnsyncQueue,
     },
     kernel::{
         connection_request::ConnectionRequest,
+        frame_pipeline::{FramePipelineManager, FramePipelineParameters},
         screen_configuration::{
             RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
             ScreenStreamsConfigured, SetScreenStreams,
@@ -29,8 +32,25 @@ use crate::{
 };
 
 struct RunningSession {
-    send: SessionSend<QuicTransportSend>,
+    send: Rc<SessionSend<QuicTransportSend>>,
+    screen_streams: HashMap<ScreenId, RunningScreenStream>,
     _receiver: compio::runtime::JoinHandle<()>,
+}
+
+struct RunningScreenStream {
+    id: u64,
+    cancellation: UnsyncQueue<()>,
+    task: Option<compio::runtime::JoinHandle<()>>,
+}
+
+impl Drop for RunningScreenStream {
+    fn drop(&mut self) {
+        self.cancellation.push(());
+
+        if let Some(task) = self.task.take() {
+            task.detach();
+        }
+    }
 }
 
 pub(crate) struct RootComponent {
@@ -57,6 +77,7 @@ pub(crate) struct RootComponent {
     selected_remote_screen: Option<(SessionId, ScreenId)>,
     screen_stream_results: HashMap<SessionId, ScreenStreamsConfigured>,
     next_session_id: u32,
+    next_screen_stream_id: u64,
     _connection_listener: compio::runtime::JoinHandle<()>,
     _logger_guard: LoggerGuard,
 }
@@ -77,21 +98,35 @@ pub(crate) enum RootMessage {
     SessionMessageReceived(SessionId, SessionMessage),
     SessionClosed(SessionId),
     SessionFailed(SessionId, eros::ErrorUnion),
+    ScreenStreamFinished(SessionId, ScreenId, u64, eros::Result<()>),
     RemoteScreenSelectionChanged,
 }
 
 impl RootComponent {
-    fn configure_preserved_screens(&self, request: SetScreenStreams) -> ScreenStreamsConfigured {
+    fn configure_preserved_screens(
+        &self,
+        request: SetScreenStreams,
+    ) -> (
+        ScreenStreamsConfigured,
+        Vec<(ScreenId, FramePipelineParameters)>,
+    ) {
         let SetScreenStreams {
             request_id,
             desired_streams,
         } = request;
+        let mut streams = Vec::new();
         let outcomes = desired_streams
             .into_iter()
             .map(|desired_stream| {
                 let status = match self._app.screen(&desired_stream.screen_id) {
                     Some(screen) => match desired_stream.remote_display {
                         RemoteDisplayMode::Preserve => {
+                            streams.push((
+                                desired_stream.screen_id,
+                                FramePipelineParameters {
+                                    frame_size: desired_stream.frame_size,
+                                },
+                            ));
                             ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
                                 requested: desired_stream.frame_size,
                                 actual: screen.resolution,
@@ -111,10 +146,13 @@ impl RootComponent {
             })
             .collect();
 
-        ScreenStreamsConfigured {
-            request_id,
-            outcomes,
-        }
+        (
+            ScreenStreamsConfigured {
+                request_id,
+                outcomes,
+            },
+            streams,
+        )
     }
 
     fn start_session<R>(
@@ -132,9 +170,64 @@ impl RootComponent {
             "Session started"
         );
         self.sessions.push(RunningSession {
-            send,
+            send: Rc::new(send),
+            screen_streams: HashMap::new(),
             _receiver: compio::runtime::spawn(receive_session(recv, sender.clone())),
         });
+    }
+
+    fn next_screen_stream_id(&mut self) -> eros::Result<u64> {
+        let id = self.next_screen_stream_id;
+        self.next_screen_stream_id = self
+            .next_screen_stream_id
+            .checked_add(1)
+            .context("Failed to allocate a screen stream task ID")?;
+
+        Ok(id)
+    }
+
+    fn replace_screen_stream(
+        &mut self,
+        session_id: SessionId,
+        screen_id: ScreenId,
+        parameters: FramePipelineParameters,
+        sender: &ComponentSender<Self>,
+    ) -> eros::Result<()> {
+        let frames = FramePipelineManager::subscribe(&mut self._app, &screen_id, parameters)?;
+        let stream_id = self.next_screen_stream_id()?;
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.send.id() == session_id)
+        else {
+            eros::bail!(
+                "Session {} closed before screen {} stream could start",
+                session_id.0,
+                screen_id.0
+            );
+        };
+        let session_send = Rc::clone(&session.send);
+        let cancellation = UnsyncQueue::default();
+        let task_cancellation = cancellation.clone();
+        let task_sender = sender.clone();
+        let task = compio::runtime::spawn(async move {
+            let result =
+                run_host_screen_stream(frames, screen_id, session_send, task_cancellation).await;
+            task_sender.post(RootMessage::ScreenStreamFinished(
+                session_id, screen_id, stream_id, result,
+            ));
+        });
+
+        session.screen_streams.insert(
+            screen_id,
+            RunningScreenStream {
+                id: stream_id,
+                cancellation,
+                task: Some(task),
+            },
+        );
+
+        Ok(())
     }
 
     fn remove_session(&mut self, id: SessionId) -> eros::Result<()> {
@@ -347,6 +440,7 @@ impl Component for RootComponent {
             selected_remote_screen: None,
             screen_stream_results: HashMap::new(),
             next_session_id: 0,
+            next_screen_stream_id: 0,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -554,7 +648,7 @@ impl Component for RootComponent {
                         self.refresh_remote_screen_list()?;
                     }
                     SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
-                        let configured = self.configure_preserved_screens(request);
+                        let (configured, streams) = self.configure_preserved_screens(request);
                         let Some(session) =
                             self.sessions.iter().find(|session| session.send.id() == id)
                         else {
@@ -564,14 +658,28 @@ impl Component for RootComponent {
                             );
                             return Ok(false);
                         };
+                        let session_send = Rc::clone(&session.send);
 
-                        if let Err(error) = session
-                            .send
+                        if let Err(error) = session_send
                             .send_screen_streams_configured(configured)
                             .await
                         {
                             error!(session_id = id.0, %error, "Failed to send screen stream results");
                             self.remove_session(id)?;
+                            return Ok(false);
+                        }
+
+                        for (screen_id, parameters) in streams {
+                            if let Err(error) =
+                                self.replace_screen_stream(id, screen_id, parameters, sender)
+                            {
+                                error!(
+                                    session_id = id.0,
+                                    screen_id = screen_id.0,
+                                    %error,
+                                    "Failed to start screen stream"
+                                );
+                            }
                         }
                     }
                     SessionMessage::Control(ControlMessage::ScreenStreamsConfigured(
@@ -592,13 +700,12 @@ impl Component for RootComponent {
                         ))?;
                         self.screen_stream_results.insert(id, configured);
                     }
-                    message => {
-                        warn!(
-                            session_id = id.0,
-                            ?message,
-                            "Session message is not handled yet"
-                        )
-                    }
+                    SessionMessage::Video(video) => trace!(
+                        session_id = id.0,
+                        screen_id = video.screen_id.0,
+                        packet_size = video.payload.len(),
+                        "Received video RTP packet"
+                    ),
                 }
 
                 Ok(true)
@@ -619,6 +726,49 @@ impl Component for RootComponent {
                 error!(session_id = id.0, %error, "Session receive loop failed");
                 self.connection_status
                     .set_text(format!("Session {} failed: {error}", id.0))?;
+                Ok(true)
+            }
+            RootMessage::ScreenStreamFinished(id, screen_id, stream_id, result) => {
+                let Some(session) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.send.id() == id)
+                else {
+                    return Ok(false);
+                };
+                let is_current = session
+                    .screen_streams
+                    .get(&screen_id)
+                    .is_some_and(|stream| stream.id == stream_id);
+
+                if !is_current {
+                    return Ok(false);
+                }
+
+                session.screen_streams.remove(&screen_id);
+
+                match result {
+                    Ok(()) => info!(
+                        event = "screen_stream_finished",
+                        session_id = id.0,
+                        screen_id = screen_id.0,
+                        "Screen stream finished"
+                    ),
+                    Err(error) => {
+                        error!(
+                            event = "screen_stream_failed",
+                            session_id = id.0,
+                            screen_id = screen_id.0,
+                            %error,
+                            "Screen stream failed"
+                        );
+                        self.connection_status.set_text(format!(
+                            "Session {} screen {} failed: {error}",
+                            id.0, screen_id.0
+                        ))?;
+                    }
+                }
+
                 Ok(true)
             }
             RootMessage::RemoteScreenSelectionChanged => {
