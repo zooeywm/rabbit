@@ -7,15 +7,45 @@ set -eu
 run_seconds=${1:-5}
 case "$run_seconds" in
     ''|*[!0-9]*)
-        printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds]' >&2
+        printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds] [WIDTHxHEIGHT]' >&2
         exit 2
         ;;
 esac
 if [ "$run_seconds" -eq 0 ]; then
-    printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds]' >&2
+    printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds] [WIDTHxHEIGHT]' >&2
     exit 2
 fi
 export RABBIT_HOST_VIDEO_TEST_SECONDS=$run_seconds
+
+if [ "$#" -gt 2 ]; then
+    printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds] [WIDTHxHEIGHT]' >&2
+    exit 2
+fi
+
+target_resolution=${2:-}
+if [ -n "$target_resolution" ]; then
+    width=${target_resolution%%x*}
+    height=${target_resolution#*x}
+    case "$width" in
+        ''|*[!0-9]*)
+            printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds] [WIDTHxHEIGHT]' >&2
+            exit 2
+            ;;
+    esac
+    case "$height" in
+        ''|*[!0-9]*)
+            printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds] [WIDTHxHEIGHT]' >&2
+            exit 2
+            ;;
+    esac
+    if [ "$width" -eq 0 ] || [ "$height" -eq 0 ] || [ "$target_resolution" != "${width}x${height}" ]; then
+        printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds] [WIDTHxHEIGHT]' >&2
+        exit 2
+    fi
+    export RABBIT_HOST_VIDEO_TEST_RESOLUTION=$target_resolution
+else
+    unset RABBIT_HOST_VIDEO_TEST_RESOLUTION
+fi
 
 tmp=$(mktemp)
 test_binary=

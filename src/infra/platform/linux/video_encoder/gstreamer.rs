@@ -1347,6 +1347,12 @@ mod tests {
         let test_timeout = run_duration
             .checked_add(SHUTDOWN_TIMEOUT)
             .expect("Host video test timeout should fit Duration");
+        let source_size = host_video_test_source_size(&screen_name);
+        let target_size = host_video_test_target_size(source_size);
+        eprintln!(
+            "Host video test source: {}x{}, target: {}x{}",
+            source_size.width, source_size.height, target_size.width, target_size.height
+        );
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
         let metrics = Rc::new(RefCell::new(HostVideoMetrics::new()));
         let metrics_for_callback = Rc::clone(&metrics);
@@ -1355,16 +1361,13 @@ mod tests {
             let mut deps = HostVideoTestDeps {
                 capture: KmsScreenCaptureManagerState::new(),
                 pipeline: GbmFramePipelineManagerState::new(),
-                screens: vec![host_video_test_screen(screen_name)],
+                screens: vec![host_video_test_screen(screen_name, source_size)],
             };
             let frames = GbmFramePipelineManager::inj_ref_mut(&mut deps)
                 .subscribe(
                     &ScreenId(0),
                     FramePipelineParameters {
-                        frame_size: PixelSize {
-                            width: 1280,
-                            height: 720,
-                        },
+                        frame_size: target_size,
                     },
                 )
                 .expect("Host video frame pipeline should start");
@@ -2038,20 +2041,54 @@ mod tests {
         duration_ms(total) / count as f64
     }
 
-    fn host_video_test_screen(name: String) -> Screen {
+    fn host_video_test_source_size(screen_name: &str) -> PixelSize {
+        let ScreenCaptureSource { lease, receiver } =
+            KmsCaptureLease::new(screen_name.to_owned()).expect("KMS capture source should start");
+        let (device, frames) = receiver.into_parts();
+        device
+            .recv()
+            .expect("KMS capture worker should report its GPU")
+            .expect("KMS capture GPU discovery should succeed");
+        let frame = frames
+            .recv()
+            .expect("KMS capture worker should remain connected")
+            .expect("KMS capture worker should publish one frame");
+        let size = frame.buffer.size;
+        drop(lease);
+
+        size
+    }
+
+    fn host_video_test_target_size(source_size: PixelSize) -> PixelSize {
+        let Ok(resolution) = std::env::var("RABBIT_HOST_VIDEO_TEST_RESOLUTION") else {
+            return source_size;
+        };
+        let (width, height) = resolution
+            .split_once('x')
+            .expect("RABBIT_HOST_VIDEO_TEST_RESOLUTION should use WIDTHxHEIGHT");
+        let width = width
+            .parse::<u32>()
+            .expect("Host video target width should be a positive integer");
+        let height = height
+            .parse::<u32>()
+            .expect("Host video target height should be a positive integer");
+        assert!(width > 0, "Host video target width should be positive");
+        assert!(height > 0, "Host video target height should be positive");
+
+        PixelSize { width, height }
+    }
+
+    fn host_video_test_screen(name: String, resolution: PixelSize) -> Screen {
         Screen {
             id: ScreenId(0),
             name,
-            resolution: PixelSize {
-                width: 1280,
-                height: 720,
-            },
+            resolution,
             layout: ScreenLayout {
                 rect: ScreenRect {
                     x: 0,
                     y: 0,
-                    width: 1280,
-                    height: 720,
+                    width: resolution.width,
+                    height: resolution.height,
                 },
                 scale: 1.0,
                 transform: ScreenTransform::Normal,
