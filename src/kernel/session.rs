@@ -2,8 +2,8 @@ use eros::Context as _;
 
 use crate::kernel::{
     screen_configuration::{ScreenStreamsConfigured, SetScreenStreams},
-    screen_manager::{Screen, ScreenId},
-    session_control::ControlMessage,
+    screen_manager::ScreenId,
+    session_control::{ControlMessage, OutgoingScreenList},
     transport::{
         Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
     },
@@ -127,9 +127,9 @@ where
             .with_context(|| format!("Failed to send video packet for screen {}", screen_id.0))?)
     }
 
-    pub async fn send_screen_list(&self, screens: &[Screen]) -> eros::Result<()> {
+    pub async fn send_screen_list(&self, screens: OutgoingScreenList) -> eros::Result<()> {
         require_role(self.role, SessionRole::Host, "send a screen list")?;
-        self.send_control(screens).await
+        self.send.send(screens.into()).await
     }
 
     pub async fn send_screen_streams_request(&self, request: SetScreenStreams) -> eros::Result<()> {
@@ -232,8 +232,10 @@ mod tests {
     use std::{cell::RefCell, future::ready};
 
     use crate::kernel::{
-        screen_manager::ScreenId,
+        geometry::PixelSize,
+        screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
         session::{SessionId, SessionRole, SessionSend, VideoMessage},
+        session_control::{ControlMessage, OutgoingScreenList},
         transport::{Delivery, TransportChannel, TransportMessage, TransportSend},
     };
     use bytes::Bytes;
@@ -281,5 +283,57 @@ mod tests {
                 payload: Bytes::from_static(b"standard RTP packet"),
             }]
         );
+    }
+
+    #[test]
+    fn host_sends_an_owned_screen_list() {
+        let session = SessionSend {
+            id: SessionId(8),
+            role: SessionRole::Host,
+            send: TestTransportSend {
+                messages: RefCell::new(Vec::new()),
+            },
+        };
+        let screens = [Screen {
+            id: ScreenId(2),
+            name: "eDP-1".to_owned(),
+            resolution: PixelSize {
+                width: 2560,
+                height: 1600,
+            },
+            layout: ScreenLayout {
+                rect: ScreenRect {
+                    x: 0,
+                    y: 0,
+                    width: 1280,
+                    height: 800,
+                },
+                scale: 2.0,
+                transform: ScreenTransform::Normal,
+            },
+        }];
+        let screen_list = OutgoingScreenList::try_from(screens.as_slice())
+            .expect("Screen list should encode before it is sent");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime
+            .block_on(session.send_screen_list(screen_list))
+            .expect("Host should send the encoded screen list");
+
+        let message = session
+            .send
+            .messages
+            .into_inner()
+            .pop()
+            .expect("Transport should receive the screen list");
+        let ControlMessage::ScreenList(screens) =
+            ControlMessage::try_from(message).expect("Screen list should decode")
+        else {
+            panic!("Decoded control message should be a screen list");
+        };
+
+        assert_eq!(screens.len(), 1);
+        assert_eq!(screens[0].id, ScreenId(2));
+        assert_eq!(screens[0].name, "eDP-1");
     }
 }

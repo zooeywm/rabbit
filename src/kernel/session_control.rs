@@ -20,6 +20,9 @@ pub struct ScreenInfo {
     pub layout: ScreenLayout,
 }
 
+#[derive(Debug)]
+pub struct OutgoingScreenList(TransportMessage);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlMessage {
     ScreenList(Vec<ScreenInfo>),
@@ -434,7 +437,7 @@ impl From<ScreenStreamsConfigured> for WireScreenStreamsConfigured {
     }
 }
 
-impl TryFrom<&[Screen]> for TransportMessage {
+impl TryFrom<&[Screen]> for OutgoingScreenList {
     type Error = eros::ErrorUnion;
 
     fn try_from(screens: &[Screen]) -> eros::Result<Self> {
@@ -450,7 +453,13 @@ impl TryFrom<&[Screen]> for TransportMessage {
             write_screen_info(&mut writer, screen)?;
         }
 
-        Ok(finish_control_message(writer))
+        Ok(Self(finish_control_message(writer)))
+    }
+}
+
+impl From<OutgoingScreenList> for TransportMessage {
+    fn from(screen_list: OutgoingScreenList) -> Self {
+        screen_list.0
     }
 }
 

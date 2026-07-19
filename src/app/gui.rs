@@ -14,8 +14,8 @@ use crate::{
     app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
     infra::{
         GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
-        PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportSend,
-        connect_transport, create_frame_pipeline_manager_state,
+        PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportRecv,
+        QuicTransportSend, connect_transport, create_frame_pipeline_manager_state,
         create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
         unsync_queue::UnsyncQueue,
     },
@@ -29,7 +29,7 @@ use crate::{
         },
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole, SessionSend},
-        session_control::{ControlMessage, ScreenInfo},
+        session_control::{ControlMessage, OutgoingScreenList, ScreenInfo},
         transport::TransportRecv,
     },
 };
@@ -40,6 +40,11 @@ struct RunningSession {
     send: Rc<SessionSend<QuicTransportSend>>,
     screen_streams: HashMap<ScreenId, RunningScreenStream>,
     _receiver: compio::runtime::JoinHandle<()>,
+}
+
+pub(crate) struct PendingHostSession {
+    send: SessionSend<QuicTransportSend>,
+    recv: SessionRecv<QuicTransportRecv>,
 }
 
 struct RunningScreenStream {
@@ -90,6 +95,10 @@ pub(crate) enum RootMessage {
     AcceptSelectedConnection(Option<usize>),
     RejectSelectedConnection(Option<usize>),
     ConnectionAccepted(eros::Result<QuicTransport>),
+    InitialScreenListFinished {
+        session: PendingHostSession,
+        result: eros::Result<()>,
+    },
     ConnectionRejected(eros::Result<()>),
     ConnectionRequestFailed(eros::ErrorUnion),
     ConnectionListenerFailed(eros::ErrorUnion),
@@ -592,16 +601,29 @@ impl Component for RootComponent {
                         let id = self.next_session_id()?;
                         let session = Session::new(id, SessionRole::Host, transport);
                         let (send, recv) = session.split();
+                        let screen_list = OutgoingScreenList::try_from(self._app.screens())?;
+                        let session = PendingHostSession { send, recv };
+                        let screen_list_sender = sender.clone();
 
-                        match send.send_screen_list(self._app.screens()).await {
-                            Ok(()) => self.start_session(send, recv, sender),
-                            Err(error) => {
-                                error!(error = ?error, "Failed to send the initial screen list")
-                            }
-                        }
+                        compio::runtime::spawn(async move {
+                            let result = session.send.send_screen_list(screen_list).await;
+                            screen_list_sender
+                                .post(RootMessage::InitialScreenListFinished { session, result });
+                        })
+                        .detach();
                     }
                     Err(error) => {
                         error!(error = ?error, "Failed to accept a QUIC connection request")
+                    }
+                }
+
+                Ok(false)
+            }
+            RootMessage::InitialScreenListFinished { session, result } => {
+                match result {
+                    Ok(()) => self.start_session(session.send, session.recv, sender),
+                    Err(error) => {
+                        error!(error = ?error, "Failed to send the initial screen list")
                     }
                 }
 

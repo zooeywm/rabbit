@@ -1,3 +1,3 @@
 mod quic;
 
-pub(crate) use quic::{QuicTransport, QuicTransportSend};
+pub(crate) use quic::{QuicTransport, QuicTransportRecv, QuicTransportSend};
