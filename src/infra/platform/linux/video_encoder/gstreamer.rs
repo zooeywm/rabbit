@@ -181,7 +181,8 @@ fn nv12_dmabuf_caps(frame: &DmaBufFrame, modifier: DrmModifier) -> eros::Result<
 
 #[derive(Debug)]
 pub(crate) struct GStreamerRtpPacket {
-    buffer: gstreamer::Buffer,
+    payload: bytes::Bytes,
+    marker: bool,
 }
 
 impl TryFrom<gstreamer::Sample> for GStreamerRtpPacket {
@@ -199,8 +200,35 @@ impl TryFrom<gstreamer::Sample> for GStreamerRtpPacket {
         let Some(buffer) = sample.buffer_owned() else {
             eros::bail!("GStreamer H.264 RTP sample is missing its buffer");
         };
+        let Ok(buffer) = buffer.into_mapped_buffer_readable() else {
+            eros::bail!("Failed to map GStreamer H.264 RTP packet for reading");
+        };
+        let payload = bytes::Bytes::from_owner(buffer);
 
-        Ok(Self { buffer })
+        if payload.len() < 12 {
+            eros::bail!("GStreamer H.264 RTP packet is shorter than its 12-byte fixed header");
+        }
+        if payload[0] >> 6 != 2 {
+            eros::bail!(
+                "GStreamer H.264 RTP packet has unsupported RTP version {}",
+                payload[0] >> 6
+            );
+        }
+        let marker = payload[1] & 0x80 != 0;
+
+        Ok(Self { payload, marker })
+    }
+}
+
+impl GStreamerRtpPacket {
+    pub(crate) fn is_frame_end(&self) -> bool {
+        self.marker
+    }
+}
+
+impl From<GStreamerRtpPacket> for bytes::Bytes {
+    fn from(packet: GStreamerRtpPacket) -> Self {
+        packet.payload
     }
 }
 
@@ -799,7 +827,7 @@ mod tests {
     #[ignore = "run through scripts/test-gstreamer"]
     fn accepts_h264_rtp_packet_samples() {
         gstreamer::init().expect("GStreamer should initialize before constructing a packet");
-        let buffer = gstreamer::Buffer::from_slice([1_u8, 2, 3, 4]);
+        let buffer = gstreamer::Buffer::from_slice([0x80_u8, 0xe0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3]);
         let sample = gstreamer::Sample::builder()
             .buffer(&buffer)
             .caps(&h264_rtp_caps())
@@ -808,7 +836,8 @@ mod tests {
         let packet = GStreamerRtpPacket::try_from(sample)
             .expect("An H.264 RTP sample should satisfy the encoded packet boundary");
 
-        assert_eq!(packet.buffer.size(), 4);
+        assert_eq!(packet.payload.len(), 12);
+        assert!(packet.is_frame_end());
     }
 
     #[test]
