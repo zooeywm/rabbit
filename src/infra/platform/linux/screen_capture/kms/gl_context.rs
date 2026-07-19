@@ -93,6 +93,17 @@ pub(crate) struct GlExternalTexture<'context> {
 
 #[derive(Debug)]
 pub(crate) struct GlCompositionTarget<'context> {
+    target: GlImageTarget<'context>,
+}
+
+#[derive(Debug)]
+pub(crate) struct GlNv12Target<'context> {
+    luma: GlImageTarget<'context>,
+    chroma: GlImageTarget<'context>,
+}
+
+#[derive(Debug)]
+struct GlImageTarget<'context> {
     owner: &'context GlContext,
     texture: glow::Texture,
     framebuffer: glow::Framebuffer,
@@ -212,11 +223,36 @@ impl GlContext {
         image: egl::Image,
         size: PixelSize,
     ) -> eros::Result<GlCompositionTarget<'_>> {
+        Ok(GlCompositionTarget {
+            target: self.create_image_target(image, size, "KMS composition")?,
+        })
+    }
+
+    pub(crate) fn create_nv12_target(
+        &self,
+        luma_image: egl::Image,
+        luma_size: PixelSize,
+        chroma_image: egl::Image,
+        chroma_size: PixelSize,
+    ) -> eros::Result<GlNv12Target<'_>> {
+        let luma = self.create_image_target(luma_image, luma_size, "NV12 luma")?;
+        let chroma = self.create_image_target(chroma_image, chroma_size, "NV12 chroma")?;
+
+        Ok(GlNv12Target { luma, chroma })
+    }
+
+    fn create_image_target(
+        &self,
+        image: egl::Image,
+        size: PixelSize,
+        description: &str,
+    ) -> eros::Result<GlImageTarget<'_>> {
         let texture = match unsafe { self.api.create_texture() } {
             Ok(texture) => texture,
             Err(error) => {
                 eros::bail!(
-                    "Failed to create an OpenGL ES composition texture: {}",
+                    "Failed to create an OpenGL ES {} texture: {}",
+                    description,
                     error
                 )
             }
@@ -232,7 +268,8 @@ impl GlContext {
         if error != glow::NO_ERROR {
             unsafe { self.api.delete_texture(texture) };
             eros::bail!(
-                "Failed to bind EGLImage to a composition texture: GL error 0x{:04X}",
+                "Failed to bind EGLImage to the {} texture: GL error 0x{:04X}",
+                description,
                 error
             );
         }
@@ -241,7 +278,11 @@ impl GlContext {
             Ok(framebuffer) => framebuffer,
             Err(error) => {
                 unsafe { self.api.delete_texture(texture) };
-                eros::bail!("Failed to create an OpenGL ES framebuffer: {}", error);
+                eros::bail!(
+                    "Failed to create the OpenGL ES {} framebuffer: {}",
+                    description,
+                    error
+                );
             }
         };
 
@@ -265,12 +306,13 @@ impl GlContext {
                 self.api.delete_texture(texture);
             }
             eros::bail!(
-                "EGLImage composition framebuffer is incomplete: GL status 0x{:04X}",
+                "EGLImage {} framebuffer is incomplete: GL status 0x{:04X}",
+                description,
                 status
             );
         }
 
-        Ok(GlCompositionTarget {
+        Ok(GlImageTarget {
             owner: self,
             texture,
             framebuffer,
@@ -282,14 +324,14 @@ impl GlContext {
         &self,
         target: &GlCompositionTarget<'_>,
     ) -> eros::Result<()> {
-        if !ptr::eq(self, target.owner) {
+        if !ptr::eq(self, target.target.owner) {
             eros::bail!("Cannot clear a composition target created by another OpenGL context");
         }
 
         let (width, height) = composition_target_size(target)?;
         unsafe {
             self.api
-                .bind_framebuffer(glow::FRAMEBUFFER, Some(target.framebuffer));
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(target.target.framebuffer));
             self.api.viewport(0, 0, width, height);
             self.api.clear_color(0.0, 0.0, 0.0, 1.0);
             self.api.clear(glow::COLOR_BUFFER_BIT);
@@ -314,7 +356,7 @@ impl GlContext {
         transform: &KmsCompositionTransform,
         blend: KmsPlaneBlend,
     ) -> eros::Result<()> {
-        if !ptr::eq(self, target.owner) {
+        if !ptr::eq(self, target.target.owner) {
             eros::bail!("Cannot compose into a target created by another OpenGL context");
         }
         if !ptr::eq(self, texture.owner) {
@@ -325,7 +367,7 @@ impl GlContext {
         let program = &self.composition_program;
         unsafe {
             self.api
-                .bind_framebuffer(glow::FRAMEBUFFER, Some(target.framebuffer));
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(target.target.framebuffer));
             self.api.viewport(0, 0, width, height);
             self.api.use_program(Some(program.program));
             self.api.active_texture(glow::TEXTURE0);
@@ -385,7 +427,7 @@ impl Drop for GlExternalTexture<'_> {
     }
 }
 
-impl Drop for GlCompositionTarget<'_> {
+impl Drop for GlImageTarget<'_> {
     fn drop(&mut self) {
         unsafe {
             self.owner.api.delete_framebuffer(self.framebuffer);
@@ -486,9 +528,9 @@ fn uniform(
 }
 
 fn composition_target_size(target: &GlCompositionTarget<'_>) -> eros::Result<(i32, i32)> {
-    let width = i32::try_from(target.size.width)
+    let width = i32::try_from(target.target.size.width)
         .with_context(|| "KMS composition target width exceeds OpenGL limits")?;
-    let height = i32::try_from(target.size.height)
+    let height = i32::try_from(target.target.size.height)
         .with_context(|| "KMS composition target height exceeds OpenGL limits")?;
     Ok((width, height))
 }

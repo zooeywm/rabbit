@@ -98,10 +98,14 @@ mod tests {
             .egl()
             .wait_on_native_fence(fence)
             .expect("Pipeline GPU context should enqueue the source readiness wait");
-        let _image = context
+        let image = context
             .egl()
             .import_dma_buf_frame(&frame.buffer)
             .expect("Pipeline GPU context should import the composed KMS frame");
+        let _texture = context
+            .egl()
+            .create_dma_buf_texture(&image)
+            .expect("Pipeline GPU context should bind the composed KMS frame as a texture");
 
         drop(lease);
     }

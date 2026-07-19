@@ -194,5 +194,14 @@ mod tests {
         assert_eq!(frame.planes.len(), 2);
         assert_eq!(frame.objects.len(), frame.planes.len());
         assert!(frame.planes.iter().all(|plane| plane.stride > 0));
+
+        let image = context
+            .egl()
+            .import_nv12_target(&frame)
+            .expect("NV12 output planes should import into EGL");
+        let _target = context
+            .egl()
+            .create_nv12_target(&image)
+            .expect("NV12 output planes should bind as OpenGL targets");
     }
 }

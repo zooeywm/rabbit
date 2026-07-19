@@ -437,11 +437,15 @@ fn route_screen_frame(
 
 fn process_pipeline_frame(
     context: &GpuContext,
-    _source: &EglDmaBufImage<'_>,
+    source: &EglDmaBufImage<'_>,
     parameters: &FramePipelineParameters,
     _frame: &KmsCapturedFrame,
 ) -> eros::Result<GbmFramePipelineFrame> {
     validate_nv12_size(parameters.frame_size)?;
+    let _source_texture = context
+        .egl()
+        .create_dma_buf_texture(source)
+        .with_context(|| "Failed to bind the frame-pipeline source texture")?;
     let buffer = context
         .allocate_dma_buf(
             parameters.frame_size,
@@ -454,6 +458,14 @@ fn process_pipeline_frame(
                 parameters.frame_size.width, parameters.frame_size.height
             )
         })?;
+    let target_image = context
+        .egl()
+        .import_nv12_target(&buffer)
+        .with_context(|| "Failed to import the frame-pipeline NV12 output planes")?;
+    let _target = context
+        .egl()
+        .create_nv12_target(&target_image)
+        .with_context(|| "Failed to bind the frame-pipeline NV12 output targets")?;
 
     Ok(GbmFramePipelineFrame { buffer })
 }

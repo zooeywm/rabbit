@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use drm::buffer::DrmModifier;
+use drm::buffer::{DrmFourcc, DrmModifier};
 use eros::Context as _;
 use gbm::{AsRaw as _, Device};
 use khronos_egl as egl;
@@ -23,7 +23,7 @@ use crate::infra::platform::{
             SAMPLE_RANGE_HINT_EXT, SYNC_NATIVE_FENCE_ANDROID, SYNC_NATIVE_FENCE_FD_ANDROID,
             YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
         },
-        gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
+        gl_context::{GlCompositionTarget, GlContext, GlExternalTexture, GlNv12Target},
         types::{
             KmsColorEncoding, KmsColorRange, KmsFramebufferPlane, KmsPlaneBlend,
             KmsPlaneCaptureError, KmsPlaneColor,
@@ -56,6 +56,12 @@ pub(crate) struct EglCompositionImage<'context>(EglImage<'context>);
 
 #[derive(Debug)]
 pub(crate) struct EglDmaBufImage<'context>(EglImage<'context>);
+
+#[derive(Debug)]
+pub(crate) struct EglNv12Image<'context> {
+    luma: EglImage<'context>,
+    chroma: EglImage<'context>,
+}
 
 impl std::fmt::Debug for EglContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -137,6 +143,34 @@ impl EglContext {
             self.import_dma_buf(frame, None)
                 .with_context(|| "Failed to import DMA-BUF frame into EGL")?,
         ))
+    }
+
+    pub(crate) fn import_nv12_target<'context>(
+        &'context self,
+        frame: &DmaBufFrame,
+    ) -> eros::Result<EglNv12Image<'context>> {
+        if frame.format != DrmFourcc::Nv12 {
+            eros::bail!("Cannot create an NV12 target from {:?}", frame.format);
+        }
+        if frame.planes.len() != 2 {
+            eros::bail!(
+                "NV12 target must contain exactly two planes, got {}",
+                frame.planes.len()
+            );
+        }
+
+        let chroma_size = crate::kernel::geometry::PixelSize {
+            width: frame.size.width / 2,
+            height: frame.size.height / 2,
+        };
+        let luma = self
+            .import_dma_buf_plane(frame, 0, frame.size, DrmFourcc::R8)
+            .with_context(|| "Failed to import the NV12 luma plane")?;
+        let chroma = self
+            .import_dma_buf_plane(frame, 1, chroma_size, DrmFourcc::Gr88)
+            .with_context(|| "Failed to import the NV12 chroma plane")?;
+
+        Ok(EglNv12Image { luma, chroma })
     }
 
     pub(crate) fn wait_on_native_fence(&self, fence: OwnedFd) -> eros::Result<()> {
@@ -237,10 +271,76 @@ impl EglContext {
             }
         }
 
+        self.create_dma_buf_image(
+            frame.size,
+            frame.format,
+            frame.planes[0].modifier,
+            attributes,
+        )
+    }
+
+    fn import_dma_buf_plane<'context>(
+        &'context self,
+        frame: &DmaBufFrame,
+        plane_index: usize,
+        size: crate::kernel::geometry::PixelSize,
+        format: DrmFourcc,
+    ) -> Result<EglImage<'context>, KmsPlaneCaptureError> {
+        let plane = frame
+            .planes
+            .get(plane_index)
+            .ok_or(KmsPlaneCaptureError::MissingDmaBufPlanes)?;
+        let object = frame.objects.get(plane.object_index).ok_or(
+            KmsPlaneCaptureError::MissingDmaBufObject {
+                plane_index,
+                object_index: plane.object_index,
+            },
+        )?;
+        let mut attributes = vec![
+            egl::WIDTH as egl::Attrib,
+            size.width as egl::Attrib,
+            egl::HEIGHT as egl::Attrib,
+            size.height as egl::Attrib,
+            LINUX_DRM_FOURCC_EXT,
+            format as u32 as egl::Attrib,
+            DMA_BUF_PLANE_FD_EXT[0],
+            object.fd.as_raw_fd() as egl::Attrib,
+            DMA_BUF_PLANE_OFFSET_EXT[0],
+            plane.offset as egl::Attrib,
+            DMA_BUF_PLANE_PITCH_EXT[0],
+            plane.stride as egl::Attrib,
+        ];
+
+        if plane.modifier != DrmModifier::Invalid {
+            if !self.supports_modifiers {
+                return Err(KmsPlaneCaptureError::UnsupportedFormat {
+                    format,
+                    modifier: plane.modifier,
+                });
+            }
+
+            let modifier: u64 = plane.modifier.into();
+            attributes.extend_from_slice(&[
+                DMA_BUF_PLANE_MODIFIER_LO_EXT[0],
+                (modifier as u32) as egl::Attrib,
+                DMA_BUF_PLANE_MODIFIER_HI_EXT[0],
+                ((modifier >> 32) as u32) as egl::Attrib,
+            ]);
+        }
+
+        self.create_dma_buf_image(size, format, plane.modifier, attributes)
+    }
+
+    fn create_dma_buf_image<'context>(
+        &'context self,
+        size: crate::kernel::geometry::PixelSize,
+        format: DrmFourcc,
+        modifier: DrmModifier,
+        mut attributes: Vec<egl::Attrib>,
+    ) -> Result<EglImage<'context>, KmsPlaneCaptureError> {
         attributes.push(egl::ATTRIB_NONE);
         let no_context = unsafe { egl::Context::from_ptr(ptr::null_mut()) };
         let no_buffer = unsafe { egl::ClientBuffer::from_ptr(ptr::null_mut()) };
-        let modifier = frame.planes[0].modifier;
         let image = self
             .instance
             .create_image(
@@ -251,7 +351,7 @@ impl EglContext {
                 &attributes,
             )
             .map_err(|source| KmsPlaneCaptureError::ImportDmaBuf {
-                format: frame.format,
+                format,
                 modifier,
                 source,
             })?;
@@ -259,7 +359,7 @@ impl EglContext {
         Ok(EglImage {
             owner: self,
             image,
-            size: frame.size,
+            size,
         })
     }
 
@@ -272,6 +372,33 @@ impl EglContext {
         }
 
         self.gl.create_external_texture(image.0.image)
+    }
+
+    pub(crate) fn create_dma_buf_texture<'context>(
+        &'context self,
+        image: &EglDmaBufImage<'_>,
+    ) -> eros::Result<GlExternalTexture<'context>> {
+        if !ptr::eq(self, image.0.owner) {
+            eros::bail!("Cannot bind a DMA-BUF EGLImage created by another EGL context");
+        }
+
+        self.gl.create_external_texture(image.0.image)
+    }
+
+    pub(crate) fn create_nv12_target<'context>(
+        &'context self,
+        image: &EglNv12Image<'_>,
+    ) -> eros::Result<GlNv12Target<'context>> {
+        if !ptr::eq(self, image.luma.owner) || !ptr::eq(self, image.chroma.owner) {
+            eros::bail!("Cannot use NV12 EGLImages created by another EGL context");
+        }
+
+        self.gl.create_nv12_target(
+            image.luma.image,
+            image.luma.size,
+            image.chroma.image,
+            image.chroma.size,
+        )
     }
 
     pub(crate) fn create_composition_target<'context>(
