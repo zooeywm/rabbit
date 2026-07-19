@@ -1,42 +1,182 @@
-use std::{future::poll_fn, pin::Pin};
+use std::{future::poll_fn, pin::Pin, rc::Rc};
 
+use drm::buffer::{DrmFourcc, DrmModifier};
 use eros::Context as _;
 use futures_core::Stream as _;
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{Cast as _, ElementExt as _, GstBinExtManual as _, GstObjectExt as _};
+use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
+
+use crate::infra::platform::{dma_buf::DmaBufFrame, frame_pipeline::GbmFramePipelineFrame};
 
 #[derive(Debug)]
 pub(crate) struct GStreamerVideoFrame {
     buffer: gstreamer::Buffer,
+    input_caps: gstreamer::Caps,
 }
 
-impl TryFrom<gstreamer::Buffer> for GStreamerVideoFrame {
+impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
     type Error = eros::ErrorUnion;
 
-    fn try_from(buffer: gstreamer::Buffer) -> Result<Self, Self::Error> {
-        if buffer.n_memory() == 0 {
-            eros::bail!("GStreamer video frame does not contain DMA-BUF memory");
+    fn try_from(source: Rc<GbmFramePipelineFrame>) -> Result<Self, Self::Error> {
+        gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
+        let frame = &source.buffer;
+
+        if frame.readiness_fence.is_some() {
+            eros::bail!("GStreamer input frame still has an unresolved readiness fence");
         }
-
-        for (index, memory) in buffer.iter_memories().enumerate() {
-            if !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>() {
-                eros::bail!("GStreamer video frame memory {} is not DMA-BUF", index);
-            }
-        }
-
-        let Some(video) = buffer.meta::<gstreamer_video::VideoMeta>() else {
-            eros::bail!("GStreamer DMA-BUF video frame is missing VideoMeta");
-        };
-
-        if video.format() != gstreamer_video::VideoFormat::DmaDrm {
+        if frame.format != DrmFourcc::Nv12 {
             eros::bail!(
-                "GStreamer DMA-BUF video frame has non-DRM format {}",
-                video.format()
+                "GStreamer input frame must use NV12, got {:?}",
+                frame.format
+            );
+        }
+        if frame.planes.len() != 2 {
+            eros::bail!(
+                "GStreamer NV12 input frame must contain 2 planes, got {}",
+                frame.planes.len()
+            );
+        }
+        if frame.objects.is_empty() {
+            eros::bail!("GStreamer NV12 input frame does not contain DMA-BUF objects");
+        }
+
+        let modifier = frame.planes[0].modifier;
+        if frame.planes.iter().any(|plane| plane.modifier != modifier) {
+            eros::bail!("GStreamer NV12 input frame planes use different DRM modifiers");
+        }
+
+        let mut object_offsets = Vec::with_capacity(frame.objects.len());
+        let mut buffer_size = 0_usize;
+        for object in &frame.objects {
+            object_offsets.push(buffer_size);
+            buffer_size = buffer_size
+                .checked_add(object.size)
+                .with_context(|| "GStreamer DMA-BUF object sizes exceed usize")?;
+        }
+
+        let mut offsets = Vec::with_capacity(frame.planes.len());
+        let mut strides = Vec::with_capacity(frame.planes.len());
+        for (plane_index, plane) in frame.planes.iter().enumerate() {
+            let Some(object) = frame.objects.get(plane.object_index) else {
+                eros::bail!(
+                    "GStreamer NV12 plane {} references missing DMA-BUF object {}",
+                    plane_index,
+                    plane.object_index
+                );
+            };
+            let plane_offset = usize::try_from(plane.offset)
+                .with_context(|| "GStreamer NV12 plane offset exceeds usize")?;
+            if plane_offset >= object.size {
+                eros::bail!(
+                    "GStreamer NV12 plane {} offset {} exceeds DMA-BUF object {} size {}",
+                    plane_index,
+                    plane.offset,
+                    plane.object_index,
+                    object.size
+                );
+            }
+            offsets.push(
+                object_offsets[plane.object_index]
+                    .checked_add(plane_offset)
+                    .with_context(|| "GStreamer NV12 plane offset exceeds usize")?,
+            );
+            strides.push(
+                i32::try_from(plane.stride)
+                    .with_context(|| "GStreamer NV12 plane stride exceeds i32")?,
             );
         }
 
-        Ok(Self { buffer })
+        let input_caps = nv12_dmabuf_caps(frame, modifier)?;
+        let allocator = gstreamer_allocators::DmaBufAllocator::new();
+        let mut buffer = gstreamer::Buffer::new();
+        let Some(buffer_mut) = buffer.get_mut() else {
+            eros::bail!("New GStreamer DMA-BUF input buffer is unexpectedly shared");
+        };
+        for (object_index, object) in frame.objects.iter().enumerate() {
+            let fd = object.fd.try_clone().with_context(|| {
+                format!(
+                    "Failed to duplicate DMA-BUF object {} for GStreamer",
+                    object_index
+                )
+            })?;
+            let memory = unsafe { allocator.alloc_dmabuf(fd, object.size) }.with_context(|| {
+                format!(
+                    "Failed to wrap DMA-BUF object {} as GStreamer memory",
+                    object_index
+                )
+            })?;
+            buffer_mut.append_memory(memory);
+        }
+        gstreamer_video::VideoMeta::add_full(
+            buffer_mut,
+            gstreamer_video::VideoFrameFlags::empty(),
+            gstreamer_video::VideoFormat::DmaDrm,
+            frame.size.width,
+            frame.size.height,
+            &offsets,
+            &strides,
+        )
+        .with_context(|| "Failed to attach NV12 DMA-BUF layout to GStreamer input frame")?;
+
+        validate_dmabuf_buffer(&buffer)?;
+
+        Ok(Self { buffer, input_caps })
     }
+}
+
+impl GStreamerVideoFrame {
+    pub(crate) fn input_caps(&self) -> &gstreamer::CapsRef {
+        &self.input_caps
+    }
+}
+
+fn validate_dmabuf_buffer(buffer: &gstreamer::BufferRef) -> eros::Result<()> {
+    if buffer.n_memory() == 0 {
+        eros::bail!("GStreamer video frame does not contain DMA-BUF memory");
+    }
+
+    for (index, memory) in buffer.iter_memories().enumerate() {
+        if !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>() {
+            eros::bail!("GStreamer video frame memory {} is not DMA-BUF", index);
+        }
+    }
+
+    let Some(video) = buffer.meta::<gstreamer_video::VideoMeta>() else {
+        eros::bail!("GStreamer DMA-BUF video frame is missing VideoMeta");
+    };
+
+    if video.format() != gstreamer_video::VideoFormat::DmaDrm {
+        eros::bail!(
+            "GStreamer DMA-BUF video frame has non-DRM format {}",
+            video.format()
+        );
+    }
+
+    Ok(())
+}
+
+fn nv12_dmabuf_caps(frame: &DmaBufFrame, modifier: DrmModifier) -> eros::Result<gstreamer::Caps> {
+    let width = i32::try_from(frame.size.width)
+        .with_context(|| "GStreamer NV12 frame width exceeds i32")?;
+    let height = i32::try_from(frame.size.height)
+        .with_context(|| "GStreamer NV12 frame height exceeds i32")?;
+    let drm_format = if modifier == DrmModifier::Invalid {
+        String::from("NV12")
+    } else {
+        gstreamer_video::dma_drm_fourcc_to_string(frame.format as u32, modifier.into()).to_string()
+    };
+
+    Ok(gstreamer::Caps::builder("video/x-raw")
+        .features(["memory:DMABuf"])
+        .field("format", "DMA_DRM")
+        .field("drm-format", drm_format)
+        .field("width", width)
+        .field("height", height)
+        .field("framerate", gstreamer::Fraction::new(0, 1))
+        .field("interlace-mode", "progressive")
+        .field("colorimetry", "bt709")
+        .build())
 }
 
 #[derive(Debug)]
@@ -343,15 +483,20 @@ fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
+    use std::{fs::File, os::fd::OwnedFd, rc::Rc};
 
+    use drm::buffer::{DrmFourcc, DrmModifier};
     use gstreamer::glib::prelude::ObjectExt as _;
     use gstreamer::prelude::{ElementExt as _, GstBinExt as _};
-    use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
-    use crate::infra::platform::{
-        GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
-        video_encoder::gstreamer::h264_rtp_caps,
+    use crate::{
+        infra::platform::{
+            GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
+            dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+            frame_pipeline::GbmFramePipelineFrame,
+            video_encoder::gstreamer::{h264_rtp_caps, validate_dmabuf_buffer},
+        },
+        kernel::geometry::PixelSize,
     };
 
     #[test]
@@ -579,19 +724,23 @@ mod tests {
     fn accepts_dmabuf_video_frames() {
         gstreamer::init().expect("GStreamer should initialize before constructing a frame");
 
-        let _frame = dmabuf_video_frame();
+        let frame = dmabuf_video_frame();
+
+        assert!(GStreamerVideoEncoder::is_nv12_dmabuf_input_caps(
+            frame.input_caps()
+        ));
     }
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
     fn submits_a_dmabuf_video_frame_to_appsrc() {
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
-        let input_caps = registered_nv12_dmabuf_input_caps();
-        let encoder = GStreamerVideoEncoder::new(&input_caps, 1_200)
+        let frame = dmabuf_video_frame();
+        let encoder = GStreamerVideoEncoder::new(frame.input_caps(), 1_200)
             .expect("The hardware H.264 pipeline should be created");
 
         encoder
-            .submit_frame(dmabuf_video_frame())
+            .submit_frame(frame)
             .expect("The appsrc should accept one DMA-BUF video frame");
 
         assert_eq!(encoder.source.current_level_buffers(), 1);
@@ -603,7 +752,7 @@ mod tests {
         gstreamer::init().expect("GStreamer should initialize before constructing a frame");
         let buffer = gstreamer::Buffer::from_slice([0_u8; 16]);
 
-        GStreamerVideoFrame::try_from(buffer)
+        validate_dmabuf_buffer(&buffer)
             .expect_err("The hardware encoder input should reject system memory");
     }
 
@@ -676,30 +825,38 @@ mod tests {
         const Y_SIZE: usize = WIDTH as usize * HEIGHT as usize;
         const BUFFER_SIZE: usize = Y_SIZE + Y_SIZE / 2;
 
-        let allocator = gstreamer_allocators::DmaBufAllocator::new();
         let file = File::open("/dev/zero").expect("The test DMA-BUF fd should open");
-        let memory = unsafe {
-            allocator
-                .alloc_dmabuf(file, BUFFER_SIZE)
-                .expect("The test fd should be wrapped as GStreamer DMA-BUF memory")
-        };
-        let mut buffer = gstreamer::Buffer::new();
-        let buffer = buffer
-            .get_mut()
-            .expect("A newly allocated GStreamer buffer should be writable");
-        buffer.append_memory(memory);
-        gstreamer_video::VideoMeta::add_full(
-            buffer,
-            gstreamer_video::VideoFrameFlags::empty(),
-            gstreamer_video::VideoFormat::DmaDrm,
-            WIDTH,
-            HEIGHT,
-            &[0, Y_SIZE],
-            &[WIDTH as i32, WIDTH as i32],
-        )
-        .expect("The test DMA-BUF should accept NV12 plane metadata");
+        let frame = Rc::new(GbmFramePipelineFrame {
+            buffer: DmaBufFrame {
+                size: PixelSize {
+                    width: WIDTH,
+                    height: HEIGHT,
+                },
+                format: DrmFourcc::Nv12,
+                objects: vec![DmaBufObject {
+                    fd: OwnedFd::from(file),
+                    size: BUFFER_SIZE,
+                }],
+                planes: vec![
+                    DmaBufPlane {
+                        object_index: 0,
+                        offset: 0,
+                        stride: WIDTH,
+                        modifier: DrmModifier::Invalid,
+                    },
+                    DmaBufPlane {
+                        object_index: 0,
+                        offset: u32::try_from(Y_SIZE)
+                            .expect("The test Y plane size should fit u32"),
+                        stride: WIDTH,
+                        modifier: DrmModifier::Invalid,
+                    },
+                ],
+                readiness_fence: None,
+            },
+        });
 
-        GStreamerVideoFrame::try_from(buffer.to_owned())
+        GStreamerVideoFrame::try_from(frame)
             .expect("The test buffer should satisfy the encoder input boundary")
     }
 }
