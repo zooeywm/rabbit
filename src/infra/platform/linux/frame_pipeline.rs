@@ -6,6 +6,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+use compio::runtime::fd::PollFd;
 use eros::Context as _;
 use futures_core::Stream as _;
 
@@ -241,6 +242,11 @@ impl FramePipelineSource {
                     return;
                 };
 
+                let frame = match frame {
+                    Ok(frame) => wait_until_ready(frame).await,
+                    Err(error) => Err(error),
+                };
+
                 match frame {
                     Ok(frame) => source.frames.borrow_mut().publish(frame),
                     Err(error) => {
@@ -279,6 +285,20 @@ impl FramePipelineSource {
             worker: Rc::downgrade(worker),
         }
     }
+}
+
+async fn wait_until_ready(mut frame: GbmFramePipelineFrame) -> eros::Result<GbmFramePipelineFrame> {
+    let Some(fence) = frame.buffer.readiness_fence.take() else {
+        return Ok(frame);
+    };
+    let fence =
+        PollFd::new(fence).with_context(|| "Failed to register frame-pipeline readiness fence")?;
+    fence
+        .read_ready()
+        .await
+        .with_context(|| "Failed to wait for frame-pipeline readiness fence")?;
+
+    Ok(frame)
 }
 
 impl GbmFramePipelineManagerState {
