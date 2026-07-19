@@ -13,6 +13,8 @@ pub(crate) struct HostVideoFrameProbe {
     pub(crate) encoder_submitted: Option<Instant>,
     pub(crate) vpp_entered: Option<Instant>,
     pub(crate) vpp_completed: Option<Instant>,
+    pub(crate) encoder_entered: Option<Instant>,
+    pub(crate) encoder_completed: Option<Instant>,
 }
 
 impl HostVideoFrameProbe {
@@ -37,6 +39,8 @@ impl HostVideoFrameProbe {
             encoder_submitted: None,
             vpp_entered: None,
             vpp_completed: None,
+            encoder_entered: None,
+            encoder_completed: None,
         }
     }
 }

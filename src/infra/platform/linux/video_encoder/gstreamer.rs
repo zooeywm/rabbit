@@ -363,6 +363,8 @@ pub(crate) struct GStreamerVideoEncoder {
     probe_events: flume::Receiver<VideoProbeEvent>,
     #[cfg(test)]
     encoded_probe_order: RefCell<VecDeque<u64>>,
+    #[cfg(test)]
+    encoder_completed_by_pts: RefCell<HashMap<u64, std::time::Instant>>,
 }
 
 #[cfg(test)]
@@ -371,6 +373,8 @@ enum VideoProbeEvent {
     PipelineInput { pts_ns: u64 },
     VppEntered { pts_ns: u64, at: std::time::Instant },
     VppCompleted { pts_ns: u64, at: std::time::Instant },
+    EncoderEntered { pts_ns: u64, at: std::time::Instant },
+    EncoderCompleted { pts_ns: u64, at: std::time::Instant },
 }
 
 impl GStreamerVideoEncoder {
@@ -513,7 +517,12 @@ impl GStreamerVideoEncoder {
         #[cfg(test)]
         let (probe_sender, probe_events) = flume::unbounded();
         #[cfg(test)]
-        install_video_probe(&source, vpp.as_ref().map(|(vpp, _)| vpp), probe_sender);
+        install_video_probe(
+            &source,
+            vpp.as_ref().map(|(vpp, _)| vpp),
+            &element,
+            probe_sender,
+        );
         let terminal_messages = terminal_messages(&pipeline)?;
 
         Ok(Self {
@@ -530,6 +539,8 @@ impl GStreamerVideoEncoder {
             probe_events,
             #[cfg(test)]
             encoded_probe_order: RefCell::new(VecDeque::new()),
+            #[cfg(test)]
+            encoder_completed_by_pts: RefCell::new(HashMap::new()),
         })
     }
 
@@ -591,11 +602,18 @@ impl GStreamerVideoEncoder {
                 {
                     self.collect_probe_events();
                     if packet.marker {
+                        let encoder_completed = packet.pts_ns.and_then(|pts_ns| {
+                            self.encoder_completed_by_pts.borrow_mut().remove(&pts_ns)
+                        });
                         packet.probe = self
                             .encoded_probe_order
                             .borrow_mut()
                             .pop_front()
-                            .and_then(|pts_ns| self.probes.borrow_mut().remove(&pts_ns));
+                            .and_then(|pts_ns| self.probes.borrow_mut().remove(&pts_ns))
+                            .map(|mut probe| {
+                                probe.encoder_completed = encoder_completed;
+                                probe
+                            });
                     }
                 }
                 Ok(Some(packet))
@@ -629,6 +647,16 @@ impl GStreamerVideoEncoder {
                     if let Some(probe) = self.probes.borrow_mut().get_mut(&pts_ns) {
                         probe.vpp_completed = Some(at);
                     }
+                }
+                VideoProbeEvent::EncoderEntered { pts_ns, at } => {
+                    if let Some(probe) = self.probes.borrow_mut().get_mut(&pts_ns) {
+                        probe.encoder_entered = Some(at);
+                    }
+                }
+                VideoProbeEvent::EncoderCompleted { pts_ns, at } => {
+                    self.encoder_completed_by_pts
+                        .borrow_mut()
+                        .insert(pts_ns, at);
                 }
             }
         }
@@ -886,6 +914,7 @@ fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
 fn install_video_probe(
     source: &gstreamer_app::AppSrc,
     vpp: Option<&gstreamer::Element>,
+    encoder: &gstreamer::Element,
     events: flume::Sender<VideoProbeEvent>,
 ) {
     let pipeline_events = events.clone();
@@ -903,34 +932,68 @@ fn install_video_probe(
             gstreamer::PadProbeReturn::Ok
         });
 
-    let Some(vpp) = vpp else {
-        return;
-    };
+    if let Some(vpp) = vpp {
+        let entered_events = events.clone();
+        vpp.static_pad("sink")
+            .expect("GStreamer VAAPI VPP should expose a sink pad")
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+                if let Some(pts_ns) = info
+                    .buffer()
+                    .and_then(|buffer| buffer.pts())
+                    .map(gstreamer::ClockTime::nseconds)
+                {
+                    let _ = entered_events.send(VideoProbeEvent::VppEntered {
+                        pts_ns,
+                        at: std::time::Instant::now(),
+                    });
+                }
+                gstreamer::PadProbeReturn::Ok
+            });
+        let completed_events = events.clone();
+        vpp.static_pad("src")
+            .expect("GStreamer VAAPI VPP should expose a source pad")
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+                if let Some(pts_ns) = info
+                    .buffer()
+                    .and_then(|buffer| buffer.pts())
+                    .map(gstreamer::ClockTime::nseconds)
+                {
+                    let _ = completed_events.send(VideoProbeEvent::VppCompleted {
+                        pts_ns,
+                        at: std::time::Instant::now(),
+                    });
+                }
+                gstreamer::PadProbeReturn::Ok
+            });
+    }
+
     let entered_events = events.clone();
-    vpp.static_pad("sink")
-        .expect("GStreamer VAAPI VPP should expose a sink pad")
+    encoder
+        .static_pad("sink")
+        .expect("GStreamer H.264 encoder should expose a sink pad")
         .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
             if let Some(pts_ns) = info
                 .buffer()
                 .and_then(|buffer| buffer.pts())
                 .map(gstreamer::ClockTime::nseconds)
             {
-                let _ = entered_events.send(VideoProbeEvent::VppEntered {
+                let _ = entered_events.send(VideoProbeEvent::EncoderEntered {
                     pts_ns,
                     at: std::time::Instant::now(),
                 });
             }
             gstreamer::PadProbeReturn::Ok
         });
-    vpp.static_pad("src")
-        .expect("GStreamer VAAPI VPP should expose a source pad")
+    encoder
+        .static_pad("src")
+        .expect("GStreamer H.264 encoder should expose a source pad")
         .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
             if let Some(pts_ns) = info
                 .buffer()
                 .and_then(|buffer| buffer.pts())
                 .map(gstreamer::ClockTime::nseconds)
             {
-                let _ = events.send(VideoProbeEvent::VppCompleted {
+                let _ = events.send(VideoProbeEvent::EncoderCompleted {
                     pts_ns,
                     at: std::time::Instant::now(),
                 });
@@ -1041,7 +1104,9 @@ mod tests {
         encoder_queue: Duration,
         vpp_queue: Duration,
         vpp: Duration,
+        encode_queue: Duration,
         encode: Duration,
+        rtp_packetize: Duration,
         host_latency: Duration,
     }
 
@@ -1054,7 +1119,9 @@ mod tests {
         encoder_queue: Duration,
         vpp_queue: Duration,
         vpp: Duration,
+        encode_queue: Duration,
         encode: Duration,
+        rtp_packetize: Duration,
         host_latency: Duration,
     }
 
@@ -1124,7 +1191,7 @@ mod tests {
             let encoder_submitted = probe
                 .encoder_submitted
                 .expect("GStreamer should timestamp its submitted input frame");
-            let (vpp_queue, vpp, encode_started) = match probe.vpp_entered {
+            let (vpp_queue, vpp, vpp_completed) = match probe.vpp_entered {
                 Some(vpp_entered) => {
                     let vpp_completed = probe
                         .vpp_completed
@@ -1137,6 +1204,12 @@ mod tests {
                 }
                 None => (Duration::ZERO, Duration::ZERO, encoder_submitted),
             };
+            let encoder_entered = probe
+                .encoder_entered
+                .expect("H.264 encoder should timestamp its input frame");
+            let encoder_completed = probe
+                .encoder_completed
+                .expect("H.264 encoder should timestamp its output frame");
 
             Self {
                 vblank_wait: elapsed(probe.vblank_wait_started, probe.capture_started),
@@ -1147,7 +1220,9 @@ mod tests {
                 encoder_queue: elapsed(pipeline_ready, encoder_submitted),
                 vpp_queue,
                 vpp,
-                encode: elapsed(encode_started, encoded),
+                encode_queue: elapsed(vpp_completed, encoder_entered),
+                encode: elapsed(encoder_entered, encoder_completed),
+                rtp_packetize: elapsed(encoder_completed, encoded),
                 host_latency: elapsed(probe.capture_started, encoded),
             }
         }
@@ -1163,7 +1238,9 @@ mod tests {
             self.encoder_queue += timings.encoder_queue;
             self.vpp_queue += timings.vpp_queue;
             self.vpp += timings.vpp;
+            self.encode_queue += timings.encode_queue;
             self.encode += timings.encode;
+            self.rtp_packetize += timings.rtp_packetize;
             self.host_latency += timings.host_latency;
         }
     }
@@ -1222,7 +1299,9 @@ mod tests {
                 encoder_queue_ms = duration_ms(timings.encoder_queue),
                 vpp_queue_ms = duration_ms(timings.vpp_queue),
                 vpp_ms = duration_ms(timings.vpp),
+                encode_queue_ms = duration_ms(timings.encode_queue),
                 encode_ms = duration_ms(timings.encode),
+                rtp_packetize_ms = duration_ms(timings.rtp_packetize),
                 host_latency_ms = duration_ms(timings.host_latency),
                 rtp_packets = stats.packets,
                 rtp_bytes = stats.bytes,
@@ -1260,7 +1339,9 @@ mod tests {
                 avg_encoder_queue_ms = average_ms(self.window_totals.encoder_queue, frames),
                 avg_vpp_queue_ms = average_ms(self.window_totals.vpp_queue, frames),
                 avg_vpp_ms = average_ms(self.window_totals.vpp, frames),
+                avg_encode_queue_ms = average_ms(self.window_totals.encode_queue, frames),
                 avg_encode_ms = average_ms(self.window_totals.encode, frames),
+                avg_rtp_packetize_ms = average_ms(self.window_totals.rtp_packetize, frames),
                 rtp_packets = self.window_packets,
                 rtp_bytes = self.window_bytes,
                 "Host video throughput window"
