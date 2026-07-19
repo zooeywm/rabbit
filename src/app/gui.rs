@@ -625,28 +625,30 @@ impl Component for RootComponent {
                         match send.send_screen_list(self._app.screens()).await {
                             Ok(()) => self.start_session(send, recv, sender),
                             Err(error) => {
-                                error!(%error, "Failed to send the initial screen list")
+                                error!(error = ?error, "Failed to send the initial screen list")
                             }
                         }
                     }
-                    Err(error) => error!(%error, "Failed to accept a QUIC connection request"),
+                    Err(error) => {
+                        error!(error = ?error, "Failed to accept a QUIC connection request")
+                    }
                 }
 
                 Ok(false)
             }
             RootMessage::ConnectionRejected(result) => {
                 if let Err(error) = result {
-                    error!(%error, "Failed to reject a QUIC connection request");
+                    error!(error = ?error, "Failed to reject a QUIC connection request");
                 }
 
                 Ok(false)
             }
             RootMessage::ConnectionRequestFailed(error) => {
-                warn!(%error, "Failed to receive a QUIC connection request");
+                warn!(error = ?error, "Failed to receive a QUIC connection request");
                 Ok(false)
             }
             RootMessage::ConnectionListenerFailed(error) => {
-                error!(%error, "QUIC connection listener stopped");
+                error!(error = ?error, "QUIC connection listener stopped");
                 Ok(false)
             }
             RootMessage::SessionMessageReceived(id, message) => {
@@ -677,7 +679,11 @@ impl Component for RootComponent {
                             .send_screen_streams_configured(configured)
                             .await
                         {
-                            error!(session_id = id.0, %error, "Failed to send screen stream results");
+                            error!(
+                                session_id = id.0,
+                                error = ?error,
+                                "Failed to send screen stream results"
+                            );
                             self.remove_session(id)?;
                             return Ok(false);
                         }
@@ -689,7 +695,7 @@ impl Component for RootComponent {
                                 error!(
                                     session_id = id.0,
                                     screen_id = screen_id.0,
-                                    %error,
+                                    error = ?error,
                                     "Failed to start screen stream"
                                 );
                             }
@@ -736,7 +742,7 @@ impl Component for RootComponent {
             }
             RootMessage::SessionFailed(id, error) => {
                 self.remove_session(id)?;
-                error!(session_id = id.0, %error, "Session receive loop failed");
+                error!(session_id = id.0, error = ?error, "Session receive loop failed");
                 self.connection_status
                     .set_text(format!("Session {} failed: {error}", id.0))?;
                 Ok(true)
@@ -772,7 +778,7 @@ impl Component for RootComponent {
                             event = "screen_stream_failed",
                             session_id = id.0,
                             screen_id = screen_id.0,
-                            %error,
+                            error = ?error,
                             "Screen stream failed"
                         );
                         self.connection_status.set_text(format!(
@@ -843,7 +849,7 @@ impl Component for RootComponent {
                         error!(
                             session_id = session_id.0,
                             screen_id = screen_id.0,
-                            %error,
+                            error = ?error,
                             "Failed to request screen stream"
                         );
                         self.remove_session(session_id)?;
