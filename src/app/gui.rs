@@ -379,7 +379,8 @@ impl Component for RootComponent {
         let logger_guard = init_logging(&config)?;
         let screen_layout_manager_state = create_screen_layout_manager_state()
             .context("Failed to create the screen layout manager state")?;
-        let screen_capture_manager_state = create_screen_capture_manager_state();
+        let screen_capture_manager_state =
+            create_screen_capture_manager_state(config.video.enable_probing);
         let frame_pipeline_manager_state = create_frame_pipeline_manager_state();
         let quic_endpoint = QuicEndpoint::new()
             .await

@@ -1,4 +1,3 @@
-#[cfg(test)]
 use std::time::Instant;
 
 use eros::Context;
@@ -10,6 +9,7 @@ use crate::{
         screen_capture::kms::{
             gbm_allocator::GbmFrameAllocator, output::KmsOutput, types::KmsPlaneIssue,
         },
+        video_probe::VideoCaptureTiming,
     },
     kernel::screen_capture::CapturedFrame,
 };
@@ -19,13 +19,6 @@ pub(crate) struct KmsCapturer {
     output: KmsOutput,
     allocator: GbmFrameAllocator,
     gpu_device: GpuDevice,
-}
-
-#[cfg(test)]
-pub(crate) struct KmsCaptureTiming {
-    pub(crate) vblank_wait_started: Instant,
-    pub(crate) capture_started: Instant,
-    pub(crate) capture_completed: Instant,
 }
 
 impl KmsCapturer {
@@ -71,10 +64,12 @@ impl KmsCapturer {
             .with_context(|| "Failed to compose KMS framebuffers")
     }
 
-    #[cfg(test)]
     pub(crate) fn capture_with_timing(
         &self,
-    ) -> eros::Result<(CapturedFrame<DmaBufFrame, KmsPlaneIssue>, KmsCaptureTiming)> {
+    ) -> eros::Result<(
+        CapturedFrame<DmaBufFrame, KmsPlaneIssue>,
+        VideoCaptureTiming,
+    )> {
         let vblank_wait_started = Instant::now();
         self.wait_for_vblank()?;
         let capture_started = Instant::now();
@@ -83,7 +78,7 @@ impl KmsCapturer {
 
         Ok((
             frame,
-            KmsCaptureTiming {
+            VideoCaptureTiming {
                 vblank_wait_started,
                 capture_started,
                 capture_completed,
@@ -107,7 +102,7 @@ mod tests {
         let screen_name = std::env::var("RABBIT_KMS_SCREEN")
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
         let ScreenCaptureSource { lease, receiver } =
-            KmsCaptureLease::new(screen_name).expect("KMS capture source should start");
+            KmsCaptureLease::new(screen_name, false).expect("KMS capture source should start");
         let (device, frames) = receiver.into_parts();
         let device = device
             .recv()

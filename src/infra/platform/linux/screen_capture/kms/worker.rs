@@ -1,7 +1,5 @@
 #[cfg(test)]
 use std::path::PathBuf;
-#[cfg(test)]
-use std::time::Instant;
 use std::{
     io,
     thread::{self, JoinHandle},
@@ -9,26 +7,21 @@ use std::{
 
 use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 
-#[cfg(not(test))]
-use crate::kernel::screen_capture::CapturedFrame;
 use crate::{
     infra::platform::{
         dma_buf::DmaBufFrame,
         gpu::GpuDevice,
         screen_capture::kms::{capture::KmsCapturer, types::KmsPlaneIssue},
+        video_probe::{VideoFrameProbe, VideoProbeClock},
     },
     kernel::screen_capture::ScreenCaptureSource,
 };
 
-#[cfg(not(test))]
-pub(crate) type KmsCapturedFrame = CapturedFrame<DmaBufFrame, KmsPlaneIssue>;
-
-#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct KmsCapturedFrame {
     pub(crate) buffer: DmaBufFrame,
     pub(crate) issues: Vec<KmsPlaneIssue>,
-    pub(crate) probe: Option<crate::infra::platform::video_probe::HostVideoFrameProbe>,
+    pub(crate) probe: Option<VideoFrameProbe>,
 }
 
 #[cfg(test)]
@@ -65,6 +58,7 @@ pub(crate) struct KmsFrameReceiver {
 impl KmsCaptureLease {
     pub(crate) fn new(
         screen_name: String,
+        enable_probing: bool,
     ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
         let (commands, command_receiver) = bounded(1);
         let (device_sender, device) = bounded(1);
@@ -78,6 +72,7 @@ impl KmsCaptureLease {
                 device_sender,
                 frame_sender,
                 overflow_frames,
+                enable_probing,
             );
         })?;
 
@@ -154,6 +149,7 @@ fn run_capture_loop(
     device: Sender<eros::Result<GpuDevice>>,
     frames: Sender<eros::Result<KmsCapturedFrame>>,
     overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
+    enable_probing: bool,
 ) {
     let capturer = match KmsCapturer::new(&screen_name) {
         Ok(capturer) => capturer,
@@ -167,10 +163,7 @@ fn run_capture_loop(
         return;
     }
 
-    #[cfg(test)]
-    let capture_epoch = Instant::now();
-    #[cfg(test)]
-    let mut next_frame_id = 0_u64;
+    let mut probe_clock = enable_probing.then(VideoProbeClock::new);
 
     loop {
         match commands.try_recv() {
@@ -178,26 +171,21 @@ fn run_capture_loop(
             Err(TryRecvError::Empty) => {}
         }
 
-        #[cfg(not(test))]
-        let frame = capturer.capture();
-        #[cfg(test)]
-        let frame = capturer.capture_with_timing().map(|(frame, timing)| {
-            let frame = KmsCapturedFrame {
+        let frame = if let Some(clock) = &mut probe_clock {
+            capturer
+                .capture_with_timing()
+                .map(|(frame, timing)| KmsCapturedFrame {
+                    buffer: frame.buffer,
+                    issues: frame.issues,
+                    probe: Some(clock.frame(timing)),
+                })
+        } else {
+            capturer.capture().map(|frame| KmsCapturedFrame {
                 buffer: frame.buffer,
                 issues: frame.issues,
-                probe: Some(
-                    crate::infra::platform::video_probe::HostVideoFrameProbe::new(
-                        next_frame_id,
-                        capture_epoch,
-                        timing.vblank_wait_started,
-                        timing.capture_started,
-                        timing.capture_completed,
-                    ),
-                ),
-            };
-            next_frame_id = next_frame_id.saturating_add(1);
-            frame
-        });
+                probe: None,
+            })
+        };
         let capture_failed = frame.is_err();
 
         if !publish_latest(&frames, &overflow_frames, frame) || capture_failed {
@@ -231,7 +219,7 @@ mod tests {
     #[test]
     #[ignore = "run through scripts/test-kms"]
     fn lease_starts_without_opening_the_kms_output_on_the_main_thread() {
-        let source = KmsCaptureLease::new("not-a-real-output".to_owned())
+        let source = KmsCaptureLease::new("not-a-real-output".to_owned(), false)
             .expect("KMS capture source should start asynchronously");
 
         drop(source);

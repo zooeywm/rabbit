@@ -26,11 +26,13 @@ pub(crate) use egl_context::{EglContext, EglDmaBufImage};
 
 #[derive(Debug, kudi::DepInj)]
 #[target(KmsScreenCaptureManager)]
-pub(crate) struct KmsScreenCaptureManagerState;
+pub(crate) struct KmsScreenCaptureManagerState {
+    enable_probing: bool,
+}
 
 impl KmsScreenCaptureManagerState {
-    pub(crate) fn new() -> Self {
-        Self
+    pub(crate) fn new(enable_probing: bool) -> Self {
+        Self { enable_probing }
     }
 }
 
@@ -55,7 +57,10 @@ where
             .clone();
         let context = format!("Failed to start KMS capture worker for screen {screen_name}");
 
-        Ok(KmsCaptureLease::new(screen_name).with_context(|| context)?)
+        let enable_probing =
+            <Deps as AsRef<KmsScreenCaptureManagerState>>::as_ref(self.prj_ref()).enable_probing;
+
+        Ok(KmsCaptureLease::new(screen_name, enable_probing).with_context(|| context)?)
     }
 }
 
@@ -116,7 +121,7 @@ mod tests {
     #[ignore = "run through scripts/test-kms"]
     fn acquires_one_owned_source_for_an_existing_screen() {
         let mut deps = TestDeps {
-            capture: KmsScreenCaptureManagerState::new(),
+            capture: KmsScreenCaptureManagerState::new(false),
             screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
         };
         let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);

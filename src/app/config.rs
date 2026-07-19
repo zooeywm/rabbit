@@ -18,6 +18,7 @@ pub struct Config {
     pub app_name: &'static str,
 
     pub logging: LoggingConfig,
+    pub video: VideoConfig,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -25,6 +26,12 @@ pub struct Config {
 pub struct LoggingConfig {
     pub console_level: LogLevel,
     pub file_level: LogLevel,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct VideoConfig {
+    pub enable_probing: bool,
 }
 
 impl Default for LoggingConfig {
@@ -51,6 +58,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             logging: LoggingConfig::default(),
+            video: VideoConfig::default(),
             project_dirs: default_project_dirs(),
             app_name: APP_NAME,
         }
@@ -96,4 +104,22 @@ fn default_project_dirs() -> ProjectDirs {
 
 const fn default_app_name() -> &'static str {
     APP_NAME
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::config::Config;
+
+    #[test]
+    fn video_probing_is_disabled_by_default() {
+        assert!(!Config::default().video.enable_probing);
+    }
+
+    #[test]
+    fn video_probing_can_be_enabled_from_config() {
+        let config = toml::from_str::<Config>("[video]\nenable_probing = true")
+            .expect("Video probing configuration should deserialize");
+
+        assert!(config.video.enable_probing);
+    }
 }

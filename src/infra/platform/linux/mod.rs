@@ -4,7 +4,6 @@ mod gpu;
 mod screen_capture;
 mod screen_layout;
 mod video_encoder;
-#[cfg(test)]
 mod video_probe;
 
 pub(crate) use frame_pipeline::{

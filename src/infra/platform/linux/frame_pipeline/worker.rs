@@ -374,9 +374,8 @@ fn process_screen_frame(
     mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
 ) {
-    #[cfg(test)]
     if let Some(probe) = &mut frame.probe {
-        probe.gpu_received = Some(std::time::Instant::now());
+        probe.mark_gpu_received();
     }
 
     let source = match prepare_pipeline_source(context, screen_id, &mut frame) {
@@ -521,9 +520,8 @@ fn process_pipeline_frame(
 
     Ok(GbmFramePipelineFrame {
         buffer,
-        #[cfg(test)]
         probe: frame.probe.clone().map(|mut probe| {
-            probe.gpu_submitted = Some(std::time::Instant::now());
+            probe.mark_gpu_submitted();
             probe
         }),
     })

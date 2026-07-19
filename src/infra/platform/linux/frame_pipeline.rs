@@ -79,8 +79,7 @@ struct LatestFrameSubscriptionState<Frame> {
 #[derive(Debug)]
 pub(crate) struct GbmFramePipelineFrame {
     pub(crate) buffer: DmaBufFrame,
-    #[cfg(test)]
-    pub(crate) probe: Option<crate::infra::platform::video_probe::HostVideoFrameProbe>,
+    pub(crate) probe: Option<crate::infra::platform::video_probe::VideoFrameProbe>,
 }
 
 #[derive(Debug)]
@@ -299,9 +298,8 @@ async fn wait_until_ready(mut frame: GbmFramePipelineFrame) -> eros::Result<GbmF
             .with_context(|| "Failed to wait for frame-pipeline readiness fence")?;
     }
 
-    #[cfg(test)]
     if let Some(probe) = &mut frame.probe {
-        probe.pipeline_ready = Some(std::time::Instant::now());
+        probe.mark_pipeline_ready();
     }
 
     Ok(frame)
