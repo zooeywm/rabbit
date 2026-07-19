@@ -442,7 +442,7 @@ fn process_pipeline_frame(
     _frame: &KmsCapturedFrame,
 ) -> eros::Result<GbmFramePipelineFrame> {
     validate_nv12_size(parameters.frame_size)?;
-    let _source_texture = context
+    let source_texture = context
         .egl()
         .create_dma_buf_texture(source)
         .with_context(|| "Failed to bind the frame-pipeline source texture")?;
@@ -462,10 +462,19 @@ fn process_pipeline_frame(
         .egl()
         .import_nv12_target(&buffer)
         .with_context(|| "Failed to import the frame-pipeline NV12 output planes")?;
-    let _target = context
+    let target = context
         .egl()
         .create_nv12_target(&target_image)
         .with_context(|| "Failed to bind the frame-pipeline NV12 output targets")?;
+    context
+        .egl()
+        .convert_to_nv12(&source_texture, &target)
+        .with_context(|| {
+            format!(
+                "Failed to convert the source frame to {}x{} NV12",
+                parameters.frame_size.width, parameters.frame_size.height
+            )
+        })?;
 
     Ok(GbmFramePipelineFrame { buffer })
 }

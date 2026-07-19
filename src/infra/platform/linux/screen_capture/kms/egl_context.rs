@@ -401,6 +401,14 @@ impl EglContext {
         )
     }
 
+    pub(crate) fn convert_to_nv12(
+        &self,
+        source: &GlExternalTexture<'_>,
+        target: &GlNv12Target<'_>,
+    ) -> eros::Result<()> {
+        self.gl.convert_to_nv12(source, target)
+    }
+
     pub(crate) fn create_composition_target<'context>(
         &'context self,
         image: &EglCompositionImage<'_>,

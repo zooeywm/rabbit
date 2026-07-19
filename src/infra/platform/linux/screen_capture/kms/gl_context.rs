@@ -69,10 +69,67 @@ void main() {
 }
 "#;
 
+const FRAME_VERTEX_SHADER: &str = r#"#version 300 es
+const vec2 positions[4] = vec2[4](
+    vec2(-1.0, -1.0),
+    vec2( 1.0, -1.0),
+    vec2(-1.0,  1.0),
+    vec2( 1.0,  1.0)
+);
+const vec2 texture_coordinates[4] = vec2[4](
+    vec2(0.0, 0.0),
+    vec2(1.0, 0.0),
+    vec2(0.0, 1.0),
+    vec2(1.0, 1.0)
+);
+
+out vec2 sampled_coordinate;
+
+void main() {
+    gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+    sampled_coordinate = texture_coordinates[gl_VertexID];
+}
+"#;
+
+const FRAME_LUMA_FRAGMENT_SHADER: &str = r#"#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+
+uniform samplerExternalOES source_texture;
+
+in vec2 sampled_coordinate;
+out vec4 output_color;
+
+void main() {
+    vec3 rgb = texture(source_texture, sampled_coordinate).rgb;
+    float y = dot(rgb, vec3(0.182586, 0.614231, 0.062007)) + 0.062745;
+    output_color = vec4(y, 0.0, 0.0, 1.0);
+}
+"#;
+
+const FRAME_CHROMA_FRAGMENT_SHADER: &str = r#"#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision highp float;
+
+uniform samplerExternalOES source_texture;
+
+in vec2 sampled_coordinate;
+out vec4 output_color;
+
+void main() {
+    vec3 rgb = texture(source_texture, sampled_coordinate).rgb;
+    float u = dot(rgb, vec3(-0.100644, -0.338572, 0.439216)) + 0.501961;
+    float v = dot(rgb, vec3( 0.439216, -0.398942, -0.040274)) + 0.501961;
+    output_color = vec4(u, v, 0.0, 1.0);
+}
+"#;
+
 pub(crate) struct GlContext {
     api: glow::Context,
     image_target_texture: ImageTargetTexture,
     composition_program: GlCompositionProgram,
+    frame_luma_program: GlFrameProgram,
+    frame_chroma_program: GlFrameProgram,
     thread_affinity: PhantomData<Rc<()>>,
 }
 
@@ -83,6 +140,11 @@ struct GlCompositionProgram {
     plane_texture: glow::UniformLocation,
     plane_alpha: glow::UniformLocation,
     pixel_blend_mode: glow::UniformLocation,
+}
+
+struct GlFrameProgram {
+    program: glow::Program,
+    source_texture: glow::UniformLocation,
 }
 
 #[derive(Debug)]
@@ -153,17 +215,41 @@ impl GlContext {
             std::mem::transmute::<extern "system" fn(), ImageTargetTexture>(image_target_texture)
         };
         let composition_program = create_composition_program(&api)?;
+        let frame_luma_program =
+            match create_frame_program(&api, FRAME_LUMA_FRAGMENT_SHADER, "frame-pipeline luma") {
+                Ok(program) => program,
+                Err(error) => {
+                    unsafe { api.delete_program(composition_program.program) };
+                    return Err(error);
+                }
+            };
+        let frame_chroma_program =
+            match create_frame_program(&api, FRAME_CHROMA_FRAGMENT_SHADER, "frame-pipeline chroma")
+            {
+                Ok(program) => program,
+                Err(error) => {
+                    unsafe {
+                        api.delete_program(frame_luma_program.program);
+                        api.delete_program(composition_program.program);
+                    }
+                    return Err(error);
+                }
+            };
 
         Ok(Self {
             api,
             image_target_texture,
             composition_program,
+            frame_luma_program,
+            frame_chroma_program,
             thread_affinity: PhantomData,
         })
     }
 
     pub(crate) fn destroy(&mut self) {
         unsafe {
+            self.api.delete_program(self.frame_chroma_program.program);
+            self.api.delete_program(self.frame_luma_program.program);
             self.api.delete_program(self.composition_program.program);
         }
     }
@@ -409,6 +495,68 @@ impl GlContext {
         Ok(())
     }
 
+    pub(crate) fn convert_to_nv12(
+        &self,
+        source: &GlExternalTexture<'_>,
+        target: &GlNv12Target<'_>,
+    ) -> eros::Result<()> {
+        if !ptr::eq(self, source.owner) {
+            eros::bail!("Cannot convert a source texture created by another OpenGL context");
+        }
+        if !ptr::eq(self, target.luma.owner) || !ptr::eq(self, target.chroma.owner) {
+            eros::bail!("Cannot convert into NV12 targets created by another OpenGL context");
+        }
+
+        self.render_frame_plane(source, &target.luma, &self.frame_luma_program, "NV12 luma")?;
+        self.render_frame_plane(
+            source,
+            &target.chroma,
+            &self.frame_chroma_program,
+            "NV12 chroma",
+        )?;
+
+        Ok(())
+    }
+
+    fn render_frame_plane(
+        &self,
+        source: &GlExternalTexture<'_>,
+        target: &GlImageTarget<'_>,
+        program: &GlFrameProgram,
+        description: &str,
+    ) -> eros::Result<()> {
+        let width = i32::try_from(target.size.width)
+            .with_context(|| format!("{description} target width exceeds OpenGL limits"))?;
+        let height = i32::try_from(target.size.height)
+            .with_context(|| format!("{description} target height exceeds OpenGL limits"))?;
+
+        unsafe {
+            self.api
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(target.framebuffer));
+            self.api.viewport(0, 0, width, height);
+            self.api.use_program(Some(program.program));
+            self.api.active_texture(glow::TEXTURE0);
+            self.api
+                .bind_texture(TEXTURE_EXTERNAL, Some(source.texture));
+            self.api.uniform_1_i32(Some(&program.source_texture), 0);
+            self.api.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.api.bind_texture(TEXTURE_EXTERNAL, None);
+            self.api.use_program(None);
+            self.api.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+
+        let error = unsafe { self.api.get_error() };
+        if error != glow::NO_ERROR {
+            eros::bail!(
+                "Failed to render the {} target: GL error 0x{:04X}",
+                description,
+                error
+            );
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn flush_composition(&self) -> eros::Result<()> {
         unsafe { self.api.flush() };
 
@@ -437,8 +585,18 @@ impl Drop for GlImageTarget<'_> {
 }
 
 fn create_composition_program(api: &glow::Context) -> eros::Result<GlCompositionProgram> {
-    let vertex = compile_shader(api, glow::VERTEX_SHADER, COMPOSITION_VERTEX_SHADER)?;
-    let fragment = match compile_shader(api, glow::FRAGMENT_SHADER, COMPOSITION_FRAGMENT_SHADER) {
+    let vertex = compile_shader(
+        api,
+        glow::VERTEX_SHADER,
+        COMPOSITION_VERTEX_SHADER,
+        "KMS composition vertex",
+    )?;
+    let fragment = match compile_shader(
+        api,
+        glow::FRAGMENT_SHADER,
+        COMPOSITION_FRAGMENT_SHADER,
+        "KMS composition fragment",
+    ) {
         Ok(fragment) => fragment,
         Err(error) => {
             unsafe { api.delete_shader(vertex) };
@@ -487,22 +645,85 @@ fn composition_program(
 ) -> eros::Result<GlCompositionProgram> {
     Ok(GlCompositionProgram {
         program,
-        position_transform: uniform(api, program, "position_transform")?,
-        texture_transform: uniform(api, program, "texture_transform")?,
-        plane_texture: uniform(api, program, "plane_texture")?,
-        plane_alpha: uniform(api, program, "plane_alpha")?,
-        pixel_blend_mode: uniform(api, program, "pixel_blend_mode")?,
+        position_transform: uniform(api, program, "position_transform", "KMS composition")?,
+        texture_transform: uniform(api, program, "texture_transform", "KMS composition")?,
+        plane_texture: uniform(api, program, "plane_texture", "KMS composition")?,
+        plane_alpha: uniform(api, program, "plane_alpha", "KMS composition")?,
+        pixel_blend_mode: uniform(api, program, "pixel_blend_mode", "KMS composition")?,
     })
+}
+
+fn create_frame_program(
+    api: &glow::Context,
+    fragment_source: &str,
+    description: &str,
+) -> eros::Result<GlFrameProgram> {
+    let vertex = compile_shader(
+        api,
+        glow::VERTEX_SHADER,
+        FRAME_VERTEX_SHADER,
+        &format!("{description} vertex"),
+    )?;
+    let fragment = match compile_shader(
+        api,
+        glow::FRAGMENT_SHADER,
+        fragment_source,
+        &format!("{description} fragment"),
+    ) {
+        Ok(fragment) => fragment,
+        Err(error) => {
+            unsafe { api.delete_shader(vertex) };
+            return Err(error);
+        }
+    };
+    let program = match unsafe { api.create_program() } {
+        Ok(program) => program,
+        Err(error) => {
+            unsafe {
+                api.delete_shader(vertex);
+                api.delete_shader(fragment);
+            }
+            eros::bail!("Failed to create the {} program: {}", description, error);
+        }
+    };
+
+    unsafe {
+        api.attach_shader(program, vertex);
+        api.attach_shader(program, fragment);
+        api.link_program(program);
+        api.detach_shader(program, vertex);
+        api.detach_shader(program, fragment);
+        api.delete_shader(vertex);
+        api.delete_shader(fragment);
+    }
+
+    if !unsafe { api.get_program_link_status(program) } {
+        let log = unsafe { api.get_program_info_log(program) };
+        unsafe { api.delete_program(program) };
+        eros::bail!("Failed to link the {} program: {}", description, log);
+    }
+
+    match uniform(api, program, "source_texture", description) {
+        Ok(source_texture) => Ok(GlFrameProgram {
+            program,
+            source_texture,
+        }),
+        Err(error) => {
+            unsafe { api.delete_program(program) };
+            Err(error)
+        }
+    }
 }
 
 fn compile_shader(
     api: &glow::Context,
     shader_type: u32,
     source: &str,
+    description: &str,
 ) -> eros::Result<glow::Shader> {
     let shader = match unsafe { api.create_shader(shader_type) } {
         Ok(shader) => shader,
-        Err(error) => eros::bail!("Failed to create a KMS composition shader: {}", error),
+        Err(error) => eros::bail!("Failed to create the {} shader: {}", description, error),
     };
     unsafe {
         api.shader_source(shader, source);
@@ -512,7 +733,7 @@ fn compile_shader(
     if !unsafe { api.get_shader_compile_status(shader) } {
         let log = unsafe { api.get_shader_info_log(shader) };
         unsafe { api.delete_shader(shader) };
-        eros::bail!("Failed to compile a KMS composition shader: {}", log);
+        eros::bail!("Failed to compile the {} shader: {}", description, log);
     }
 
     Ok(shader)
@@ -522,9 +743,10 @@ fn uniform(
     api: &glow::Context,
     program: glow::Program,
     name: &'static str,
+    description: &str,
 ) -> eros::Result<glow::UniformLocation> {
     Ok(unsafe { api.get_uniform_location(program, name) }
-        .with_context(|| format!("KMS composition program does not expose uniform {name}"))?)
+        .with_context(|| format!("{description} program does not expose uniform {name}"))?)
 }
 
 fn composition_target_size(target: &GlCompositionTarget<'_>) -> eros::Result<(i32, i32)> {
