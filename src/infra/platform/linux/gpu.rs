@@ -5,7 +5,7 @@ use std::{
 };
 
 use eros::Context;
-use gbm::{BufferObjectFlags, Device, Format};
+use gbm::{BufferObject, BufferObjectFlags, Device, Format, Modifier};
 
 use crate::{
     infra::platform::{
@@ -36,6 +36,21 @@ impl From<PathBuf> for GpuDevice {
 pub(crate) struct GpuContext {
     egl: EglContext,
     device: Device<OwnedFd>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nv12OutputStrategy {
+    GbmNv12,
+    GbmSeparatePlanes,
+}
+
+impl Nv12OutputStrategy {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::GbmNv12 => "gbm_nv12",
+            Self::GbmSeparatePlanes => "gbm_separate_planes",
+        }
+    }
 }
 
 impl GpuContext {
@@ -94,6 +109,41 @@ impl GpuContext {
                     size.width, size.height
                 )
             })?;
+        self.export_buffer(size, format, buffer)
+    }
+
+    pub(crate) fn allocate_dma_buf_with_modifier(
+        &self,
+        size: PixelSize,
+        format: Format,
+        modifier: Modifier,
+        usage: BufferObjectFlags,
+    ) -> eros::Result<DmaBufFrame> {
+        let buffer = self
+            .device
+            .create_buffer_object_with_modifiers2::<()>(
+                size.width,
+                size.height,
+                format,
+                std::iter::once(modifier),
+                usage,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to allocate {format:?} GBM buffer {}x{} with modifier {modifier:?}",
+                    size.width, size.height
+                )
+            })?;
+
+        self.export_buffer(size, format, buffer)
+    }
+
+    fn export_buffer(
+        &self,
+        size: PixelSize,
+        format: Format,
+        buffer: BufferObject<()>,
+    ) -> eros::Result<DmaBufFrame> {
         let plane_count = buffer.plane_count();
 
         if plane_count == 0 {
@@ -138,15 +188,108 @@ impl GpuContext {
             readiness_fence: None,
         })
     }
+
+    pub(crate) fn select_nv12_output(
+        &self,
+        size: PixelSize,
+    ) -> eros::Result<(DmaBufFrame, Nv12OutputStrategy)> {
+        let usage = BufferObjectFlags::RENDERING;
+
+        if self.device.is_format_supported(Format::Nv12, usage) {
+            return Ok((
+                self.allocate_dma_buf(size, Format::Nv12, usage)?,
+                Nv12OutputStrategy::GbmNv12,
+            ));
+        }
+
+        tracing::debug!(
+            target: "rabbit::frame_pipeline",
+            strategy = Nv12OutputStrategy::GbmNv12.name(),
+            "NV12 output strategy is unsupported"
+        );
+
+        if self.device.is_format_supported(Format::R8, usage)
+            && self.device.is_format_supported(Format::Gr88, usage)
+        {
+            return Ok((
+                self.allocate_separate_nv12_dma_buf(size, usage)?,
+                Nv12OutputStrategy::GbmSeparatePlanes,
+            ));
+        }
+
+        eros::bail!(
+            "GBM supports neither a renderable NV12 buffer nor renderable R8 and GR88 planes"
+        )
+    }
+
+    pub(crate) fn allocate_nv12_output(
+        &self,
+        size: PixelSize,
+        strategy: Nv12OutputStrategy,
+    ) -> eros::Result<DmaBufFrame> {
+        let usage = BufferObjectFlags::RENDERING;
+
+        match strategy {
+            Nv12OutputStrategy::GbmNv12 => self.allocate_dma_buf(size, Format::Nv12, usage),
+            Nv12OutputStrategy::GbmSeparatePlanes => {
+                self.allocate_separate_nv12_dma_buf(size, usage)
+            }
+        }
+    }
+
+    fn allocate_separate_nv12_dma_buf(
+        &self,
+        size: PixelSize,
+        usage: BufferObjectFlags,
+    ) -> eros::Result<DmaBufFrame> {
+        let chroma_size = PixelSize {
+            width: size.width / 2,
+            height: size.height / 2,
+        };
+        let mut luma = self.allocate_dma_buf(size, Format::R8, usage)?;
+        let chroma = self.allocate_dma_buf(chroma_size, Format::Gr88, usage)?;
+
+        if luma.planes.len() != 1 || chroma.planes.len() != 1 {
+            eros::bail!(
+                "Separate NV12 output requires one R8 plane and one GR88 plane, got {} and {}",
+                luma.planes.len(),
+                chroma.planes.len()
+            );
+        }
+        if luma.planes[0].modifier != chroma.planes[0].modifier {
+            eros::bail!(
+                "Separate NV12 output planes use different modifiers: {:?} and {:?}",
+                luma.planes[0].modifier,
+                chroma.planes[0].modifier
+            );
+        }
+
+        let chroma_object_offset = luma.objects.len();
+        luma.objects.extend(chroma.objects);
+        let mut chroma_plane = chroma.planes[0];
+        chroma_plane.object_index += chroma_object_offset;
+
+        Ok(DmaBufFrame {
+            size,
+            format: Format::Nv12,
+            objects: luma.objects,
+            planes: vec![luma.planes[0], chroma_plane],
+            readiness_fence: None,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use gbm::{BufferObjectFlags, Format};
+    use gbm::Format;
 
-    use crate::infra::platform::gpu::{GpuContext, GpuDevice};
+    use crate::infra::platform::{
+        dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+        gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
+        video_encoder::{hardware_h264_encoder_for, va_vpp_input_modifier},
+    };
     use crate::kernel::geometry::PixelSize;
 
     #[test]
@@ -185,10 +328,14 @@ mod tests {
             height: 720,
         };
 
-        let frame = context
-            .allocate_dma_buf(size, Format::Nv12, BufferObjectFlags::RENDERING)
+        let (frame, strategy) = context
+            .select_nv12_output(size)
             .expect("NV12 DMA-BUF output should allocate");
 
+        assert!(matches!(
+            strategy,
+            Nv12OutputStrategy::GbmNv12 | Nv12OutputStrategy::GbmSeparatePlanes
+        ));
         assert_eq!(frame.size, size);
         assert_eq!(frame.format, Format::Nv12);
         assert_eq!(frame.planes.len(), 2);
@@ -203,5 +350,114 @@ mod tests {
             .egl()
             .create_nv12_target(&image)
             .expect("NV12 output planes should bind as OpenGL targets");
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gpu"]
+    fn egl_exported_nv12_planes_match_a_hardware_encoder() {
+        let render_node = std::env::var_os("RABBIT_GPU_RENDER_NODE")
+            .expect("RABBIT_GPU_RENDER_NODE should name the render node under test");
+        let gpu = GpuDevice::from(PathBuf::from(render_node));
+        let context = GpuContext::new(&gpu).expect("GPU context should initialize");
+        let size = PixelSize {
+            width: 1280,
+            height: 720,
+        };
+        let luma = context
+            .egl()
+            .export_texture_plane(size, Format::R8)
+            .expect("EGL should export an R8 texture as DMA-BUF");
+        let chroma_size = PixelSize {
+            width: size.width / 2,
+            height: size.height / 2,
+        };
+        let chroma = context
+            .egl()
+            .export_texture_plane(chroma_size, Format::Gr88)
+            .expect("EGL should export a GR88 texture as DMA-BUF");
+
+        assert_eq!(luma.format, Format::R8);
+        assert_eq!(chroma.format, Format::Gr88);
+        assert_eq!(luma.modifier, chroma.modifier);
+
+        let modifier = luma.modifier;
+        let luma_object = DmaBufObject::try_from(luma.fd)
+            .expect("EGL luma DMA-BUF should have a discoverable size");
+        let chroma_object = DmaBufObject::try_from(chroma.fd)
+            .expect("EGL chroma DMA-BUF should have a discoverable size");
+        let frame = DmaBufFrame {
+            size,
+            format: Format::Nv12,
+            objects: vec![luma_object, chroma_object],
+            planes: vec![
+                DmaBufPlane {
+                    object_index: 0,
+                    offset: luma.offset,
+                    stride: luma.stride,
+                    modifier,
+                },
+                DmaBufPlane {
+                    object_index: 1,
+                    offset: chroma.offset,
+                    stride: chroma.stride,
+                    modifier,
+                },
+            ],
+            readiness_fence: None,
+        };
+        println!(
+            "EGL export probe: luma={:?}, chroma={:?}, modifier={:?}",
+            luma.format, chroma.format, modifier
+        );
+        let encoder = hardware_h264_encoder_for(&frame)
+            .expect("A hardware H.264 encoder should accept the exported DMA-BUF modifier");
+
+        println!("EGL export probe encoder: {encoder}");
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gpu"]
+    fn allocates_a_vaapi_importable_egl_composition_target() {
+        let render_node = std::env::var_os("RABBIT_GPU_RENDER_NODE")
+            .expect("RABBIT_GPU_RENDER_NODE should name the render node under test");
+        let gpu = GpuDevice::from(PathBuf::from(render_node));
+        let context = GpuContext::new(&gpu).expect("GPU context should initialize");
+        let size = PixelSize {
+            width: 1280,
+            height: 720,
+        };
+        let modifier = va_vpp_input_modifier(Format::Xrgb8888)
+            .expect("VAAPI VPP should advertise an XRGB DMA-BUF modifier");
+        let frame = context
+            .allocate_dma_buf_with_modifier(
+                size,
+                Format::Xrgb8888,
+                modifier,
+                gbm::BufferObjectFlags::RENDERING,
+            )
+            .expect("GBM should allocate the VAAPI-compatible XRGB composition target");
+        let image = context
+            .egl()
+            .import_composition_target(&frame)
+            .expect("EGL should import the VAAPI-compatible XRGB composition target");
+        let target = context
+            .egl()
+            .create_composition_target(&image)
+            .expect("OpenGL should bind the VAAPI-compatible XRGB composition target");
+        context
+            .egl()
+            .clear_composition_target(&target)
+            .expect("OpenGL should render into the VAAPI-compatible XRGB composition target");
+        let _fence = context
+            .egl()
+            .finish_composition()
+            .expect("OpenGL should export the composition readiness fence");
+
+        println!(
+            "VAAPI input probe: format={:?}, modifier={:?}, planes={}",
+            frame.format,
+            modifier,
+            frame.planes.len()
+        );
     }
 }

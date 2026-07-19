@@ -1,0 +1,51 @@
+#!/bin/sh
+
+set -eu
+
+: "${RABBIT_KMS_SCREEN:?Set RABBIT_KMS_SCREEN to the DRM connector name}"
+
+run_seconds=${1:-5}
+case "$run_seconds" in
+    ''|*[!0-9]*)
+        printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds]' >&2
+        exit 2
+        ;;
+esac
+if [ "$run_seconds" -eq 0 ]; then
+    printf '%s\n' 'Usage: scripts/test-host-video [positive-seconds]' >&2
+    exit 2
+fi
+export RABBIT_HOST_VIDEO_TEST_SECONDS=$run_seconds
+
+tmp=$(mktemp)
+test_binary=
+
+cleanup() {
+    rm -f "$tmp"
+    if [ -n "$test_binary" ]; then
+        sudo setcap -r "$test_binary" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+cargo test --color=always --lib --no-run 2>&1 | tee "$tmp"
+
+test_binary=$(
+    sed -E 's/\x1B\[[0-9;]*[[:alpha:]]//g' "$tmp" |
+    sed -n 's/^  Executable unittests src\/lib.rs (\(.*\))$/\1/p' |
+    tail -n 1
+)
+
+if [ -z "$test_binary" ]; then
+    printf '%s\n' 'Failed to locate the Rabbit unit-test executable' >&2
+    exit 1
+fi
+
+sudo setcap cap_sys_admin+ep "$test_binary"
+
+"$test_binary" \
+    infra::platform::video_encoder::gstreamer::tests::streams_several_host_video_frames \
+    --exact \
+    --ignored \
+    --nocapture \
+    --test-threads=1

@@ -164,6 +164,13 @@ pub(crate) struct GlNv12Target<'context> {
     chroma: GlImageTarget<'context>,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct GlExportTexture<'context> {
+    owner: &'context GlContext,
+    texture: glow::Texture,
+}
+
 #[derive(Debug)]
 struct GlImageTarget<'context> {
     owner: &'context GlContext,
@@ -325,6 +332,57 @@ impl GlContext {
         let chroma = self.create_image_target(chroma_image, chroma_size, "NV12 chroma")?;
 
         Ok(GlNv12Target { luma, chroma })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_export_texture(
+        &self,
+        size: PixelSize,
+        format: drm::buffer::DrmFourcc,
+    ) -> eros::Result<GlExportTexture<'_>> {
+        let width = i32::try_from(size.width)
+            .with_context(|| "EGL export texture width exceeds OpenGL limits")?;
+        let height = i32::try_from(size.height)
+            .with_context(|| "EGL export texture height exceeds OpenGL limits")?;
+        let (internal_format, pixel_format) = match format {
+            drm::buffer::DrmFourcc::R8 => (glow::R8 as i32, glow::RED),
+            drm::buffer::DrmFourcc::Gr88 => (glow::RG8 as i32, glow::RG),
+            _ => eros::bail!("Unsupported EGL export texture format: {:?}", format),
+        };
+        let texture = match unsafe { self.api.create_texture() } {
+            Ok(texture) => texture,
+            Err(error) => eros::bail!("Failed to create EGL export texture: {}", error),
+        };
+
+        unsafe {
+            self.api.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.api.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                internal_format,
+                width,
+                height,
+                0,
+                pixel_format,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            self.api.bind_texture(glow::TEXTURE_2D, None);
+        }
+
+        let error = unsafe { self.api.get_error() };
+        if error != glow::NO_ERROR {
+            unsafe { self.api.delete_texture(texture) };
+            eros::bail!(
+                "Failed to allocate EGL export texture: GL error 0x{:04X}",
+                error
+            );
+        }
+
+        Ok(GlExportTexture {
+            owner: self,
+            texture,
+        })
     }
 
     fn create_image_target(
@@ -581,6 +639,20 @@ impl Drop for GlImageTarget<'_> {
             self.owner.api.delete_framebuffer(self.framebuffer);
             self.owner.api.delete_texture(self.texture);
         }
+    }
+}
+
+#[cfg(test)]
+impl GlExportTexture<'_> {
+    pub(crate) fn name(&self) -> u32 {
+        self.texture.0.get()
+    }
+}
+
+#[cfg(test)]
+impl Drop for GlExportTexture<'_> {
+    fn drop(&mut self) {
+        unsafe { self.owner.api.delete_texture(self.texture) };
     }
 }
 

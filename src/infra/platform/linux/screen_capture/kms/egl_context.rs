@@ -18,18 +18,22 @@ use crate::infra::platform::{
         egl_ext::{
             DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
             DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, DupNativeFenceFdAndroid,
-            ITU_REC601_EXT, ITU_REC709_EXT, ITU_REC2020_EXT, LINUX_DMA_BUF_EXT,
-            LINUX_DRM_FOURCC_EXT, NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR,
+            ExportDmaBufImageMesa, ExportDmaBufImageQueryMesa, GL_TEXTURE_2D_KHR,
+            GL_TEXTURE_LEVEL_KHR, ITU_REC601_EXT, ITU_REC709_EXT, ITU_REC2020_EXT,
+            LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT, NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR,
             SAMPLE_RANGE_HINT_EXT, SYNC_NATIVE_FENCE_ANDROID, SYNC_NATIVE_FENCE_FD_ANDROID,
             YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
         },
         gl_context::{GlCompositionTarget, GlContext, GlExternalTexture, GlNv12Target},
         types::{
-            KmsColorEncoding, KmsColorRange, KmsFramebufferPlane, KmsPlaneBlend,
+            KmsColorEncoding, KmsColorRange, KmsFramebufferPlane, KmsPixelBlendMode, KmsPlaneBlend,
             KmsPlaneCaptureError, KmsPlaneColor,
         },
     },
 };
+
+#[cfg(test)]
+use crate::infra::platform::screen_capture::kms::gl_context::GlExportTexture;
 
 pub(crate) struct EglContext {
     instance: egl::DynamicInstance<egl::EGL1_5>,
@@ -61,6 +65,16 @@ pub(crate) struct EglDmaBufImage<'context>(EglImage<'context>);
 pub(crate) struct EglNv12Image<'context> {
     luma: EglImage<'context>,
     chroma: EglImage<'context>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct EglExportedPlane {
+    pub(crate) fd: OwnedFd,
+    pub(crate) format: DrmFourcc,
+    pub(crate) stride: u32,
+    pub(crate) offset: u32,
+    pub(crate) modifier: DrmModifier,
 }
 
 impl std::fmt::Debug for EglContext {
@@ -401,12 +415,151 @@ impl EglContext {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn export_texture_plane(
+        &self,
+        size: crate::kernel::geometry::PixelSize,
+        format: DrmFourcc,
+    ) -> eros::Result<EglExportedPlane> {
+        let extensions = self
+            .instance
+            .query_string(Some(self.display), egl::EXTENSIONS)
+            .with_context(|| "Failed to query EGL display extensions for DMA-BUF export")?;
+        if !has_extension(extensions, "EGL_KHR_gl_texture_2D_image")
+            || !has_extension(extensions, "EGL_MESA_image_dma_buf_export")
+        {
+            eros::bail!("EGL does not support exporting OpenGL textures as DMA-BUF");
+        }
+
+        let texture = self.gl.create_export_texture(size, format)?;
+        let image = self.create_image_from_texture(&texture)?;
+        let result = self.export_image_plane(image.image);
+        drop(image);
+        drop(texture);
+        result
+    }
+
+    #[cfg(test)]
+    fn create_image_from_texture<'context>(
+        &'context self,
+        texture: &GlExportTexture<'_>,
+    ) -> eros::Result<EglImage<'context>> {
+        let client_buffer = unsafe {
+            egl::ClientBuffer::from_ptr(texture.name() as usize as *mut std::ffi::c_void)
+        };
+        let image = self
+            .instance
+            .create_image(
+                self.display,
+                self.context,
+                GL_TEXTURE_2D_KHR,
+                client_buffer,
+                &[GL_TEXTURE_LEVEL_KHR, 0, egl::ATTRIB_NONE],
+            )
+            .with_context(|| "Failed to create EGLImage from OpenGL texture")?;
+
+        Ok(EglImage {
+            owner: self,
+            image,
+            size: crate::kernel::geometry::PixelSize {
+                width: 0,
+                height: 0,
+            },
+        })
+    }
+
+    #[cfg(test)]
+    fn export_image_plane(&self, image: egl::Image) -> eros::Result<EglExportedPlane> {
+        let query = self
+            .instance
+            .get_proc_address("eglExportDMABUFImageQueryMESA")
+            .with_context(|| "EGL did not provide eglExportDMABUFImageQueryMESA")?;
+        let query = unsafe {
+            std::mem::transmute::<extern "system" fn(), ExportDmaBufImageQueryMesa>(query)
+        };
+        let export = self
+            .instance
+            .get_proc_address("eglExportDMABUFImageMESA")
+            .with_context(|| "EGL did not provide eglExportDMABUFImageMESA")?;
+        let export =
+            unsafe { std::mem::transmute::<extern "system" fn(), ExportDmaBufImageMesa>(export) };
+        let mut fourcc = 0;
+        let mut plane_count = 0;
+        let mut modifier = 0;
+        let queried = unsafe {
+            query(
+                self.display.as_ptr(),
+                image.as_ptr(),
+                &mut fourcc,
+                &mut plane_count,
+                &mut modifier,
+            )
+        };
+        if queried != egl::TRUE {
+            eros::bail!("Failed to query exported EGLImage DMA-BUF layout");
+        }
+        if plane_count != 1 {
+            eros::bail!(
+                "EGL texture export returned {} DMA-BUF planes instead of one",
+                plane_count
+            );
+        }
+
+        let mut fd = -1;
+        let mut stride = 0;
+        let mut offset = 0;
+        let exported = unsafe {
+            export(
+                self.display.as_ptr(),
+                image.as_ptr(),
+                &mut fd,
+                &mut stride,
+                &mut offset,
+            )
+        };
+        if exported != egl::TRUE || fd < 0 {
+            eros::bail!("Failed to export EGLImage as DMA-BUF");
+        }
+
+        Ok(EglExportedPlane {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            format: DrmFourcc::try_from(fourcc as u32)
+                .with_context(|| "EGL exported an unknown DRM fourcc")?,
+            stride: u32::try_from(stride)
+                .with_context(|| "EGL exported a negative DMA-BUF stride")?,
+            offset: u32::try_from(offset)
+                .with_context(|| "EGL exported a negative DMA-BUF offset")?,
+            modifier: DrmModifier::from(modifier),
+        })
+    }
+
     pub(crate) fn convert_to_nv12(
         &self,
         source: &GlExternalTexture<'_>,
         target: &GlNv12Target<'_>,
     ) -> eros::Result<()> {
         self.gl.convert_to_nv12(source, target)
+    }
+
+    pub(crate) fn copy_frame(
+        &self,
+        source: &GlExternalTexture<'_>,
+        target: &GlCompositionTarget<'_>,
+    ) -> eros::Result<()> {
+        const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+        self.gl.compose_plane(
+            target,
+            source,
+            &KmsCompositionTransform {
+                position: IDENTITY,
+                texture: IDENTITY,
+            },
+            KmsPlaneBlend {
+                alpha: u16::MAX,
+                pixel_mode: KmsPixelBlendMode::None,
+            },
+        )
     }
 
     pub(crate) fn create_composition_target<'context>(

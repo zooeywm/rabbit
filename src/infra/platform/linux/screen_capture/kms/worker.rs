@@ -1,5 +1,7 @@
 #[cfg(test)]
 use std::path::PathBuf;
+#[cfg(test)]
+use std::time::Instant;
 use std::{
     io,
     thread::{self, JoinHandle},
@@ -7,20 +9,31 @@ use std::{
 
 use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 
+#[cfg(not(test))]
+use crate::kernel::screen_capture::CapturedFrame;
 use crate::{
     infra::platform::{
         dma_buf::DmaBufFrame,
         gpu::GpuDevice,
         screen_capture::kms::{capture::KmsCapturer, types::KmsPlaneIssue},
     },
-    kernel::screen_capture::{CapturedFrame, ScreenCaptureSource},
+    kernel::screen_capture::ScreenCaptureSource,
 };
 
+#[cfg(not(test))]
 pub(crate) type KmsCapturedFrame = CapturedFrame<DmaBufFrame, KmsPlaneIssue>;
 
 #[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct KmsCapturedFrame {
+    pub(crate) buffer: DmaBufFrame,
+    pub(crate) issues: Vec<KmsPlaneIssue>,
+    pub(crate) probe: Option<crate::infra::platform::video_probe::HostVideoFrameProbe>,
+}
+
+#[cfg(test)]
 pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCapturedFrame {
-    CapturedFrame {
+    KmsCapturedFrame {
         buffer: DmaBufFrame {
             size,
             format: drm::buffer::DrmFourcc::Xrgb8888,
@@ -29,6 +42,7 @@ pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCa
             readiness_fence: None,
         },
         issues: Vec::new(),
+        probe: None,
     }
 }
 
@@ -153,13 +167,36 @@ fn run_capture_loop(
         return;
     }
 
+    #[cfg(test)]
+    let capture_epoch = Instant::now();
+    #[cfg(test)]
+    let mut next_frame_id = 0_u64;
+
     loop {
         match commands.try_recv() {
             Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
             Err(TryRecvError::Empty) => {}
         }
 
+        #[cfg(test)]
+        let capture_started = Instant::now();
         let frame = capturer.capture();
+        #[cfg(test)]
+        let frame = frame.map(|frame| {
+            let frame = KmsCapturedFrame {
+                buffer: frame.buffer,
+                issues: frame.issues,
+                probe: Some(
+                    crate::infra::platform::video_probe::HostVideoFrameProbe::new(
+                        next_frame_id,
+                        capture_epoch,
+                        capture_started,
+                    ),
+                ),
+            };
+            next_frame_id = next_frame_id.saturating_add(1);
+            frame
+        });
         let capture_failed = frame.is_err();
 
         if !publish_latest(&frames, &overflow_frames, frame) || capture_failed {

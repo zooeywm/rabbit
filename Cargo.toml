@@ -8,11 +8,12 @@ toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 directories = "6.0"
 eros = "0.7"
-compio = { version = "0.19", features = ["quic", "ring"] }
+compio = { version = "0.19", features = ["quic", "ring", "time"] }
 bytes = "1"
 binrw = "0.15"
 futures-core = "0.3"
 futures-channel = "0.3"
+futures-util = "0.3"
 flume = { version = "0.12", default-features = false, features = ["async", "eventual-fairness"] }
 thiserror = "2.0"
 thin-cell = "0.2"

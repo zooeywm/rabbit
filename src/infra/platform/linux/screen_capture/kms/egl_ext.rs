@@ -7,6 +7,26 @@ pub(crate) const NO_NATIVE_FENCE_FD_ANDROID: egl::Int = -1;
 pub(crate) type DupNativeFenceFdAndroid =
     unsafe extern "system" fn(egl::EGLDisplay, egl::EGLSync) -> egl::Int;
 
+// EGL_MESA_image_dma_buf_export
+pub(crate) type ExportDmaBufImageQueryMesa = unsafe extern "system" fn(
+    egl::EGLDisplay,
+    egl::EGLImage,
+    *mut egl::Int,
+    *mut egl::Int,
+    *mut u64,
+) -> egl::Boolean;
+pub(crate) type ExportDmaBufImageMesa = unsafe extern "system" fn(
+    egl::EGLDisplay,
+    egl::EGLImage,
+    *mut egl::Int,
+    *mut egl::Int,
+    *mut egl::Int,
+) -> egl::Boolean;
+
+// EGL_KHR_gl_texture_2D_image
+pub(crate) const GL_TEXTURE_2D_KHR: egl::Enum = 0x30B1;
+pub(crate) const GL_TEXTURE_LEVEL_KHR: egl::Attrib = 0x30BC;
+
 // EGL_KHR_platform_gbm and EGL_MESA_platform_gbm use the same platform token.
 pub(crate) const PLATFORM_GBM_KHR: egl::Enum = 0x31D7;
 

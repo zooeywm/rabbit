@@ -1,3 +1,8 @@
+#[cfg(test)]
+use std::{
+    cell::RefCell,
+    collections::{HashMap, VecDeque},
+};
 use std::{
     future::{Future, poll_fn},
     pin::Pin,
@@ -9,7 +14,11 @@ use eros::Context as _;
 use futures_core::Stream as _;
 use futures_util::future::{Either, select};
 use gstreamer::glib::prelude::ObjectExt as _;
-use gstreamer::prelude::{Cast as _, ElementExt as _, GstBinExtManual as _, GstObjectExt as _};
+#[cfg(test)]
+use gstreamer::prelude::PadExtManual as _;
+use gstreamer::prelude::{
+    Cast as _, ElementExt as _, GObjectExtManualGst as _, GstBinExtManual as _, GstObjectExt as _,
+};
 use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
 use crate::infra::platform::{dma_buf::DmaBufFrame, frame_pipeline::GbmFramePipelineFrame};
@@ -18,6 +27,8 @@ use crate::infra::platform::{dma_buf::DmaBufFrame, frame_pipeline::GbmFramePipel
 pub(crate) struct GStreamerVideoFrame {
     buffer: gstreamer::Buffer,
     input_caps: gstreamer::Caps,
+    #[cfg(test)]
+    probe: Option<crate::infra::platform::video_probe::HostVideoFrameProbe>,
 }
 
 impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
@@ -30,15 +41,19 @@ impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
         if frame.readiness_fence.is_some() {
             eros::bail!("GStreamer input frame still has an unresolved readiness fence");
         }
-        if frame.format != DrmFourcc::Nv12 {
+        let expected_planes = match frame.format {
+            DrmFourcc::Nv12 => 2,
+            DrmFourcc::Xrgb8888 => 1,
+            format => eros::bail!(
+                "GStreamer input frame must use NV12 or XRGB8888, got {:?}",
+                format
+            ),
+        };
+        if frame.planes.len() != expected_planes {
             eros::bail!(
-                "GStreamer input frame must use NV12, got {:?}",
-                frame.format
-            );
-        }
-        if frame.planes.len() != 2 {
-            eros::bail!(
-                "GStreamer NV12 input frame must contain 2 planes, got {}",
+                "GStreamer {:?} input frame must contain {} planes, got {}",
+                frame.format,
+                expected_planes,
                 frame.planes.len()
             );
         }
@@ -48,7 +63,10 @@ impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
 
         let modifier = frame.planes[0].modifier;
         if frame.planes.iter().any(|plane| plane.modifier != modifier) {
-            eros::bail!("GStreamer NV12 input frame planes use different DRM modifiers");
+            eros::bail!(
+                "GStreamer {:?} input frame planes use different DRM modifiers",
+                frame.format
+            );
         }
 
         let mut object_offsets = Vec::with_capacity(frame.objects.len());
@@ -92,7 +110,7 @@ impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
             );
         }
 
-        let input_caps = nv12_dmabuf_caps(frame, modifier)?;
+        let input_caps = dmabuf_caps(frame, modifier)?;
         let allocator = gstreamer_allocators::DmaBufAllocator::new();
         let mut buffer = gstreamer::Buffer::new();
         let Some(buffer_mut) = buffer.get_mut() else {
@@ -126,7 +144,22 @@ impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
 
         validate_dmabuf_buffer(&buffer)?;
 
-        Ok(Self { buffer, input_caps })
+        #[cfg(test)]
+        let probe = source.probe.clone();
+        #[cfg(test)]
+        if let Some(probe) = &probe {
+            let Some(buffer) = buffer.get_mut() else {
+                eros::bail!("New GStreamer DMA-BUF input buffer is unexpectedly shared");
+            };
+            buffer.set_pts(gstreamer::ClockTime::from_nseconds(probe.pts_ns));
+        }
+
+        Ok(Self {
+            buffer,
+            input_caps,
+            #[cfg(test)]
+            probe,
+        })
     }
 }
 
@@ -161,13 +194,17 @@ fn validate_dmabuf_buffer(buffer: &gstreamer::BufferRef) -> eros::Result<()> {
     Ok(())
 }
 
-fn nv12_dmabuf_caps(frame: &DmaBufFrame, modifier: DrmModifier) -> eros::Result<gstreamer::Caps> {
+fn dmabuf_caps(frame: &DmaBufFrame, modifier: DrmModifier) -> eros::Result<gstreamer::Caps> {
     let width = i32::try_from(frame.size.width)
         .with_context(|| "GStreamer NV12 frame width exceeds i32")?;
     let height = i32::try_from(frame.size.height)
         .with_context(|| "GStreamer NV12 frame height exceeds i32")?;
     let drm_format = if modifier == DrmModifier::Invalid {
-        String::from("NV12")
+        match frame.format {
+            DrmFourcc::Nv12 => String::from("NV12"),
+            DrmFourcc::Xrgb8888 => String::from("XR24"),
+            format => eros::bail!("Unsupported modifierless DMA-BUF format: {:?}", format),
+        }
     } else {
         gstreamer_video::dma_drm_fourcc_to_string(frame.format as u32, modifier.into()).to_string()
     };
@@ -184,10 +221,75 @@ fn nv12_dmabuf_caps(frame: &DmaBufFrame, modifier: DrmModifier) -> eros::Result<
         .build())
 }
 
+pub(crate) fn hardware_h264_encoder_for(
+    frame: &DmaBufFrame,
+) -> eros::Result<gstreamer::glib::GString> {
+    gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
+    let modifier = frame
+        .planes
+        .first()
+        .with_context(|| "NV12 DMA-BUF probe frame has no planes")?
+        .modifier;
+    let caps = dmabuf_caps(frame, modifier)?;
+    Ok(GStreamerVideoEncoder::select_hardware_h264_encoder(&caps)?.name())
+}
+
+pub(crate) fn va_vpp_input_modifier(format: DrmFourcc) -> eros::Result<DrmModifier> {
+    gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
+    let factory = gstreamer::ElementFactory::find("vapostproc")
+        .with_context(|| "GStreamer VAAPI video postprocessor is unavailable")?;
+
+    for template in factory
+        .static_pad_templates()
+        .into_iter()
+        .filter(|template| template.direction() == gstreamer::PadDirection::Sink)
+    {
+        for (structure, features) in template.caps().iter_with_features() {
+            if !features.contains("memory:DMABuf") {
+                continue;
+            }
+            let Ok(value) = structure.value("drm-format") else {
+                continue;
+            };
+            let mut candidates = Vec::new();
+            if let Ok(candidate) = value.get::<&str>() {
+                candidates.push(candidate.to_owned());
+            } else if let Ok(candidate_list) = value.get::<gstreamer::List>() {
+                candidates.extend(
+                    candidate_list
+                        .as_slice()
+                        .iter()
+                        .filter_map(|candidate| candidate.get::<&str>().ok())
+                        .map(str::to_owned),
+                );
+            }
+
+            for candidate in candidates {
+                let Ok((fourcc, modifier)) = gstreamer_video::dma_drm_fourcc_from_str(&candidate)
+                else {
+                    continue;
+                };
+                if fourcc == format as u32 {
+                    return Ok(DrmModifier::from(modifier));
+                }
+            }
+        }
+    }
+
+    eros::bail!(
+        "GStreamer VAAPI video postprocessor exposes no {:?} DMA-BUF modifier",
+        format
+    )
+}
+
 #[derive(Debug)]
 pub(crate) struct GStreamerRtpPacket {
     payload: bytes::Bytes,
     marker: bool,
+    #[cfg(test)]
+    pts_ns: Option<u64>,
+    #[cfg(test)]
+    probe: Option<crate::infra::platform::video_probe::HostVideoFrameProbe>,
 }
 
 impl TryFrom<gstreamer::Sample> for GStreamerRtpPacket {
@@ -205,6 +307,8 @@ impl TryFrom<gstreamer::Sample> for GStreamerRtpPacket {
         let Some(buffer) = sample.buffer_owned() else {
             eros::bail!("GStreamer H.264 RTP sample is missing its buffer");
         };
+        #[cfg(test)]
+        let pts_ns = buffer.pts().map(gstreamer::ClockTime::nseconds);
         let Ok(buffer) = buffer.into_mapped_buffer_readable() else {
             eros::bail!("Failed to map GStreamer H.264 RTP packet for reading");
         };
@@ -221,7 +325,14 @@ impl TryFrom<gstreamer::Sample> for GStreamerRtpPacket {
         }
         let marker = payload[1] & 0x80 != 0;
 
-        Ok(Self { payload, marker })
+        Ok(Self {
+            payload,
+            marker,
+            #[cfg(test)]
+            pts_ns,
+            #[cfg(test)]
+            probe: None,
+        })
     }
 }
 
@@ -246,6 +357,20 @@ pub(crate) struct GStreamerVideoEncoder {
     output: gstreamer_app::app_sink::AppSinkStream,
     terminal_messages: flume::Receiver<gstreamer::Message>,
     input_caps: gstreamer::Caps,
+    #[cfg(test)]
+    probes: RefCell<HashMap<u64, crate::infra::platform::video_probe::HostVideoFrameProbe>>,
+    #[cfg(test)]
+    probe_events: flume::Receiver<VideoProbeEvent>,
+    #[cfg(test)]
+    encoded_probe_order: RefCell<VecDeque<u64>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+enum VideoProbeEvent {
+    PipelineInput { pts_ns: u64 },
+    VppEntered { pts_ns: u64, at: std::time::Instant },
+    VppCompleted { pts_ns: u64, at: std::time::Instant },
 }
 
 impl GStreamerVideoEncoder {
@@ -295,10 +420,23 @@ impl GStreamerVideoEncoder {
         Ok(encoder)
     }
 
-    fn create(input_caps: &gstreamer::Caps, max_rtp_packet_size: usize) -> eros::Result<Self> {
+    fn create(input_caps: &gstreamer::CapsRef, max_rtp_packet_size: usize) -> eros::Result<Self> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
         let rtp_mtu = rtp_mtu(max_rtp_packet_size)?;
-        let factory = Self::select_hardware_h264_encoder(input_caps)?;
+        let vpp_caps = if Self::is_xrgb_dmabuf_input_caps(input_caps) {
+            Some(va_vpp_output_caps(input_caps)?)
+        } else {
+            if !Self::is_nv12_dmabuf_input_caps(input_caps) {
+                eros::bail!(
+                    "First-version H.264 encoding requires NV12 or XRGB8888 DMA-BUF input caps, got {}",
+                    input_caps
+                );
+            }
+            None
+        };
+        let encoder_caps = vpp_caps.as_deref().unwrap_or(input_caps);
+        let factory = Self::select_hardware_h264_encoder(encoder_caps)?;
+        let input_caps = input_caps.to_owned();
         let factory_name = factory.name();
         let element = factory
             .create()
@@ -310,16 +448,26 @@ impl GStreamerVideoEncoder {
                     factory_name
                 )
             })?;
+        configure_low_latency_encoder(&element);
         let source = create_required_element("appsrc", "video-input")?;
         let Ok(source) = source.downcast::<gstreamer_app::AppSrc>() else {
             eros::bail!("GStreamer appsrc factory returned an unexpected element type");
         };
-        source.set_caps(Some(input_caps));
+        source.set_caps(Some(&input_caps));
         source.set_format(gstreamer::Format::Time);
         source.set_is_live(true);
         source.set_do_timestamp(true);
         source.set_max_buffers(1);
         source.set_leaky_type(gstreamer_app::AppLeakyType::Downstream);
+
+        let vpp = if let Some(vpp_caps) = &vpp_caps {
+            let vpp = create_required_element("vapostproc", "video-postprocessor")?;
+            let filter = create_required_element("capsfilter", "video-postprocessor-output")?;
+            filter.set_property("caps", vpp_caps);
+            Some((vpp, filter))
+        } else {
+            None
+        };
 
         let parser = create_required_element("h264parse", "h264-parser")?;
         let payloader = create_required_element("rtph264pay", "rtp-payloader")?;
@@ -334,7 +482,7 @@ impl GStreamerVideoEncoder {
         let output = sink.stream();
 
         let pipeline = gstreamer::Pipeline::new();
-        let elements = [
+        let base_elements = [
             source.upcast_ref(),
             &element,
             &parser,
@@ -342,10 +490,30 @@ impl GStreamerVideoEncoder {
             sink.upcast_ref(),
         ];
         pipeline
-            .add_many(elements)
+            .add_many(base_elements)
             .with_context(|| "Failed to add H.264 encoding elements to GStreamer pipeline")?;
-        gstreamer::Element::link_many(elements)
-            .with_context(|| "Failed to link GStreamer H.264 RTP encoding pipeline")?;
+        if let Some((vpp, filter)) = &vpp {
+            pipeline
+                .add_many([vpp, filter])
+                .with_context(|| "Failed to add VAAPI VPP elements to GStreamer pipeline")?;
+            gstreamer::Element::link_many([
+                source.upcast_ref(),
+                vpp,
+                filter,
+                &element,
+                &parser,
+                &payloader,
+                sink.upcast_ref(),
+            ])
+            .with_context(|| "Failed to link VAAPI VPP H.264 RTP encoding pipeline")?;
+        } else {
+            gstreamer::Element::link_many(base_elements)
+                .with_context(|| "Failed to link GStreamer H.264 RTP encoding pipeline")?;
+        }
+        #[cfg(test)]
+        let (probe_sender, probe_events) = flume::unbounded();
+        #[cfg(test)]
+        install_video_probe(&source, vpp.as_ref().map(|(vpp, _)| vpp), probe_sender);
         let terminal_messages = terminal_messages(&pipeline)?;
 
         Ok(Self {
@@ -355,7 +523,13 @@ impl GStreamerVideoEncoder {
             sink,
             output,
             terminal_messages,
-            input_caps: input_caps.to_owned(),
+            input_caps,
+            #[cfg(test)]
+            probes: RefCell::new(HashMap::new()),
+            #[cfg(test)]
+            probe_events,
+            #[cfg(test)]
+            encoded_probe_order: RefCell::new(VecDeque::new()),
         })
     }
 
@@ -383,13 +557,19 @@ impl GStreamerVideoEncoder {
         Ok(())
     }
 
-    pub(crate) fn submit_frame(&self, frame: GStreamerVideoFrame) -> eros::Result<()> {
+    pub(crate) fn submit_frame(&self, mut frame: GStreamerVideoFrame) -> eros::Result<()> {
         if frame.input_caps() != self.input_caps.as_ref() {
             eros::bail!(
                 "GStreamer encoder input caps changed from {} to {}",
                 self.input_caps,
                 frame.input_caps()
             );
+        }
+
+        #[cfg(test)]
+        if let Some(mut probe) = frame.probe.take() {
+            probe.encoder_submitted = Some(std::time::Instant::now());
+            self.probes.borrow_mut().insert(probe.pts_ns, probe);
         }
 
         self.source
@@ -405,7 +585,21 @@ impl GStreamerVideoEncoder {
         futures_util::pin_mut!(output, terminal);
 
         match select(output, terminal).await {
-            Either::Left((Some(sample), _)) => Ok(Some(GStreamerRtpPacket::try_from(sample)?)),
+            Either::Left((Some(sample), _)) => {
+                let mut packet = GStreamerRtpPacket::try_from(sample)?;
+                #[cfg(test)]
+                {
+                    self.collect_probe_events();
+                    if packet.marker {
+                        packet.probe = self
+                            .encoded_probe_order
+                            .borrow_mut()
+                            .pop_front()
+                            .and_then(|pts_ns| self.probes.borrow_mut().remove(&pts_ns));
+                    }
+                }
+                Ok(Some(packet))
+            }
             Either::Left((None, _)) => Ok(None),
             Either::Right((Ok(message), _)) => {
                 terminal_message_result(&message)?;
@@ -413,6 +607,29 @@ impl GStreamerVideoEncoder {
             }
             Either::Right((Err(_), _)) => {
                 eros::bail!("GStreamer H.264 terminal message channel disconnected")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn collect_probe_events(&self) {
+        while let Ok(event) = self.probe_events.try_recv() {
+            match event {
+                VideoProbeEvent::PipelineInput { pts_ns } => {
+                    if self.probes.borrow().contains_key(&pts_ns) {
+                        self.encoded_probe_order.borrow_mut().push_back(pts_ns);
+                    }
+                }
+                VideoProbeEvent::VppEntered { pts_ns, at } => {
+                    if let Some(probe) = self.probes.borrow_mut().get_mut(&pts_ns) {
+                        probe.vpp_entered = Some(at);
+                    }
+                }
+                VideoProbeEvent::VppCompleted { pts_ns, at } => {
+                    if let Some(probe) = self.probes.borrow_mut().get_mut(&pts_ns) {
+                        probe.vpp_completed = Some(at);
+                    }
+                }
             }
         }
     }
@@ -450,13 +667,6 @@ impl GStreamerVideoEncoder {
     fn select_hardware_h264_encoder(
         input_caps: &gstreamer::CapsRef,
     ) -> eros::Result<gstreamer::ElementFactory> {
-        if !Self::is_nv12_dmabuf_input_caps(input_caps) {
-            eros::bail!(
-                "First-version H.264 encoding requires NV12 DMA-BUF input caps, got {}",
-                input_caps
-            );
-        }
-
         let factory = Self::find_hardware_h264_encoders()?
             .into_iter()
             .find(|factory| factory.can_sink_all_caps(input_caps));
@@ -487,6 +697,24 @@ impl GStreamerVideoEncoder {
             && structure
                 .get::<&str>("drm-format")
                 .is_ok_and(|format| format == "NV12" || format.starts_with("NV12:"))
+    }
+
+    fn is_xrgb_dmabuf_input_caps(caps: &gstreamer::CapsRef) -> bool {
+        if caps.size() != 1 || !caps.is_fixed() {
+            return false;
+        }
+
+        let Some((structure, features)) = caps.iter_with_features().next() else {
+            return false;
+        };
+
+        features.contains("memory:DMABuf")
+            && structure
+                .get::<&str>("format")
+                .is_ok_and(|format| format == "DMA_DRM")
+            && structure
+                .get::<&str>("drm-format")
+                .is_ok_and(|format| format == "XR24" || format.starts_with("XR24:"))
     }
 
     async fn drive<Frames, SendPacket, SendFuture>(
@@ -617,6 +845,100 @@ fn create_required_element(factory: &str, name: &str) -> eros::Result<gstreamer:
         .with_context(|| format!("Failed to create required GStreamer element {factory}"))?)
 }
 
+fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gstreamer::Caps> {
+    let structure = input
+        .structure(0)
+        .with_context(|| "VAAPI VPP input caps are empty")?;
+    let width = structure
+        .get::<i32>("width")
+        .with_context(|| "VAAPI VPP input caps do not contain a fixed width")?;
+    let height = structure
+        .get::<i32>("height")
+        .with_context(|| "VAAPI VPP input caps do not contain a fixed height")?;
+    let framerate = structure
+        .get::<gstreamer::Fraction>("framerate")
+        .with_context(|| "VAAPI VPP input caps do not contain a fixed framerate")?;
+
+    Ok(gstreamer::Caps::builder("video/x-raw")
+        .features(["memory:VAMemory"])
+        .field("format", "NV12")
+        .field("width", width)
+        .field("height", height)
+        .field("framerate", framerate)
+        .build())
+}
+
+fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
+    let is_vaapi = encoder
+        .factory()
+        .is_some_and(|factory| factory.name().starts_with("va"));
+    if !is_vaapi {
+        return;
+    }
+
+    encoder.set_property("b-frames", 0_u32);
+    encoder.set_property("ref-frames", 1_u32);
+    encoder.set_property("target-usage", 7_u32);
+    encoder.set_property_from_str("rate-control", "cqp");
+}
+
+#[cfg(test)]
+fn install_video_probe(
+    source: &gstreamer_app::AppSrc,
+    vpp: Option<&gstreamer::Element>,
+    events: flume::Sender<VideoProbeEvent>,
+) {
+    let pipeline_events = events.clone();
+    source
+        .static_pad("src")
+        .expect("GStreamer appsrc should expose a source pad")
+        .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            if let Some(pts_ns) = info
+                .buffer()
+                .and_then(|buffer| buffer.pts())
+                .map(gstreamer::ClockTime::nseconds)
+            {
+                let _ = pipeline_events.send(VideoProbeEvent::PipelineInput { pts_ns });
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+
+    let Some(vpp) = vpp else {
+        return;
+    };
+    let entered_events = events.clone();
+    vpp.static_pad("sink")
+        .expect("GStreamer VAAPI VPP should expose a sink pad")
+        .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            if let Some(pts_ns) = info
+                .buffer()
+                .and_then(|buffer| buffer.pts())
+                .map(gstreamer::ClockTime::nseconds)
+            {
+                let _ = entered_events.send(VideoProbeEvent::VppEntered {
+                    pts_ns,
+                    at: std::time::Instant::now(),
+                });
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+    vpp.static_pad("src")
+        .expect("GStreamer VAAPI VPP should expose a source pad")
+        .add_probe(gstreamer::PadProbeType::BUFFER, move |_, info| {
+            if let Some(pts_ns) = info
+                .buffer()
+                .and_then(|buffer| buffer.pts())
+                .map(gstreamer::ClockTime::nseconds)
+            {
+                let _ = events.send(VideoProbeEvent::VppCompleted {
+                    pts_ns,
+                    at: std::time::Instant::now(),
+                });
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+}
+
 fn h264_rtp_caps() -> gstreamer::Caps {
     gstreamer::Caps::builder("application/x-rtp")
         .field("media", "video")
@@ -637,21 +959,449 @@ fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, os::fd::OwnedFd, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::HashMap,
+        fs::File,
+        future::{Future, ready},
+        os::fd::OwnedFd,
+        path::PathBuf,
+        pin::Pin,
+        rc::Rc,
+        sync::{Arc, Mutex},
+        task::{Context, Poll},
+        time::{Duration, Instant},
+    };
 
+    use compio::runtime::fd::PollFd;
     use drm::buffer::{DrmFourcc, DrmModifier};
-    use gstreamer::glib::prelude::ObjectExt as _;
-    use gstreamer::prelude::{ElementExt as _, GstBinExt as _};
+    use gstreamer::glib::prelude::{Cast as _, ObjectExt as _};
+    use gstreamer::prelude::{
+        ElementExt as _, GObjectExtManualGst as _, GstBinExt as _, GstBinExtManual as _,
+        PadExtManual as _,
+    };
+    use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
+    use tracing_subscriber::{
+        filter::{LevelFilter, Targets},
+        layer::SubscriberExt as _,
+        util::SubscriberInitExt as _,
+    };
 
     use crate::{
         infra::platform::{
             GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
+            GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
+            KmsScreenCaptureManagerState,
             dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
             frame_pipeline::GbmFramePipelineFrame,
-            video_encoder::gstreamer::{h264_rtp_caps, validate_dmabuf_buffer},
+            gpu::{GpuContext, GpuDevice},
+            screen_capture::{KmsCaptureLease, KmsFrameReceiver},
+            video_encoder::gstreamer::{
+                create_required_element, h264_rtp_caps, va_vpp_input_modifier,
+                validate_dmabuf_buffer,
+            },
+            video_probe::HostVideoFrameProbe,
         },
-        kernel::geometry::PixelSize,
+        kernel::{
+            frame_pipeline::{FramePipelineManager, FramePipelineParameters},
+            geometry::PixelSize,
+            screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
+            screen_manager::{
+                Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
+            },
+        },
     };
+
+    struct HostVideoTestDeps {
+        capture: KmsScreenCaptureManagerState,
+        pipeline: GbmFramePipelineManagerState,
+        screens: Vec<Screen>,
+    }
+
+    #[derive(Debug, Default)]
+    struct VaVppProbe {
+        submitted: Option<Instant>,
+        vpp_entered: Option<Instant>,
+        vpp_completed: Option<Instant>,
+    }
+
+    struct TimedFrames<Frames> {
+        frames: Frames,
+        duration: Duration,
+        deadline: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    }
+
+    #[derive(Default)]
+    struct HostVideoStageTotals {
+        capture: Duration,
+        capture_queue: Duration,
+        gpu_process: Duration,
+        gpu_fence: Duration,
+        encoder_queue: Duration,
+        vpp_queue: Duration,
+        vpp: Duration,
+        encode: Duration,
+        total: Duration,
+    }
+
+    struct HostVideoTimings {
+        capture: Duration,
+        capture_queue: Duration,
+        gpu_process: Duration,
+        gpu_fence: Duration,
+        encoder_queue: Duration,
+        vpp_queue: Duration,
+        vpp: Duration,
+        encode: Duration,
+        total: Duration,
+    }
+
+    #[derive(Default)]
+    struct RtpFrameStats {
+        packets: u64,
+        bytes: u64,
+    }
+
+    struct HostVideoMetrics {
+        window_started: Instant,
+        window_frames: u64,
+        window_packets: u64,
+        window_bytes: u64,
+        window_totals: HostVideoStageTotals,
+        total_frames: u64,
+        total_packets: u64,
+        pending_rtp_frames: HashMap<u64, RtpFrameStats>,
+    }
+
+    impl<Frames> TimedFrames<Frames> {
+        fn new(frames: Frames, duration: Duration) -> Self {
+            Self {
+                frames,
+                duration,
+                deadline: None,
+            }
+        }
+    }
+
+    impl<Frames> futures_core::Stream for TimedFrames<Frames>
+    where
+        Frames: futures_core::Stream + Unpin,
+    {
+        type Item = Frames::Item;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            if let Some(deadline) = &mut self.deadline
+                && deadline.as_mut().poll(context).is_ready()
+            {
+                return Poll::Ready(None);
+            }
+
+            let frame = Pin::new(&mut self.frames).poll_next(context);
+            if self.deadline.is_none() && matches!(frame, Poll::Ready(Some(_))) {
+                self.deadline = Some(Box::pin(compio::time::sleep(self.duration)));
+            }
+
+            frame
+        }
+    }
+
+    impl HostVideoTimings {
+        fn from_probe(probe: &HostVideoFrameProbe, encoded: Instant) -> Self {
+            let gpu_received = probe
+                .gpu_received
+                .expect("GPU worker should timestamp the received source frame");
+            let gpu_submitted = probe
+                .gpu_submitted
+                .expect("GPU worker should timestamp the submitted pipeline frame");
+            let pipeline_ready = probe
+                .pipeline_ready
+                .expect("Frame pipeline should timestamp its completed fence");
+            let encoder_submitted = probe
+                .encoder_submitted
+                .expect("GStreamer should timestamp its submitted input frame");
+            let (vpp_queue, vpp, encode_started) = match probe.vpp_entered {
+                Some(vpp_entered) => {
+                    let vpp_completed = probe
+                        .vpp_completed
+                        .expect("VAAPI VPP should timestamp its completed output frame");
+                    (
+                        elapsed(encoder_submitted, vpp_entered),
+                        elapsed(vpp_entered, vpp_completed),
+                        vpp_completed,
+                    )
+                }
+                None => (Duration::ZERO, Duration::ZERO, encoder_submitted),
+            };
+
+            Self {
+                capture: elapsed(probe.capture_started, probe.capture_completed),
+                capture_queue: elapsed(probe.capture_completed, gpu_received),
+                gpu_process: elapsed(gpu_received, gpu_submitted),
+                gpu_fence: elapsed(gpu_submitted, pipeline_ready),
+                encoder_queue: elapsed(pipeline_ready, encoder_submitted),
+                vpp_queue,
+                vpp,
+                encode: elapsed(encode_started, encoded),
+                total: elapsed(probe.capture_started, encoded),
+            }
+        }
+    }
+
+    impl HostVideoStageTotals {
+        fn add(&mut self, timings: &HostVideoTimings) {
+            self.capture += timings.capture;
+            self.capture_queue += timings.capture_queue;
+            self.gpu_process += timings.gpu_process;
+            self.gpu_fence += timings.gpu_fence;
+            self.encoder_queue += timings.encoder_queue;
+            self.vpp_queue += timings.vpp_queue;
+            self.vpp += timings.vpp;
+            self.encode += timings.encode;
+            self.total += timings.total;
+        }
+    }
+
+    impl HostVideoMetrics {
+        fn new() -> Self {
+            Self {
+                window_started: Instant::now(),
+                window_frames: 0,
+                window_packets: 0,
+                window_bytes: 0,
+                window_totals: HostVideoStageTotals::default(),
+                total_frames: 0,
+                total_packets: 0,
+                pending_rtp_frames: HashMap::new(),
+            }
+        }
+
+        fn record_packet(&mut self, mut packet: GStreamerRtpPacket, max_packet_size: usize) {
+            assert!(
+                packet.payload.len() <= max_packet_size,
+                "Encoded RTP packet should respect the transport packet size"
+            );
+            let pts_ns = packet
+                .pts_ns
+                .expect("Encoded RTP packet should retain its input PTS");
+            let stats = self.pending_rtp_frames.entry(pts_ns).or_default();
+            stats.packets += 1;
+            stats.bytes +=
+                u64::try_from(packet.payload.len()).expect("RTP packet length should fit into u64");
+            self.total_packets += 1;
+
+            if !packet.is_frame_end() {
+                return;
+            }
+
+            let probe = packet
+                .probe
+                .take()
+                .expect("Completed RTP frame should match an input frame by PTS");
+            let stats = self
+                .pending_rtp_frames
+                .remove(&pts_ns)
+                .expect("Completed RTP frame should retain its packet statistics");
+            let timings = HostVideoTimings::from_probe(&probe, Instant::now());
+
+            tracing::trace!(
+                target: "rabbit::host_video_probe",
+                frame_id = probe.frame_id,
+                pts_ns,
+                capture_ms = duration_ms(timings.capture),
+                capture_queue_ms = duration_ms(timings.capture_queue),
+                gpu_process_ms = duration_ms(timings.gpu_process),
+                gpu_fence_ms = duration_ms(timings.gpu_fence),
+                encoder_queue_ms = duration_ms(timings.encoder_queue),
+                vpp_queue_ms = duration_ms(timings.vpp_queue),
+                vpp_ms = duration_ms(timings.vpp),
+                encode_ms = duration_ms(timings.encode),
+                total_ms = duration_ms(timings.total),
+                rtp_packets = stats.packets,
+                rtp_bytes = stats.bytes,
+                "Host video frame encoded"
+            );
+
+            self.window_frames += 1;
+            self.window_packets += stats.packets;
+            self.window_bytes += stats.bytes;
+            self.window_totals.add(&timings);
+            self.total_frames += 1;
+        }
+
+        fn report_window(&mut self, partial: bool) {
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.window_started);
+            if partial && self.window_frames == 0 {
+                return;
+            }
+
+            let frames = self.window_frames;
+            let fps = frames as f64 / elapsed.as_secs_f64();
+            tracing::debug!(
+                target: "rabbit::host_video_probe",
+                partial,
+                window_ms = duration_ms(elapsed),
+                frames,
+                fps,
+                avg_frame_ms = average_ms(self.window_totals.total, frames),
+                avg_capture_ms = average_ms(self.window_totals.capture, frames),
+                avg_capture_queue_ms = average_ms(self.window_totals.capture_queue, frames),
+                avg_gpu_process_ms = average_ms(self.window_totals.gpu_process, frames),
+                avg_gpu_fence_ms = average_ms(self.window_totals.gpu_fence, frames),
+                avg_encoder_queue_ms = average_ms(self.window_totals.encoder_queue, frames),
+                avg_vpp_queue_ms = average_ms(self.window_totals.vpp_queue, frames),
+                avg_vpp_ms = average_ms(self.window_totals.vpp, frames),
+                avg_encode_ms = average_ms(self.window_totals.encode, frames),
+                rtp_packets = self.window_packets,
+                rtp_bytes = self.window_bytes,
+                "Host video throughput window"
+            );
+
+            self.window_started = now;
+            self.window_frames = 0;
+            self.window_packets = 0;
+            self.window_bytes = 0;
+            self.window_totals = HostVideoStageTotals::default();
+        }
+    }
+
+    impl AsRef<KmsScreenCaptureManagerState> for HostVideoTestDeps {
+        fn as_ref(&self) -> &KmsScreenCaptureManagerState {
+            &self.capture
+        }
+    }
+
+    impl AsMut<KmsScreenCaptureManagerState> for HostVideoTestDeps {
+        fn as_mut(&mut self) -> &mut KmsScreenCaptureManagerState {
+            &mut self.capture
+        }
+    }
+
+    impl AsRef<GbmFramePipelineManagerState> for HostVideoTestDeps {
+        fn as_ref(&self) -> &GbmFramePipelineManagerState {
+            &self.pipeline
+        }
+    }
+
+    impl AsMut<GbmFramePipelineManagerState> for HostVideoTestDeps {
+        fn as_mut(&mut self) -> &mut GbmFramePipelineManagerState {
+            &mut self.pipeline
+        }
+    }
+
+    impl ScreenLayoutManager for HostVideoTestDeps {
+        fn refresh(&mut self) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn screens(&self) -> &[Screen] {
+            &self.screens
+        }
+
+        fn screen(&self, id: &ScreenId) -> Option<&Screen> {
+            self.screens.iter().find(|screen| screen.id == *id)
+        }
+
+        fn primary_screen(&self) -> eros::Result<&Screen> {
+            Ok(self
+                .screens
+                .first()
+                .expect("Host video smoke test should contain one screen"))
+        }
+    }
+
+    impl ScreenCaptureManager for HostVideoTestDeps {
+        type Lease = KmsCaptureLease;
+        type Receiver = KmsFrameReceiver;
+
+        fn acquire(
+            &mut self,
+            screen_id: &ScreenId,
+        ) -> eros::Result<ScreenCaptureSource<Self::Lease, Self::Receiver>> {
+            KmsScreenCaptureManager::inj_ref_mut(self).acquire(screen_id)
+        }
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-host-video"]
+    fn streams_several_host_video_frames() {
+        const REQUIRED_ENCODED_FRAMES: u64 = 3;
+        const MAX_RTP_PACKET_SIZE: usize = 1_200;
+        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+        init_host_video_tracing();
+        let screen_name = std::env::var("RABBIT_KMS_SCREEN")
+            .expect("RABBIT_KMS_SCREEN should name the DRM connector to capture");
+        let run_seconds = std::env::var("RABBIT_HOST_VIDEO_TEST_SECONDS")
+            .expect("RABBIT_HOST_VIDEO_TEST_SECONDS should specify the run duration")
+            .parse::<u64>()
+            .expect("RABBIT_HOST_VIDEO_TEST_SECONDS should be a positive integer");
+        assert!(
+            run_seconds > 0,
+            "Host video test duration should be positive"
+        );
+        let run_duration = Duration::from_secs(run_seconds);
+        let test_timeout = run_duration
+            .checked_add(SHUTDOWN_TIMEOUT)
+            .expect("Host video test timeout should fit Duration");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+        let metrics = Rc::new(RefCell::new(HostVideoMetrics::new()));
+        let metrics_for_callback = Rc::clone(&metrics);
+
+        runtime.block_on(async {
+            let mut deps = HostVideoTestDeps {
+                capture: KmsScreenCaptureManagerState::new(),
+                pipeline: GbmFramePipelineManagerState::new(),
+                screens: vec![host_video_test_screen(screen_name)],
+            };
+            let frames = GbmFramePipelineManager::inj_ref_mut(&mut deps)
+                .subscribe(
+                    &ScreenId(0),
+                    FramePipelineParameters {
+                        frame_size: PixelSize {
+                            width: 1280,
+                            height: 720,
+                        },
+                    },
+                )
+                .expect("Host video frame pipeline should start");
+            let frames = TimedFrames::new(frames, run_duration);
+            let metrics_for_reporter = Rc::clone(&metrics);
+            let reporter = compio::runtime::spawn(async move {
+                loop {
+                    compio::time::sleep(Duration::from_secs(1)).await;
+                    metrics_for_reporter.borrow_mut().report_window(false);
+                }
+            });
+            let encoding = GStreamerVideoEncoder::run(frames, MAX_RTP_PACKET_SIZE, move |packet| {
+                metrics_for_callback
+                    .borrow_mut()
+                    .record_packet(packet, MAX_RTP_PACKET_SIZE);
+
+                ready(Ok::<(), eros::ErrorUnion>(()))
+            });
+
+            let result = compio::time::timeout(test_timeout, encoding).await;
+            drop(reporter);
+            metrics.borrow_mut().report_window(true);
+            result
+                .expect("Host video smoke test should finish within its shutdown timeout")
+                .expect("Host video chain should encode H.264 RTP frames");
+        });
+
+        assert!(
+            metrics.borrow().total_frames >= REQUIRED_ENCODED_FRAMES,
+            "Host video chain should encode at least {REQUIRED_ENCODED_FRAMES} frames, got {}",
+            metrics.borrow().total_frames
+        );
+        assert!(
+            metrics.borrow().total_packets > 0,
+            "Host video chain should produce RTP packets"
+        );
+    }
 
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
@@ -964,6 +1714,276 @@ mod tests {
             .expect_err("A non-H.264 RTP sample should be rejected");
     }
 
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn vaapi_vpp_encodes_an_xrgb_dmabuf_with_latency_probe() {
+        const FRAME_COUNT: u64 = 8;
+        const FRAME_INTERVAL_NS: u64 = 16_666_667;
+        const OUTPUT_TIMEOUT: gstreamer::ClockTime = gstreamer::ClockTime::from_seconds(5);
+
+        gstreamer::init().expect("GStreamer should initialize");
+        let render_node = std::env::var_os("RABBIT_GPU_RENDER_NODE")
+            .expect("RABBIT_GPU_RENDER_NODE should name the render node under test");
+        let context = GpuContext::new(&GpuDevice::from(PathBuf::from(render_node)))
+            .expect("GPU context should initialize");
+        let size = PixelSize {
+            width: 1280,
+            height: 720,
+        };
+        let modifier = va_vpp_input_modifier(DrmFourcc::Xrgb8888)
+            .expect("VAAPI VPP should advertise an XRGB DMA-BUF modifier");
+        let frame = context
+            .allocate_dma_buf_with_modifier(
+                size,
+                DrmFourcc::Xrgb8888,
+                modifier,
+                gbm::BufferObjectFlags::RENDERING,
+            )
+            .expect("GBM should allocate a VAAPI-compatible XRGB DMA-BUF");
+        let image = context
+            .egl()
+            .import_composition_target(&frame)
+            .expect("EGL should import the XRGB DMA-BUF");
+        let target = context
+            .egl()
+            .create_composition_target(&image)
+            .expect("OpenGL should bind the XRGB DMA-BUF");
+        context
+            .egl()
+            .clear_composition_target(&target)
+            .expect("OpenGL should render the test frame");
+        let fence = context
+            .egl()
+            .finish_composition()
+            .expect("OpenGL should export a readiness fence");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+        runtime.block_on(async {
+            let fence = PollFd::new(fence).expect("Readiness fence should register");
+            fence
+                .read_ready()
+                .await
+                .expect("Test frame should become ready");
+        });
+
+        let (pipeline, source, vpp, sink) = vaapi_vpp_test_pipeline(&frame);
+        let probe = Arc::new(Mutex::new(VaVppProbe::default()));
+        install_vpp_probe(&vpp, Arc::clone(&probe));
+        pipeline
+            .set_state(gstreamer::State::Playing)
+            .expect("VAAPI VPP test pipeline should start");
+        let mut warm_vpp = Duration::ZERO;
+        let mut warm_encode = Duration::ZERO;
+        let mut warm_total = Duration::ZERO;
+
+        for frame_index in 0..FRAME_COUNT {
+            let pts = gstreamer::ClockTime::from_nseconds(frame_index * FRAME_INTERVAL_NS);
+            let mut buffer = xrgb_dmabuf_buffer(&frame);
+            buffer
+                .get_mut()
+                .expect("New XRGB test buffer should be writable")
+                .set_pts(pts);
+            {
+                let mut probe = probe.lock().expect("VPP probe lock should remain usable");
+                probe.submitted = Some(Instant::now());
+                probe.vpp_entered = None;
+                probe.vpp_completed = None;
+            }
+            source
+                .push_buffer(buffer)
+                .expect("VAAPI VPP appsrc should accept the XRGB DMA-BUF");
+            let sample = sink
+                .try_pull_sample(OUTPUT_TIMEOUT)
+                .expect("VAAPI VPP and H.264 encoder should produce output");
+            let encoded = Instant::now();
+            sample
+                .buffer()
+                .expect("Encoded sample should contain a buffer")
+                .pts()
+                .expect("Encoded output should carry a PTS");
+            let probe = probe.lock().expect("VPP probe lock should remain usable");
+            let submitted = probe
+                .submitted
+                .expect("VPP submission should be timestamped");
+            let entered = probe
+                .vpp_entered
+                .expect("VPP input pad should observe the frame");
+            let completed = probe
+                .vpp_completed
+                .expect("VPP output pad should observe the converted frame");
+            let submit_to_vpp = elapsed(submitted, entered);
+            let vpp = elapsed(entered, completed);
+            let encode = elapsed(completed, encoded);
+            let total = elapsed(submitted, encoded);
+            println!(
+                "VAAPI frame {frame_index}: cold={}, submit_to_vpp_ms={:.3}, vpp_ms={:.3}, encode_ms={:.3}, total_ms={:.3}",
+                frame_index == 0,
+                duration_ms(submit_to_vpp),
+                duration_ms(vpp),
+                duration_ms(encode),
+                duration_ms(total),
+            );
+            if frame_index > 0 {
+                warm_vpp += vpp;
+                warm_encode += encode;
+                warm_total += total;
+            }
+        }
+
+        pipeline
+            .set_state(gstreamer::State::Null)
+            .expect("VAAPI VPP test pipeline should stop");
+        let warm_frames = FRAME_COUNT - 1;
+        println!(
+            "VAAPI warm average: frames={warm_frames}, vpp_ms={:.3}, encode_ms={:.3}, total_ms={:.3}",
+            average_ms(warm_vpp, warm_frames),
+            average_ms(warm_encode, warm_frames),
+            average_ms(warm_total, warm_frames),
+        );
+    }
+
+    fn vaapi_vpp_test_pipeline(
+        frame: &DmaBufFrame,
+    ) -> (
+        gstreamer::Pipeline,
+        gstreamer_app::AppSrc,
+        gstreamer::Element,
+        gstreamer_app::AppSink,
+    ) {
+        let source = create_required_element("appsrc", "vaapi-test-input")
+            .expect("GStreamer appsrc should be available")
+            .downcast::<gstreamer_app::AppSrc>()
+            .expect("appsrc factory should return AppSrc");
+        source.set_caps(Some(&xrgb_dmabuf_caps(frame)));
+        source.set_format(gstreamer::Format::Time);
+        source.set_is_live(true);
+        source.set_max_buffers(1);
+        source.set_leaky_type(gstreamer_app::AppLeakyType::Downstream);
+
+        let vpp = create_required_element("vapostproc", "vaapi-test-vpp")
+            .expect("GStreamer VAAPI VPP should be available");
+        let output_caps = gstreamer::Caps::builder("video/x-raw")
+            .features(["memory:VAMemory"])
+            .field("format", "NV12")
+            .field(
+                "width",
+                i32::try_from(frame.size.width).expect("Test width should fit i32"),
+            )
+            .field(
+                "height",
+                i32::try_from(frame.size.height).expect("Test height should fit i32"),
+            )
+            .field("framerate", gstreamer::Fraction::new(0, 1))
+            .build();
+        let filter = create_required_element("capsfilter", "vaapi-test-output-caps")
+            .expect("GStreamer capsfilter should be available");
+        filter.set_property("caps", &output_caps);
+        let encoder = create_required_element("vah264enc", "vaapi-test-encoder")
+            .expect("GStreamer VAAPI H.264 encoder should be available");
+        encoder.set_property("b-frames", 0_u32);
+        encoder.set_property("ref-frames", 1_u32);
+        encoder.set_property("target-usage", 7_u32);
+        encoder.set_property_from_str("rate-control", "cqp");
+        let sink = create_required_element("appsink", "vaapi-test-output")
+            .expect("GStreamer appsink should be available")
+            .downcast::<gstreamer_app::AppSink>()
+            .expect("appsink factory should return AppSink");
+        sink.set_caps(Some(&gstreamer::Caps::builder("video/x-h264").build()));
+        sink.set_sync(false);
+        sink.set_async(false);
+
+        let pipeline = gstreamer::Pipeline::new();
+        let elements = [
+            source.upcast_ref(),
+            &vpp,
+            &filter,
+            &encoder,
+            sink.upcast_ref(),
+        ];
+        pipeline
+            .add_many(elements)
+            .expect("VAAPI VPP test elements should join one pipeline");
+        gstreamer::Element::link_many(elements).expect("VAAPI VPP test pipeline should negotiate");
+
+        (pipeline, source, vpp, sink)
+    }
+
+    fn install_vpp_probe(vpp: &gstreamer::Element, probe: Arc<Mutex<VaVppProbe>>) {
+        let input_probe = Arc::clone(&probe);
+        vpp.static_pad("sink")
+            .expect("VAAPI VPP should expose a sink pad")
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+                let mut probe = input_probe
+                    .lock()
+                    .expect("VPP input probe lock should remain usable");
+                probe.vpp_entered.get_or_insert_with(Instant::now);
+                gstreamer::PadProbeReturn::Ok
+            });
+        vpp.static_pad("src")
+            .expect("VAAPI VPP should expose a source pad")
+            .add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+                let mut probe = probe
+                    .lock()
+                    .expect("VPP output probe lock should remain usable");
+                probe.vpp_completed.get_or_insert_with(Instant::now);
+                gstreamer::PadProbeReturn::Ok
+            });
+    }
+
+    fn xrgb_dmabuf_caps(frame: &DmaBufFrame) -> gstreamer::Caps {
+        let modifier: u64 = frame.planes[0].modifier.into();
+        let drm_format = gstreamer_video::dma_drm_fourcc_to_string(frame.format as u32, modifier);
+
+        gstreamer::Caps::builder("video/x-raw")
+            .features(["memory:DMABuf"])
+            .field("format", "DMA_DRM")
+            .field("drm-format", drm_format)
+            .field(
+                "width",
+                i32::try_from(frame.size.width).expect("Test width should fit i32"),
+            )
+            .field(
+                "height",
+                i32::try_from(frame.size.height).expect("Test height should fit i32"),
+            )
+            .field("framerate", gstreamer::Fraction::new(0, 1))
+            .build()
+    }
+
+    fn xrgb_dmabuf_buffer(frame: &DmaBufFrame) -> gstreamer::Buffer {
+        assert_eq!(frame.objects.len(), 1);
+        assert_eq!(frame.planes.len(), 1);
+        let object = &frame.objects[0];
+        let plane = frame.planes[0];
+        let allocator = gstreamer_allocators::DmaBufAllocator::new();
+        let memory = unsafe {
+            allocator.alloc_dmabuf(
+                object
+                    .fd
+                    .try_clone()
+                    .expect("Test DMA-BUF fd should duplicate"),
+                object.size,
+            )
+        }
+        .expect("GStreamer should wrap the XRGB DMA-BUF");
+        let mut buffer = gstreamer::Buffer::new();
+        let buffer_mut = buffer
+            .get_mut()
+            .expect("New XRGB test buffer should be writable");
+        buffer_mut.append_memory(memory);
+        gstreamer_video::VideoMeta::add_full(
+            buffer_mut,
+            gstreamer_video::VideoFrameFlags::empty(),
+            gstreamer_video::VideoFormat::DmaDrm,
+            frame.size.width,
+            frame.size.height,
+            &[usize::try_from(plane.offset).expect("Test offset should fit usize")],
+            &[i32::try_from(plane.stride).expect("Test stride should fit i32")],
+        )
+        .expect("GStreamer should attach XRGB DMA-BUF VideoMeta");
+
+        buffer
+    }
+
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
         GStreamerVideoEncoder::find_hardware_h264_encoders()
             .expect("At least one hardware H.264 encoder should be registered")
@@ -986,6 +2006,57 @@ mod tests {
                     .find(|caps| GStreamerVideoEncoder::is_nv12_dmabuf_input_caps(caps))
             })
             .expect("A hardware H.264 encoder should advertise NV12 DMA-BUF input caps")
+    }
+
+    fn init_host_video_tracing() {
+        let targets = Targets::new()
+            .with_default(LevelFilter::WARN)
+            .with_target("rabbit::host_video_probe", LevelFilter::TRACE)
+            .with_target("rabbit::frame_pipeline", LevelFilter::DEBUG);
+
+        tracing_subscriber::registry()
+            .with(targets)
+            .with(tracing_subscriber::fmt::layer().with_test_writer())
+            .try_init()
+            .expect("Host video smoke test should install its tracing subscriber");
+    }
+
+    fn elapsed(start: Instant, end: Instant) -> Duration {
+        end.checked_duration_since(start)
+            .expect("Host video probe timestamps should be monotonic")
+    }
+
+    fn duration_ms(duration: Duration) -> f64 {
+        duration.as_secs_f64() * 1_000.0
+    }
+
+    fn average_ms(total: Duration, count: u64) -> f64 {
+        if count == 0 {
+            return 0.0;
+        }
+
+        duration_ms(total) / count as f64
+    }
+
+    fn host_video_test_screen(name: String) -> Screen {
+        Screen {
+            id: ScreenId(0),
+            name,
+            resolution: PixelSize {
+                width: 1280,
+                height: 720,
+            },
+            layout: ScreenLayout {
+                rect: ScreenRect {
+                    x: 0,
+                    y: 0,
+                    width: 1280,
+                    height: 720,
+                },
+                scale: 1.0,
+                transform: ScreenTransform::Normal,
+            },
+        }
     }
 
     fn h264_caps() -> gstreamer::Caps {
@@ -1027,6 +2098,7 @@ mod tests {
                 ],
                 readiness_fence: None,
             },
+            probe: None,
         });
 
         GStreamerVideoFrame::try_from(frame)

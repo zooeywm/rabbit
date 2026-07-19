@@ -6,13 +6,14 @@ use std::{
 
 use eros::Context;
 use flume::{Receiver, RecvError, Selector, Sender, bounded, unbounded};
-use gbm::{BufferObjectFlags, Format};
+use gbm::{Format, Modifier};
 
 use crate::{
     infra::platform::{
         frame_pipeline::GbmFramePipelineFrame,
-        gpu::{GpuContext, GpuDevice},
+        gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
         screen_capture::{EglDmaBufImage, KmsCapturedFrame, KmsFrameReceiver},
+        video_encoder::{hardware_h264_encoder_for, va_vpp_input_modifier},
     },
     kernel::{frame_pipeline::FramePipelineParameters, screen_manager::ScreenId},
 };
@@ -74,6 +75,13 @@ struct GpuPipeline {
     screen_id: ScreenId,
     parameters: FramePipelineParameters,
     outputs: LatestSender<eros::Result<GbmFramePipelineFrame>>,
+    output_strategy: Option<FrameOutputStrategy>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FrameOutputStrategy {
+    DirectNv12(Nv12OutputStrategy),
+    VaapiXrgb(Modifier),
 }
 
 struct GpuScreen {
@@ -230,6 +238,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                         screen_id,
                         parameters,
                         outputs,
+                        output_strategy: None,
                     },
                 );
             }
@@ -365,6 +374,11 @@ fn process_screen_frame(
     mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
 ) {
+    #[cfg(test)]
+    if let Some(probe) = &mut frame.probe {
+        probe.gpu_received = Some(std::time::Instant::now());
+    }
+
     let source = match prepare_pipeline_source(context, screen_id, &mut frame) {
         Ok(source) => source,
         Err(error) => {
@@ -418,17 +432,14 @@ fn route_screen_frame(
     screen_id: ScreenId,
     frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
-    mut process: impl FnMut(
-        &FramePipelineParameters,
-        &KmsCapturedFrame,
-    ) -> eros::Result<GbmFramePipelineFrame>,
+    mut process: impl FnMut(&mut GpuPipeline, &KmsCapturedFrame) -> eros::Result<GbmFramePipelineFrame>,
 ) {
     pipelines.retain(|_, pipeline| {
         if pipeline.screen_id != screen_id {
             return true;
         }
 
-        let output = process(&pipeline.parameters, &frame);
+        let output = process(pipeline, &frame);
         let succeeded = output.is_ok();
         pipeline.outputs.publish(output);
         succeeded
@@ -438,43 +449,69 @@ fn route_screen_frame(
 fn process_pipeline_frame(
     context: &GpuContext,
     source: &EglDmaBufImage<'_>,
-    parameters: &FramePipelineParameters,
-    _frame: &KmsCapturedFrame,
+    pipeline: &mut GpuPipeline,
+    frame: &KmsCapturedFrame,
 ) -> eros::Result<GbmFramePipelineFrame> {
+    let parameters = pipeline.parameters;
     validate_nv12_size(parameters.frame_size)?;
     let source_texture = context
         .egl()
         .create_dma_buf_texture(source)
         .with_context(|| "Failed to bind the frame-pipeline source texture")?;
-    let mut buffer = context
-        .allocate_dma_buf(
-            parameters.frame_size,
-            Format::Nv12,
-            BufferObjectFlags::RENDERING,
+    let mut buffer = match pipeline.output_strategy {
+        Some(strategy) => allocate_output(context, parameters.frame_size, strategy),
+        None => select_output(context, parameters.frame_size).map(|(buffer, strategy)| {
+            pipeline.output_strategy = Some(strategy);
+            tracing::info!(
+                target: "rabbit::frame_pipeline",
+                screen_id = pipeline.screen_id.0,
+                width = parameters.frame_size.width,
+                height = parameters.frame_size.height,
+                strategy = strategy.name(),
+                "Selected frame-pipeline output strategy"
+            );
+            buffer
+        }),
+    }
+    .with_context(|| {
+        format!(
+            "Failed to allocate frame-pipeline output {}x{}",
+            parameters.frame_size.width, parameters.frame_size.height
         )
-        .with_context(|| {
-            format!(
-                "Failed to allocate NV12 frame-pipeline output {}x{}",
-                parameters.frame_size.width, parameters.frame_size.height
-            )
-        })?;
-    let target_image = context
-        .egl()
-        .import_nv12_target(&buffer)
-        .with_context(|| "Failed to import the frame-pipeline NV12 output planes")?;
-    let target = context
-        .egl()
-        .create_nv12_target(&target_image)
-        .with_context(|| "Failed to bind the frame-pipeline NV12 output targets")?;
-    context
-        .egl()
-        .convert_to_nv12(&source_texture, &target)
-        .with_context(|| {
-            format!(
-                "Failed to convert the source frame to {}x{} NV12",
-                parameters.frame_size.width, parameters.frame_size.height
-            )
-        })?;
+    })?;
+    match pipeline
+        .output_strategy
+        .with_context(|| "Frame-pipeline output strategy was not selected")?
+    {
+        FrameOutputStrategy::DirectNv12(_) => {
+            let target_image = context
+                .egl()
+                .import_nv12_target(&buffer)
+                .with_context(|| "Failed to import the frame-pipeline NV12 output planes")?;
+            let target = context
+                .egl()
+                .create_nv12_target(&target_image)
+                .with_context(|| "Failed to bind the frame-pipeline NV12 output targets")?;
+            context
+                .egl()
+                .convert_to_nv12(&source_texture, &target)
+                .with_context(|| "Failed to convert the source frame to NV12")?;
+        }
+        FrameOutputStrategy::VaapiXrgb(_) => {
+            let target_image = context
+                .egl()
+                .import_composition_target(&buffer)
+                .with_context(|| "Failed to import the frame-pipeline XRGB output")?;
+            let target = context
+                .egl()
+                .create_composition_target(&target_image)
+                .with_context(|| "Failed to bind the frame-pipeline XRGB output")?;
+            context
+                .egl()
+                .copy_frame(&source_texture, &target)
+                .with_context(|| "Failed to copy the source frame to the VAAPI XRGB output")?;
+        }
+    }
     buffer.readiness_fence = Some(
         context
             .egl()
@@ -482,7 +519,63 @@ fn process_pipeline_frame(
             .with_context(|| "Failed to export frame-pipeline output readiness")?,
     );
 
-    Ok(GbmFramePipelineFrame { buffer })
+    Ok(GbmFramePipelineFrame {
+        buffer,
+        #[cfg(test)]
+        probe: frame.probe.clone().map(|mut probe| {
+            probe.gpu_submitted = Some(std::time::Instant::now());
+            probe
+        }),
+    })
+}
+
+impl FrameOutputStrategy {
+    fn name(self) -> &'static str {
+        match self {
+            Self::DirectNv12(strategy) => strategy.name(),
+            Self::VaapiXrgb(_) => "vaapi_xrgb",
+        }
+    }
+}
+
+fn select_output(
+    context: &GpuContext,
+    size: crate::kernel::geometry::PixelSize,
+) -> eros::Result<(
+    crate::infra::platform::dma_buf::DmaBufFrame,
+    FrameOutputStrategy,
+)> {
+    if let Ok((buffer, strategy)) = context.select_nv12_output(size) {
+        if hardware_h264_encoder_for(&buffer).is_ok() {
+            return Ok((buffer, FrameOutputStrategy::DirectNv12(strategy)));
+        }
+        tracing::debug!(
+            target: "rabbit::frame_pipeline",
+            strategy = strategy.name(),
+            "Hardware H.264 encoder rejected direct NV12 output"
+        );
+    }
+
+    let modifier = va_vpp_input_modifier(Format::Xrgb8888)
+        .with_context(|| "Failed to find a VAAPI-compatible XRGB DMA-BUF modifier")?;
+    let strategy = FrameOutputStrategy::VaapiXrgb(modifier);
+    Ok((allocate_output(context, size, strategy)?, strategy))
+}
+
+fn allocate_output(
+    context: &GpuContext,
+    size: crate::kernel::geometry::PixelSize,
+    strategy: FrameOutputStrategy,
+) -> eros::Result<crate::infra::platform::dma_buf::DmaBufFrame> {
+    match strategy {
+        FrameOutputStrategy::DirectNv12(strategy) => context.allocate_nv12_output(size, strategy),
+        FrameOutputStrategy::VaapiXrgb(modifier) => context.allocate_dma_buf_with_modifier(
+            size,
+            Format::Xrgb8888,
+            modifier,
+            gbm::BufferObjectFlags::RENDERING,
+        ),
+    }
 }
 
 fn validate_nv12_size(size: crate::kernel::geometry::PixelSize) -> eros::Result<()> {
@@ -644,6 +737,7 @@ mod tests {
                         sender: matching_sender,
                         overflow_receiver: matching_frames.clone(),
                     },
+                    output_strategy: None,
                 },
             ),
             (
@@ -655,6 +749,7 @@ mod tests {
                         sender: other_sender,
                         overflow_receiver: other_frames.clone(),
                     },
+                    output_strategy: None,
                 },
             ),
         ]);

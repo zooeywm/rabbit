@@ -79,6 +79,8 @@ struct LatestFrameSubscriptionState<Frame> {
 #[derive(Debug)]
 pub(crate) struct GbmFramePipelineFrame {
     pub(crate) buffer: DmaBufFrame,
+    #[cfg(test)]
+    pub(crate) probe: Option<crate::infra::platform::video_probe::HostVideoFrameProbe>,
 }
 
 #[derive(Debug)]
@@ -288,15 +290,19 @@ impl FramePipelineSource {
 }
 
 async fn wait_until_ready(mut frame: GbmFramePipelineFrame) -> eros::Result<GbmFramePipelineFrame> {
-    let Some(fence) = frame.buffer.readiness_fence.take() else {
-        return Ok(frame);
-    };
-    let fence =
-        PollFd::new(fence).with_context(|| "Failed to register frame-pipeline readiness fence")?;
-    fence
-        .read_ready()
-        .await
-        .with_context(|| "Failed to wait for frame-pipeline readiness fence")?;
+    if let Some(fence) = frame.buffer.readiness_fence.take() {
+        let fence = PollFd::new(fence)
+            .with_context(|| "Failed to register frame-pipeline readiness fence")?;
+        fence
+            .read_ready()
+            .await
+            .with_context(|| "Failed to wait for frame-pipeline readiness fence")?;
+    }
+
+    #[cfg(test)]
+    if let Some(probe) = &mut frame.probe {
+        probe.pipeline_ready = Some(std::time::Instant::now());
+    }
 
     Ok(frame)
 }
@@ -463,22 +469,24 @@ where
             parameters,
         };
 
-        if let Some(subscription) = self.prj_ref().existing_subscription(key) {
+        if let Some(subscription) =
+            <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref())
+                .existing_subscription(key)
+        {
             return Ok(subscription);
         }
 
-        let captured_screen = match self
-            .prj_ref()
-            .captured_screens
-            .borrow()
-            .get(screen_id)
-            .cloned()
-        {
+        let existing_captured_screen = {
+            let state = <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref());
+            state.captured_screens.borrow().get(screen_id).cloned()
+        };
+        let captured_screen = match existing_captured_screen {
             Some(captured_screen) => captured_screen,
             None => {
                 let ScreenCaptureSource { lease, receiver } =
                     ScreenCaptureManager::acquire(self.prj_ref_mut(), screen_id)?;
-                let gpu_registration = self.prj_ref().register_screen(*screen_id, receiver)?;
+                let state = <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref());
+                let gpu_registration = state.register_screen(*screen_id, receiver)?;
 
                 Rc::new(CapturedScreenSource {
                     gpu_registration: RefCell::new(Some(gpu_registration)),
@@ -486,9 +494,9 @@ where
                 })
             }
         };
-        let gpu_source = self.prj_ref().register_pipeline(*screen_id, parameters)?;
-        let captured_screen = self
-            .prj_ref()
+        let state = <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref());
+        let gpu_source = state.register_pipeline(*screen_id, parameters)?;
+        let captured_screen = state
             .captured_screens
             .borrow_mut()
             .entry(*screen_id)
@@ -496,7 +504,7 @@ where
             .clone();
         let source = FramePipelineSource::new(captured_screen, gpu_source);
 
-        Ok(self.prj_ref().insert_source(key, source))
+        Ok(state.insert_source(key, source))
     }
 }
 
@@ -615,13 +623,13 @@ mod tests {
 
         runtime.block_on(async {
             let mut deps = test_deps();
-            let parameters = parameters(1920, 1080);
+            let shared_parameters = parameters(1920, 1080);
             let mut manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
             let first = manager
-                .subscribe(&ScreenId(1), parameters)
+                .subscribe(&ScreenId(1), shared_parameters)
                 .expect("First frame pipeline subscription should be created");
             let second = manager
-                .subscribe(&ScreenId(1), parameters)
+                .subscribe(&ScreenId(1), shared_parameters)
                 .expect("Second frame pipeline subscription should be created");
             let different = manager
                 .subscribe(&ScreenId(1), parameters(1280, 720))
