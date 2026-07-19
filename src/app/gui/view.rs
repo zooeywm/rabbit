@@ -211,7 +211,7 @@ impl Component for RootView {
             }
             RootViewMessage::SetConnectionStatus(status) => {
                 self.connection_status.set_text(status)?;
-                Ok(false)
+                Ok(true)
             }
             RootViewMessage::SetConnectionRequests { entries, selected } => {
                 let visible = !entries.is_empty();

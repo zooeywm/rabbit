@@ -258,14 +258,14 @@ impl RootComponent {
         Ok(())
     }
 
-    async fn remove_session(&mut self, id: SessionId) -> eros::Result<()> {
+    fn remove_session(&mut self, id: SessionId) {
         self.sessions.retain(|session| session.send.id() != id);
         self.remote_screens.remove(&id);
         self.screen_stream_results.remove(&id);
-        self.refresh_remote_screen_list().await
+        self.refresh_remote_screen_list();
     }
 
-    async fn refresh_remote_screen_list(&mut self) -> eros::Result<()> {
+    fn refresh_remote_screen_list(&mut self) {
         let mut entries = self
             .remote_screens
             .iter()
@@ -295,13 +295,9 @@ impl RootComponent {
                 .map(|(session_id, screen_id, _)| (*session_id, *screen_id)),
         );
         self.selected_remote_screen = None;
-        self.view
-            .emit(RootViewMessage::SetRemoteScreens(
-                entries.into_iter().map(|(_, _, entry)| entry).collect(),
-            ))
-            .await?;
-
-        Ok(())
+        self.view.post(RootViewMessage::SetRemoteScreens(
+            entries.into_iter().map(|(_, _, entry)| entry).collect(),
+        ));
     }
 
     fn next_session_id(&mut self) -> eros::Result<SessionId> {
@@ -314,11 +310,9 @@ impl RootComponent {
         Ok(id)
     }
 
-    async fn set_connection_status(&mut self, status: impl Into<String>) -> eros::Result<()> {
+    fn set_connection_status(&mut self, status: impl Into<String>) {
         self.view
-            .emit(RootViewMessage::SetConnectionStatus(status.into()))
-            .await?;
-        Ok(())
+            .post(RootViewMessage::SetConnectionStatus(status.into()));
     }
 
     fn parse_direct_target(input: &str) -> eros::Result<(IpAddr, Option<u16>)> {
@@ -335,40 +329,33 @@ impl RootComponent {
         Ok((ip, None))
     }
 
-    async fn refresh_connection_request_list(
-        &mut self,
-        selected: Option<usize>,
-    ) -> eros::Result<()> {
+    fn refresh_connection_request_list(&mut self, selected: Option<usize>) {
         self.selected_connection_request = selected;
-        self.view
-            .emit(RootViewMessage::SetConnectionRequests {
-                entries: self
-                    .pending_connection_requests
-                    .iter()
-                    .map(|request| {
-                        format!(
-                            "{} - {}",
-                            request.request().requester_name,
-                            request.remote_address(),
-                        )
-                    })
-                    .collect(),
-                selected,
-            })
-            .await?;
-
-        Ok(())
+        self.view.post(RootViewMessage::SetConnectionRequests {
+            entries: self
+                .pending_connection_requests
+                .iter()
+                .map(|request| {
+                    format!(
+                        "{} - {}",
+                        request.request().requester_name,
+                        request.remote_address(),
+                    )
+                })
+                .collect(),
+            selected,
+        });
     }
 
-    async fn take_selected_connection_request(
+    fn take_selected_connection_request(
         &mut self,
         selected: Option<usize>,
-    ) -> eros::Result<Option<PendingQuicConnectionRequest>> {
+    ) -> Option<PendingQuicConnectionRequest> {
         let Some(selected) = selected else {
-            return Ok(None);
+            return None;
         };
         if selected >= self.pending_connection_requests.len() {
-            return Ok(None);
+            return None;
         }
 
         let request = self.pending_connection_requests.remove(selected);
@@ -377,9 +364,9 @@ impl RootComponent {
         } else {
             Some(selected.min(self.pending_connection_requests.len() - 1))
         };
-        self.refresh_connection_request_list(next).await?;
+        self.refresh_connection_request_list(next);
 
-        Ok(Some(request))
+        Some(request)
     }
 }
 
@@ -481,11 +468,7 @@ impl Component for RootComponent {
                 let (remote_ip, remote_port) = match Self::parse_direct_target(&input) {
                     Ok(target) => target,
                     Err(error) => {
-                        self.view
-                            .emit(RootViewMessage::SetConnectionStatus(format!(
-                                "Invalid address: {error}"
-                            )))
-                            .await?;
+                        self.set_connection_status(format!("Invalid address: {error}"));
                         return Ok(true);
                     }
                 };
@@ -502,12 +485,8 @@ impl Component for RootComponent {
                     ?remote_port,
                     "Direct connection started"
                 );
-                self.view.emit(RootViewMessage::SetConnecting(true)).await?;
-                self.view
-                    .emit(RootViewMessage::SetConnectionStatus(
-                        "Connecting...".to_owned(),
-                    ))
-                    .await?;
+                self.view.post(RootViewMessage::SetConnecting(true));
+                self.set_connection_status("Connecting...");
 
                 compio::runtime::spawn(async move {
                     let result =
@@ -519,9 +498,7 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::DirectConnectionFinished(result) => {
-                self.view
-                    .emit(RootViewMessage::SetConnecting(false))
-                    .await?;
+                self.view.post(RootViewMessage::SetConnecting(false));
 
                 match result {
                     Ok(Some(transport)) => {
@@ -530,13 +507,10 @@ impl Component for RootComponent {
                         let (send, recv) = session.split();
 
                         self.start_session(send, recv, sender);
-                        self.set_connection_status("Connection accepted").await?;
+                        self.set_connection_status("Connection accepted");
                     }
-                    Ok(None) => self.set_connection_status("Connection rejected").await?,
-                    Err(error) => {
-                        self.set_connection_status(format!("Connection failed: {error}"))
-                            .await?
-                    }
+                    Ok(None) => self.set_connection_status("Connection rejected"),
+                    Err(error) => self.set_connection_status(format!("Connection failed: {error}")),
                 }
 
                 Ok(true)
@@ -546,8 +520,7 @@ impl Component for RootComponent {
                 let selected = self.selected_connection_request;
 
                 self.pending_connection_requests.push(request);
-                self.refresh_connection_request_list(selected.or(first_request.then_some(0)))
-                    .await?;
+                self.refresh_connection_request_list(selected.or(first_request.then_some(0)));
 
                 Ok(true)
             }
@@ -556,7 +529,7 @@ impl Component for RootComponent {
                 Ok(false)
             }
             RootMessage::AcceptSelectedConnection(selected) => {
-                let Some(request) = self.take_selected_connection_request(selected).await? else {
+                let Some(request) = self.take_selected_connection_request(selected) else {
                     return Ok(false);
                 };
                 let approval_sender = sender.clone();
@@ -576,7 +549,7 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::RejectSelectedConnection(selected) => {
-                let Some(request) = self.take_selected_connection_request(selected).await? else {
+                let Some(request) = self.take_selected_connection_request(selected) else {
                     return Ok(false);
                 };
                 let approval_sender = sender.clone();
@@ -651,10 +624,9 @@ impl Component for RootComponent {
                             "Session {} reported {} screens",
                             id.0,
                             screens.len()
-                        ))
-                        .await?;
+                        ));
                         self.remote_screens.insert(id, screens);
-                        self.refresh_remote_screen_list().await?;
+                        self.refresh_remote_screen_list();
                     }
                     SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
                         let (configured, streams) = self.configure_preserved_screens(request);
@@ -699,8 +671,7 @@ impl Component for RootComponent {
                         self.set_connection_status(format!(
                             "Session {} request {}: {} configured, {} failed",
                             id.0, configured.request_id.0, configured_count, failed_count
-                        ))
-                        .await?;
+                        ));
                         self.screen_stream_results.insert(id, configured);
                     }
                     SessionMessage::Video(video) => trace!(
@@ -724,7 +695,7 @@ impl Component for RootComponent {
                         error = ?error,
                         "Failed to send screen stream results"
                     );
-                    self.remove_session(session_id).await?;
+                    self.remove_session(session_id);
                     return Ok(false);
                 }
 
@@ -752,21 +723,19 @@ impl Component for RootComponent {
                 Ok(false)
             }
             RootMessage::SessionClosed(id) => {
-                self.remove_session(id).await?;
+                self.remove_session(id);
                 info!(
                     event = "session_closed",
                     session_id = id.0,
                     "Session closed"
                 );
-                self.set_connection_status(format!("Session {} closed", id.0))
-                    .await?;
+                self.set_connection_status(format!("Session {} closed", id.0));
                 Ok(true)
             }
             RootMessage::SessionFailed(id, error) => {
-                self.remove_session(id).await?;
+                self.remove_session(id);
                 error!(session_id = id.0, error = ?error, "Session receive loop failed");
-                self.set_connection_status(format!("Session {} failed: {error}", id.0))
-                    .await?;
+                self.set_connection_status(format!("Session {} failed: {error}", id.0));
                 Ok(true)
             }
             RootMessage::ScreenStreamFinished(id, screen_id, stream_id, result) => {
@@ -806,8 +775,7 @@ impl Component for RootComponent {
                         self.set_connection_status(format!(
                             "Session {} screen {} failed: {error}",
                             id.0, screen_id.0
-                        ))
-                        .await?;
+                        ));
                     }
                 }
 
@@ -899,18 +867,16 @@ impl Component for RootComponent {
                         error = ?error,
                         "Failed to request screen stream"
                     );
-                    self.remove_session(session_id).await?;
+                    self.remove_session(session_id);
                     self.set_connection_status(format!(
                         "Session {} screen request failed: {error}",
                         session_id.0
-                    ))
-                    .await?;
+                    ));
                 } else {
                     self.set_connection_status(format!(
                         "Requested session {} screen {} at {}x{}",
                         session_id.0, screen_id.0, frame_size.width, frame_size.height
-                    ))
-                    .await?;
+                    ));
                 }
 
                 Ok(true)
