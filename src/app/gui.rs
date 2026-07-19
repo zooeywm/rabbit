@@ -22,7 +22,7 @@ use crate::{
         frame_pipeline::{FramePipelineManager, FramePipelineParameters},
         screen_configuration::{
             RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
-            ScreenStreamsConfigured, SetScreenStreams,
+            ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
         },
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole, SessionSend},
@@ -78,6 +78,7 @@ pub(crate) struct RootComponent {
     screen_stream_results: HashMap<SessionId, ScreenStreamsConfigured>,
     next_session_id: u32,
     next_screen_stream_id: u64,
+    next_screen_stream_request_id: u32,
     _connection_listener: compio::runtime::JoinHandle<()>,
     _logger_guard: LoggerGuard,
 }
@@ -182,6 +183,16 @@ impl RootComponent {
             .next_screen_stream_id
             .checked_add(1)
             .context("Failed to allocate a screen stream task ID")?;
+
+        Ok(id)
+    }
+
+    fn next_screen_stream_request_id(&mut self) -> eros::Result<ScreenStreamRequestId> {
+        let id = ScreenStreamRequestId(self.next_screen_stream_request_id);
+        self.next_screen_stream_request_id = self
+            .next_screen_stream_request_id
+            .checked_add(1)
+            .context("Failed to allocate a screen stream request ID")?;
 
         Ok(id)
     }
@@ -441,6 +452,7 @@ impl Component for RootComponent {
             screen_stream_results: HashMap::new(),
             next_session_id: 0,
             next_screen_stream_id: 0,
+            next_screen_stream_request_id: 0,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -772,6 +784,7 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::RemoteScreenSelectionChanged => {
+                let previous = self.selected_remote_screen;
                 let mut selected = None;
 
                 for (index, entry) in self.remote_screen_entries.iter().enumerate() {
@@ -783,11 +796,66 @@ impl Component for RootComponent {
 
                 self.selected_remote_screen = selected;
 
+                if selected == previous {
+                    return Ok(false);
+                }
+
                 if let Some((session_id, screen_id)) = selected {
-                    self.connection_status.set_text(format!(
-                        "Selected session {} screen {}",
-                        session_id.0, screen_id.0
-                    ))?;
+                    let Some(frame_size) =
+                        self.remote_screens.get(&session_id).and_then(|screens| {
+                            screens
+                                .iter()
+                                .find(|screen| screen.id == screen_id)
+                                .map(|screen| screen.resolution)
+                        })
+                    else {
+                        warn!(
+                            session_id = session_id.0,
+                            screen_id = screen_id.0,
+                            "Selected remote screen is no longer available"
+                        );
+                        return Ok(false);
+                    };
+                    let Some(session) = self
+                        .sessions
+                        .iter()
+                        .find(|session| session.send.id() == session_id)
+                    else {
+                        warn!(
+                            session_id = session_id.0,
+                            "Session closed before screen stream could be requested"
+                        );
+                        return Ok(false);
+                    };
+                    let session_send = Rc::clone(&session.send);
+                    let request_id = self.next_screen_stream_request_id()?;
+                    let request = SetScreenStreams {
+                        request_id,
+                        desired_streams: vec![ScreenStreamRequest {
+                            screen_id,
+                            remote_display: RemoteDisplayMode::Preserve,
+                            frame_size,
+                        }],
+                    };
+
+                    if let Err(error) = session_send.send_screen_streams_request(request).await {
+                        error!(
+                            session_id = session_id.0,
+                            screen_id = screen_id.0,
+                            %error,
+                            "Failed to request screen stream"
+                        );
+                        self.remove_session(session_id)?;
+                        self.connection_status.set_text(format!(
+                            "Session {} screen request failed: {error}",
+                            session_id.0
+                        ))?;
+                    } else {
+                        self.connection_status.set_text(format!(
+                            "Requested session {} screen {} at {}x{}",
+                            session_id.0, screen_id.0, frame_size.width, frame_size.height
+                        ))?;
+                    }
                 }
 
                 Ok(true)
