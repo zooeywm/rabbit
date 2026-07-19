@@ -5,9 +5,15 @@ use std::{
 };
 
 use eros::Context;
-use gbm::Device;
+use gbm::{BufferObjectFlags, Device, Format};
 
-use crate::infra::platform::screen_capture::EglContext;
+use crate::{
+    infra::platform::{
+        dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+        screen_capture::EglContext,
+    },
+    kernel::geometry::PixelSize,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct GpuDevice {
@@ -65,8 +71,72 @@ impl GpuContext {
         &self.egl
     }
 
-    pub(crate) fn device(&self) -> &Device<OwnedFd> {
-        &self.device
+    pub(crate) fn allocate_dma_buf(
+        &self,
+        size: PixelSize,
+        format: Format,
+        usage: BufferObjectFlags,
+    ) -> eros::Result<DmaBufFrame> {
+        if !self.device.is_format_supported(format, usage) {
+            eros::bail!(
+                "GBM does not support {:?} buffers with usage {:?}",
+                format,
+                usage
+            );
+        }
+
+        let buffer = self
+            .device
+            .create_buffer_object::<()>(size.width, size.height, format, usage)
+            .with_context(|| {
+                format!(
+                    "Failed to allocate {format:?} GBM buffer {}x{}",
+                    size.width, size.height
+                )
+            })?;
+        let plane_count = buffer.plane_count();
+
+        if plane_count == 0 {
+            eros::bail!("GBM allocated a {:?} buffer without DMA-BUF planes", format);
+        }
+
+        let modifier = buffer.modifier();
+        let mut objects = Vec::with_capacity(plane_count as usize);
+        let mut planes = Vec::with_capacity(plane_count as usize);
+
+        for plane_index in 0..plane_count {
+            if plane_index > i32::MAX as u32 {
+                eros::bail!(
+                    "GBM returned too many {:?} DMA-BUF planes: {}",
+                    format,
+                    plane_count
+                );
+            }
+
+            let gbm_plane_index = plane_index as i32;
+            let fd = buffer.fd_for_plane(gbm_plane_index).with_context(|| {
+                format!("Failed to export {format:?} GBM plane {plane_index} as DMA-BUF")
+            })?;
+            let object_index = objects.len();
+
+            objects.push(DmaBufObject::try_from(fd).with_context(|| {
+                format!("Failed to determine {format:?} GBM plane {plane_index} length")
+            })?);
+            planes.push(DmaBufPlane {
+                object_index,
+                offset: buffer.offset(gbm_plane_index),
+                stride: buffer.stride_for_plane(gbm_plane_index),
+                modifier,
+            });
+        }
+
+        Ok(DmaBufFrame {
+            size,
+            format,
+            objects,
+            planes,
+            readiness_fence: None,
+        })
     }
 }
 
@@ -74,7 +144,10 @@ impl GpuContext {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use gbm::{BufferObjectFlags, Format};
+
     use crate::infra::platform::gpu::{GpuContext, GpuDevice};
+    use crate::kernel::geometry::PixelSize;
 
     #[test]
     fn render_node_path_is_the_gpu_identity() {
@@ -98,5 +171,28 @@ mod tests {
                 .to_string()
                 .contains("/dev/dri/rabbit-missing-render-node")
         );
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gpu"]
+    fn allocates_nv12_dma_buf_output() {
+        let render_node = std::env::var_os("RABBIT_GPU_RENDER_NODE")
+            .expect("RABBIT_GPU_RENDER_NODE should name the render node under test");
+        let gpu = GpuDevice::from(PathBuf::from(render_node));
+        let context = GpuContext::new(&gpu).expect("GPU context should initialize");
+        let size = PixelSize {
+            width: 1280,
+            height: 720,
+        };
+
+        let frame = context
+            .allocate_dma_buf(size, Format::Nv12, BufferObjectFlags::RENDERING)
+            .expect("NV12 DMA-BUF output should allocate");
+
+        assert_eq!(frame.size, size);
+        assert_eq!(frame.format, Format::Nv12);
+        assert_eq!(frame.planes.len(), 2);
+        assert_eq!(frame.objects.len(), frame.planes.len());
+        assert!(frame.planes.iter().all(|plane| plane.stride > 0));
     }
 }

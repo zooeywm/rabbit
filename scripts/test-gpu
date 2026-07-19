@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -eu
+
+: "${RABBIT_GPU_RENDER_NODE:?Set RABBIT_GPU_RENDER_NODE to the DRM render node path}"
+
+exec cargo test \
+    --color=always \
+    --lib \
+    infra::platform::linux::gpu::tests::allocates_nv12_dma_buf_output \
+    -- \
+    --ignored \
+    --nocapture

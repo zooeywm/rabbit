@@ -6,6 +6,7 @@ use std::{
 
 use eros::Context;
 use flume::{Receiver, RecvError, Selector, Sender, bounded, unbounded};
+use gbm::{BufferObjectFlags, Format};
 
 use crate::{
     infra::platform::{
@@ -83,7 +84,7 @@ struct GpuScreen {
 #[derive(Debug)]
 struct BoundGpu {
     device: GpuDevice,
-    _context: GpuContext,
+    context: GpuContext,
 }
 
 #[derive(Debug)]
@@ -266,10 +267,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                             continue;
                         }
                     };
-                    gpu = Some(BoundGpu {
-                        device,
-                        _context: context,
-                    });
+                    gpu = Some(BoundGpu { device, context });
                 }
                 if let Some(screen) = screens.get_mut(&screen_id) {
                     screen.device = None;
@@ -285,7 +283,22 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                 screens.remove(&screen_id);
             }
             GpuWorkerEvent::Frame(screen_id, Ok(Ok(frame))) => {
-                process_screen_frame(screen_id, frame, &mut pipelines);
+                let Some(gpu) = &gpu else {
+                    screens.remove(&screen_id);
+                    if !notify_screen_failed(
+                        &notifications,
+                        screen_id,
+                        eros::error!(
+                            "GPU context is missing while processing screen {}",
+                            screen_id.0
+                        ),
+                    ) {
+                        return;
+                    }
+                    continue;
+                };
+
+                process_screen_frame(&gpu.context, screen_id, frame, &mut pipelines);
             }
             GpuWorkerEvent::Frame(screen_id, Ok(Err(error))) => {
                 screens.remove(&screen_id);
@@ -347,16 +360,31 @@ fn wait_for_event(
 }
 
 fn process_screen_frame(
+    context: &GpuContext,
     screen_id: ScreenId,
     frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
+) {
+    route_screen_frame(screen_id, frame, pipelines, |parameters, frame| {
+        process_pipeline_frame(context, parameters, frame)
+    });
+}
+
+fn route_screen_frame(
+    screen_id: ScreenId,
+    frame: KmsCapturedFrame,
+    pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
+    mut process: impl FnMut(
+        &FramePipelineParameters,
+        &KmsCapturedFrame,
+    ) -> eros::Result<GbmFramePipelineFrame>,
 ) {
     pipelines.retain(|_, pipeline| {
         if pipeline.screen_id != screen_id {
             return true;
         }
 
-        let output = process_pipeline_frame(&pipeline.parameters, &frame);
+        let output = process(&pipeline.parameters, &frame);
         let succeeded = output.is_ok();
         pipeline.outputs.publish(output);
         succeeded
@@ -364,10 +392,45 @@ fn process_screen_frame(
 }
 
 fn process_pipeline_frame(
-    _parameters: &FramePipelineParameters,
+    context: &GpuContext,
+    parameters: &FramePipelineParameters,
     _frame: &KmsCapturedFrame,
 ) -> eros::Result<GbmFramePipelineFrame> {
-    eros::bail!("GBM/EGL NV12 frame processing is not implemented");
+    validate_nv12_size(parameters.frame_size)?;
+    let buffer = context
+        .allocate_dma_buf(
+            parameters.frame_size,
+            Format::Nv12,
+            BufferObjectFlags::RENDERING,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to allocate NV12 frame-pipeline output {}x{}",
+                parameters.frame_size.width, parameters.frame_size.height
+            )
+        })?;
+
+    Ok(GbmFramePipelineFrame { buffer })
+}
+
+fn validate_nv12_size(size: crate::kernel::geometry::PixelSize) -> eros::Result<()> {
+    if size.width == 0 || size.height == 0 {
+        eros::bail!(
+            "NV12 frame size must be non-zero, got {}x{}",
+            size.width,
+            size.height
+        );
+    }
+
+    if !size.width.is_multiple_of(2) || !size.height.is_multiple_of(2) {
+        eros::bail!(
+            "NV12 frame size must use even dimensions, got {}x{}",
+            size.width,
+            size.height
+        );
+    }
+
+    Ok(())
 }
 
 impl<T> LatestSender<T> {
@@ -397,8 +460,8 @@ mod tests {
         infra::platform::{
             frame_pipeline::worker::{
                 FramePipelineId, GpuPipeline, GpuScreen, GpuWorker, GpuWorkerEvent,
-                GpuWorkerNotification, LatestSender, gpu_mismatch, process_screen_frame,
-                wait_for_event,
+                GpuWorkerNotification, LatestSender, gpu_mismatch, route_screen_frame,
+                validate_nv12_size, wait_for_event,
             },
             gpu::GpuDevice,
             screen_capture::{KmsFrameReceiver, empty_kms_frame},
@@ -524,21 +587,45 @@ mod tests {
             ),
         ]);
 
-        process_screen_frame(
+        route_screen_frame(
             ScreenId(2),
             empty_kms_frame(PixelSize {
                 width: 2560,
                 height: 1440,
             }),
             &mut pipelines,
+            |_, _| Err(eros::error!("test processing failure")),
         );
 
         let error = matching_frames
             .recv()
             .expect("Matching pipeline should receive a processing result")
-            .expect_err("Empty pipeline processing should report that it is not implemented");
-        assert!(error.to_string().contains("NV12 frame processing"));
+            .expect_err("Test processing should fail");
+        assert_eq!(error.to_string(), "test processing failure");
         assert!(other_frames.try_recv().is_err());
+    }
+
+    #[test]
+    fn nv12_output_requires_non_zero_even_dimensions() {
+        validate_nv12_size(PixelSize {
+            width: 1920,
+            height: 1080,
+        })
+        .expect("Even NV12 dimensions should be accepted");
+
+        let zero = validate_nv12_size(PixelSize {
+            width: 0,
+            height: 1080,
+        })
+        .expect_err("Zero NV12 dimensions should be rejected");
+        let odd = validate_nv12_size(PixelSize {
+            width: 1919,
+            height: 1080,
+        })
+        .expect_err("Odd NV12 dimensions should be rejected");
+
+        assert!(zero.to_string().contains("non-zero"));
+        assert!(odd.to_string().contains("even dimensions"));
     }
 
     #[test]
