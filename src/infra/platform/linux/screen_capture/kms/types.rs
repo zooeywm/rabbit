@@ -1,60 +1,11 @@
-use std::{fs::File, io, os::fd::OwnedFd};
+use std::io;
 
 use drm::{
     buffer::{DrmFourcc, DrmModifier},
     control::{GetPlanarFramebufferError, PlaneType, crtc, framebuffer, plane},
 };
 
-use crate::kernel::geometry::PixelSize;
-
-#[derive(Debug)]
-pub(crate) struct DmaBufObject {
-    pub fd: OwnedFd,
-    pub size: usize,
-}
-
-impl TryFrom<OwnedFd> for DmaBufObject {
-    type Error = io::Error;
-
-    fn try_from(fd: OwnedFd) -> Result<Self, Self::Error> {
-        let file = File::from(fd);
-        let size = usize::try_from(file.metadata()?.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "DMA-BUF object length exceeds usize",
-            )
-        })?;
-
-        if size == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "DMA-BUF object has zero length",
-            ));
-        }
-
-        Ok(Self {
-            fd: OwnedFd::from(file),
-            size,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DmaBufPlane {
-    pub object_index: usize,
-    pub offset: u32,
-    pub stride: u32,
-    pub modifier: DrmModifier,
-}
-
-#[derive(Debug)]
-pub(crate) struct DmaBufFrame {
-    pub size: PixelSize,
-    pub format: DrmFourcc,
-    pub objects: Vec<DmaBufObject>,
-    pub planes: Vec<DmaBufPlane>,
-    pub readiness_fence: Option<OwnedFd>,
-}
+use crate::{infra::platform::dma_buf::DmaBufFrame, kernel::geometry::PixelSize};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum KmsPlaneCaptureError {

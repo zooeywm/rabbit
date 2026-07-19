@@ -10,8 +10,9 @@ use winio::prelude::*;
 use crate::{
     app::{App, LoggerGuard, config::Config, init_logging},
     infra::{
-        KmsScreenCaptureManagerState, NiriScreenLayoutManagerState, PendingQuicConnectionRequest,
-        QuicEndpoint, QuicTransport, QuicTransportSend, connect_transport,
+        GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
+        PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportSend,
+        connect_transport, create_frame_pipeline_manager_state,
         create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
     },
     kernel::{
@@ -33,7 +34,11 @@ struct RunningSession {
 }
 
 pub(crate) struct RootComponent {
-    _app: App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState>,
+    _app: App<
+        NiriScreenLayoutManagerState,
+        KmsScreenCaptureManagerState,
+        GbmFramePipelineManagerState,
+    >,
     window: Child<Window>,
     direct_address_input: Child<Edit>,
     connect_button: Child<Button>,
@@ -271,6 +276,7 @@ impl Component for RootComponent {
         let screen_layout_manager_state = create_screen_layout_manager_state()
             .context("Failed to create the screen layout manager state")?;
         let screen_capture_manager_state = create_screen_capture_manager_state();
+        let frame_pipeline_manager_state = create_frame_pipeline_manager_state();
         let quic_endpoint = QuicEndpoint::new()
             .await
             .context("Failed to create the QUIC endpoint")?;
@@ -287,6 +293,7 @@ impl Component for RootComponent {
             config,
             screen_layout_manager_state,
             screen_capture_manager_state,
+            frame_pipeline_manager_state,
             quic_endpoint.clone(),
         );
         app.run().await?;

@@ -4,11 +4,14 @@ use drm::{
 };
 
 use crate::{
-    infra::platform::screen_capture::kms::{
-        output::KmsOutput,
-        types::{
-            DmaBufFrame, DmaBufObject, DmaBufPlane, KmsActivePlane, KmsFramebufferPlane,
-            KmsFramebufferSnapshot, KmsPlaneCaptureError, KmsPlaneIssue, KmsPlaneSnapshot,
+    infra::platform::{
+        dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+        screen_capture::kms::{
+            output::KmsOutput,
+            types::{
+                KmsActivePlane, KmsFramebufferPlane, KmsFramebufferSnapshot, KmsPlaneCaptureError,
+                KmsPlaneIssue, KmsPlaneSnapshot,
+            },
         },
     },
     kernel::geometry::PixelSize,

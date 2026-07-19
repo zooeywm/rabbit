@@ -11,8 +11,9 @@ pub(crate) use connection_request::{
     PendingQuicConnectionRequest, connect_transport, receive_request,
 };
 pub(crate) use platform::{
-    KmsScreenCaptureManager, KmsScreenCaptureManagerState, NiriScreenLayoutManager,
-    NiriScreenLayoutManagerState, create_screen_capture_manager_state,
+    GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
+    KmsScreenCaptureManagerState, NiriScreenLayoutManager, NiriScreenLayoutManagerState,
+    create_frame_pipeline_manager_state, create_screen_capture_manager_state,
     create_screen_layout_manager_state,
 };
 pub(crate) use quic_endpoint::QuicEndpoint;

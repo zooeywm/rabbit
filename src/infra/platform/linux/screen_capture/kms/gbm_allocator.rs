@@ -4,11 +4,14 @@ use eros::Context;
 use gbm::{BufferObjectFlags, Device, Format};
 
 use crate::{
-    infra::platform::screen_capture::kms::{
-        composition::KmsCompositionTransform,
-        device::KmsDevice,
-        egl_context::EglContext,
-        types::{DmaBufFrame, DmaBufObject, DmaBufPlane, KmsFramebufferSnapshot, KmsPlaneIssue},
+    infra::platform::{
+        dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+        screen_capture::kms::{
+            composition::KmsCompositionTransform,
+            device::KmsDevice,
+            egl_context::EglContext,
+            types::{KmsFramebufferSnapshot, KmsPlaneIssue},
+        },
     },
     kernel::{geometry::PixelSize, screen_capture::CapturedFrame},
 };

@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use crate::kernel::screen_manager::ScreenId;
 
 /// A composed physical-screen frame and any recoverable source-layer issues.
@@ -9,32 +7,55 @@ pub struct CapturedFrame<Buffer, Issue> {
     pub issues: Vec<Issue>,
 }
 
-/// Provides subscriptions to shared physical-screen capture sources.
-pub trait ScreenCaptureManager {
-    type Buffer;
-    type Issue;
-    type Subscription: futures_core::Stream<Item = eros::Result<Rc<CapturedFrame<Self::Buffer, Self::Issue>>>>;
+pub struct ScreenCaptureSource<Lease, Receiver> {
+    pub lease: Lease,
+    pub receiver: Receiver,
+}
 
-    fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription>;
+/// Acquires one owned frame receiver and its local lifetime lease.
+pub trait ScreenCaptureManager {
+    type Lease;
+    type Receiver: Send + 'static;
+
+    fn acquire(
+        &mut self,
+        screen_id: &ScreenId,
+    ) -> eros::Result<ScreenCaptureSource<Self::Lease, Self::Receiver>>;
 }
 
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
 
-    use crate::kernel::screen_capture::CapturedFrame;
+    use crate::kernel::{
+        screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
+        screen_manager::ScreenId,
+    };
 
-    #[derive(Debug)]
-    struct NonCloneBuffer;
+    struct EmptyManager;
+
+    impl ScreenCaptureManager for EmptyManager {
+        type Lease = Rc<()>;
+        type Receiver = ();
+
+        fn acquire(
+            &mut self,
+            _screen_id: &ScreenId,
+        ) -> eros::Result<ScreenCaptureSource<Self::Lease, Self::Receiver>> {
+            Ok(ScreenCaptureSource {
+                lease: Rc::new(()),
+                receiver: (),
+            })
+        }
+    }
 
     #[test]
-    fn one_captured_frame_can_be_shared_without_cloning_its_buffer() {
-        let frame = Rc::new(CapturedFrame {
-            buffer: NonCloneBuffer,
-            issues: Vec::<()>::new(),
-        });
-        let other_subscriber = Rc::clone(&frame);
+    fn capture_lease_can_remain_local_while_receiver_is_sendable() {
+        let ScreenCaptureSource { lease, receiver } = EmptyManager
+            .acquire(&ScreenId(1))
+            .expect("Screen capture source should be acquired");
 
-        assert!(Rc::ptr_eq(&frame, &other_subscriber));
+        assert_eq!(Rc::strong_count(&lease), 1);
+        assert_eq!(receiver, ());
     }
 }

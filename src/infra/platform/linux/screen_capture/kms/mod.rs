@@ -1,22 +1,8 @@
-use std::{
-    cell::RefCell,
-    collections::{HashMap, hash_map::Entry},
-    rc::Rc,
-};
-
 use eros::Context;
-use tracing::error;
 
-use crate::{
-    infra::platform::screen_capture::kms::{
-        subscription::{KmsFramePublisher, KmsFrameSubscription},
-        types::{DmaBufFrame, KmsPlaneIssue},
-        worker::KmsCaptureWorker,
-    },
-    kernel::{
-        screen_capture::ScreenCaptureManager,
-        screen_manager::{ScreenId, ScreenLayoutManager},
-    },
+use crate::kernel::{
+    screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
+    screen_manager::{ScreenId, ScreenLayoutManager},
 };
 
 mod capture;
@@ -28,109 +14,22 @@ mod framebuffer;
 mod gbm_allocator;
 mod gl_context;
 mod output;
-mod subscription;
 mod types;
 mod worker;
 
+#[cfg(test)]
+pub(crate) use crate::infra::platform::screen_capture::kms::worker::empty_kms_frame;
+pub(crate) use crate::infra::platform::screen_capture::kms::worker::{
+    KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver,
+};
+
 #[derive(Debug, kudi::DepInj)]
 #[target(KmsScreenCaptureManager)]
-pub(crate) struct KmsScreenCaptureManagerState {
-    sources: HashMap<ScreenId, KmsCaptureSource>,
-}
-
-#[derive(Debug)]
-struct KmsCaptureSource {
-    frame_receiver_task: Option<compio::runtime::JoinHandle<()>>,
-    inner: Rc<KmsCaptureSourceInner>,
-}
-
-#[derive(Debug)]
-struct KmsCaptureSourceInner {
-    worker: KmsCaptureWorker,
-    frames: RefCell<KmsFramePublisher>,
-}
-
-impl KmsCaptureSource {
-    fn new(screen_name: String) -> std::io::Result<Self> {
-        Ok(Self {
-            frame_receiver_task: None,
-            inner: Rc::new(KmsCaptureSourceInner {
-                worker: KmsCaptureWorker::new(screen_name)?,
-                frames: RefCell::new(KmsFramePublisher::default()),
-            }),
-        })
-    }
-
-    fn subscribe(&mut self) -> eros::Result<KmsFrameSubscription> {
-        let subscription = self.inner.frames.borrow_mut().subscribe();
-
-        if self
-            .frame_receiver_task
-            .as_ref()
-            .is_none_or(compio::runtime::JoinHandle::is_finished)
-        {
-            self.inner.worker.start()?;
-            self.frame_receiver_task = Some(compio::runtime::spawn(receive_captured_frames(
-                Rc::clone(&self.inner),
-            )));
-        }
-
-        Ok(subscription)
-    }
-}
-
-async fn receive_captured_frames(source: Rc<KmsCaptureSourceInner>) {
-    loop {
-        if !source.frames.borrow_mut().has_subscribers() {
-            if let Err(error) = source.worker.stop() {
-                error!(%error, "Failed to stop KMS capture source");
-            }
-            return;
-        }
-
-        match source.worker.receive_frame().await {
-            Ok(frame) => source.frames.borrow_mut().publish(frame),
-            Err(error) => {
-                error!(%error, "KMS capture source stopped");
-                source.frames.borrow_mut().close();
-                return;
-            }
-        }
-    }
-}
+pub(crate) struct KmsScreenCaptureManagerState;
 
 impl KmsScreenCaptureManagerState {
     pub(crate) fn new() -> Self {
-        Self {
-            sources: HashMap::new(),
-        }
-    }
-}
-
-impl<Deps> KmsScreenCaptureManager<Deps>
-where
-    Deps: AsRef<KmsScreenCaptureManagerState>
-        + AsMut<KmsScreenCaptureManagerState>
-        + ScreenLayoutManager,
-{
-    fn source(&mut self, screen_id: &ScreenId) -> eros::Result<&mut KmsCaptureSource> {
-        let screen_name = self
-            .prj_ref()
-            .screen(screen_id)
-            .with_context(|| format!("Screen {} does not exist", screen_id.0))?
-            .name
-            .clone();
-
-        match self.sources.entry(*screen_id) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let context =
-                    format!("Failed to start KMS capture worker for screen {screen_name}");
-                let source = KmsCaptureSource::new(screen_name).with_context(|| context)?;
-
-                Ok(entry.insert(source))
-            }
-        }
+        Self
     }
 }
 
@@ -140,12 +39,22 @@ where
         + AsMut<KmsScreenCaptureManagerState>
         + ScreenLayoutManager,
 {
-    type Buffer = DmaBufFrame;
-    type Issue = KmsPlaneIssue;
-    type Subscription = KmsFrameSubscription;
+    type Lease = KmsCaptureLease;
+    type Receiver = KmsFrameReceiver;
 
-    fn subscribe(&mut self, screen_id: &ScreenId) -> eros::Result<Self::Subscription> {
-        self.source(screen_id)?.subscribe()
+    fn acquire(
+        &mut self,
+        screen_id: &ScreenId,
+    ) -> eros::Result<ScreenCaptureSource<Self::Lease, Self::Receiver>> {
+        let screen_name = self
+            .prj_ref()
+            .screen(screen_id)
+            .with_context(|| format!("Screen {} does not exist", screen_id.0))?
+            .name
+            .clone();
+        let context = format!("Failed to start KMS capture worker for screen {screen_name}");
+
+        Ok(KmsCaptureLease::new(screen_name).with_context(|| context)?)
     }
 }
 
@@ -204,27 +113,19 @@ mod tests {
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn subscriptions_reuse_one_source_per_physical_screen() {
-        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+    fn acquires_one_owned_source_for_an_existing_screen() {
+        let mut deps = TestDeps {
+            capture: KmsScreenCaptureManagerState::new(),
+            screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
+        };
+        let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
 
-        runtime.block_on(async {
-            let mut deps = TestDeps {
-                capture: KmsScreenCaptureManagerState::new(),
-                screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
-            };
-            let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
+        let source = manager
+            .acquire(&ScreenId(0))
+            .expect("KMS capture source should start");
 
-            let _first = manager
-                .subscribe(&ScreenId(0))
-                .expect("First KMS subscription should start");
-            let _second = manager
-                .subscribe(&ScreenId(0))
-                .expect("Second KMS subscription should reuse the source");
-
-            assert_eq!(manager.sources.len(), 1);
-            assert!(manager.subscribe(&ScreenId(2)).is_err());
-            assert_eq!(manager.sources.len(), 1);
-        });
+        assert!(manager.acquire(&ScreenId(2)).is_err());
+        drop(source);
     }
 
     fn screen(id: u8, name: &str) -> Screen {

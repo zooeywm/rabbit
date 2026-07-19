@@ -11,20 +11,23 @@ use eros::Context as _;
 use gbm::{AsRaw as _, Device};
 use khronos_egl as egl;
 
-use crate::infra::platform::screen_capture::kms::{
-    composition::KmsCompositionTransform,
-    egl_ext::{
-        DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
-        DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, DupNativeFenceFdAndroid, ITU_REC601_EXT,
-        ITU_REC709_EXT, ITU_REC2020_EXT, LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT,
-        NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR, SAMPLE_RANGE_HINT_EXT,
-        SYNC_NATIVE_FENCE_ANDROID, YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT,
-        YUV_NARROW_RANGE_EXT,
-    },
-    gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
-    types::{
-        DmaBufFrame, KmsColorEncoding, KmsColorRange, KmsFramebufferPlane, KmsPlaneBlend,
-        KmsPlaneCaptureError, KmsPlaneColor,
+use crate::infra::platform::{
+    dma_buf::DmaBufFrame,
+    screen_capture::kms::{
+        composition::KmsCompositionTransform,
+        egl_ext::{
+            DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
+            DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, DupNativeFenceFdAndroid,
+            ITU_REC601_EXT, ITU_REC709_EXT, ITU_REC2020_EXT, LINUX_DMA_BUF_EXT,
+            LINUX_DRM_FOURCC_EXT, NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR,
+            SAMPLE_RANGE_HINT_EXT, SYNC_NATIVE_FENCE_ANDROID, YUV_COLOR_SPACE_HINT_EXT,
+            YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
+        },
+        gl_context::{GlCompositionTarget, GlContext, GlExternalTexture},
+        types::{
+            KmsColorEncoding, KmsColorRange, KmsFramebufferPlane, KmsPlaneBlend,
+            KmsPlaneCaptureError, KmsPlaneColor,
+        },
     },
 };
 

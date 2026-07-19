@@ -14,34 +14,37 @@ pub(crate) use gui::RootComponent;
 pub(crate) use logging::{LoggerGuard, init_logging};
 
 /// Root application state and dependency container.
-pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState> {
+pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState> {
     config: Config,
     screen_layout_manager_state: ScreenLayoutManagerState,
     screen_capture_manager_state: ScreenCaptureManagerState,
+    frame_pipeline_manager_state: FramePipelineManagerState,
     quic_endpoint: QuicEndpoint,
 }
 
-impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
-    App<ScreenLayoutManagerState, ScreenCaptureManagerState>
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
+    App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
 {
     /// Creates the application and all persistent application services.
     pub(crate) fn new(
         config: Config,
         screen_layout_manager_state: ScreenLayoutManagerState,
         screen_capture_manager_state: ScreenCaptureManagerState,
+        frame_pipeline_manager_state: FramePipelineManagerState,
         quic_endpoint: QuicEndpoint,
     ) -> Self {
         Self {
             config,
             screen_layout_manager_state,
             screen_capture_manager_state,
+            frame_pipeline_manager_state,
             quic_endpoint,
         }
     }
 }
 
-impl<ScreenLayoutManagerState, ScreenCaptureManagerState>
-    App<ScreenLayoutManagerState, ScreenCaptureManagerState>
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
+    App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
 where
     Self: ScreenLayoutManager,
 {

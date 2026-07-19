@@ -1,85 +1,129 @@
+#[cfg(test)]
+use std::path::PathBuf;
 use std::{
     io,
     thread::{self, JoinHandle},
 };
 
-use eros::Context;
 use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 
 use crate::{
-    infra::platform::screen_capture::kms::{
-        capture::KmsCapturer,
-        types::{DmaBufFrame, KmsPlaneIssue},
+    infra::platform::{
+        dma_buf::DmaBufFrame,
+        gpu::GpuDevice,
+        screen_capture::kms::{capture::KmsCapturer, types::KmsPlaneIssue},
     },
-    kernel::screen_capture::CapturedFrame,
+    kernel::screen_capture::{CapturedFrame, ScreenCaptureSource},
 };
 
-type KmsCapturedFrame = CapturedFrame<DmaBufFrame, KmsPlaneIssue>;
+pub(crate) type KmsCapturedFrame = CapturedFrame<DmaBufFrame, KmsPlaneIssue>;
+
+#[cfg(test)]
+pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCapturedFrame {
+    CapturedFrame {
+        buffer: DmaBufFrame {
+            size,
+            format: drm::buffer::DrmFourcc::Xrgb8888,
+            objects: Vec::new(),
+            planes: Vec::new(),
+            readiness_fence: None,
+        },
+        issues: Vec::new(),
+    }
+}
 
 enum KmsCaptureCommand {
-    Start,
-    Stop,
     Shutdown,
 }
 
 #[derive(Debug)]
-pub(crate) struct KmsCaptureWorker {
+pub(crate) struct KmsCaptureLease {
     commands: Sender<KmsCaptureCommand>,
-    frames: Receiver<eros::Result<KmsCapturedFrame>>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl KmsCaptureWorker {
-    pub(crate) fn new(screen_name: String) -> io::Result<Self> {
-        let (commands, command_receiver) = bounded(2);
+#[derive(Debug)]
+pub(crate) struct KmsFrameReceiver {
+    device: Receiver<eros::Result<GpuDevice>>,
+    frames: Receiver<eros::Result<KmsCapturedFrame>>,
+}
+
+impl KmsCaptureLease {
+    pub(crate) fn new(
+        screen_name: String,
+    ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
+        let (commands, command_receiver) = bounded(1);
+        let (device_sender, device) = bounded(1);
         let (frame_sender, frames) = bounded(1);
         let overflow_frames = frames.clone();
         let thread_name = format!("rabbit-kms-{screen_name}");
         let thread = thread::Builder::new().name(thread_name).spawn(move || {
-            run_worker(screen_name, command_receiver, frame_sender, overflow_frames);
+            run_capture_loop(
+                screen_name,
+                command_receiver,
+                device_sender,
+                frame_sender,
+                overflow_frames,
+            );
         })?;
 
-        Ok(Self {
-            commands,
-            frames,
-            thread: Some(thread),
+        Ok(ScreenCaptureSource {
+            lease: Self {
+                commands,
+                thread: Some(thread),
+            },
+            receiver: KmsFrameReceiver { device, frames },
         })
     }
 
-    pub(crate) fn start(&self) -> eros::Result<()> {
-        self.send_command(KmsCaptureCommand::Start, "starting capture")
-    }
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        let (commands, _) = bounded(1);
 
-    pub(crate) fn stop(&self) -> eros::Result<()> {
-        self.send_command(KmsCaptureCommand::Stop, "stopping capture")
-    }
-
-    pub(crate) async fn receive_frame(&self) -> eros::Result<KmsCapturedFrame> {
-        let frame = self
-            .frames
-            .recv_async()
-            .await
-            .with_context(|| "KMS capture worker stopped before publishing a frame")?;
-
-        frame
-    }
-
-    fn send_command(&self, command: KmsCaptureCommand, action: &str) -> eros::Result<()> {
-        match self.commands.try_send(command) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
-                eros::bail!("KMS capture worker command queue is full while {}", action);
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                eros::bail!("KMS capture worker has stopped while {}", action);
-            }
+        Self {
+            commands,
+            thread: None,
         }
-
-        Ok(())
     }
 }
 
-impl Drop for KmsCaptureWorker {
+impl KmsFrameReceiver {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Receiver<eros::Result<GpuDevice>>,
+        Receiver<eros::Result<KmsCapturedFrame>>,
+    ) {
+        (self.device, self.frames)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn channel() -> (Sender<eros::Result<KmsCapturedFrame>>, Self) {
+        Self::channel_on(GpuDevice::from(PathBuf::from("/dev/dri/renderD128")))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn channel_on(
+        gpu_device: GpuDevice,
+    ) -> (Sender<eros::Result<KmsCapturedFrame>>, Self) {
+        let (device_sender, device) = bounded(1);
+        let (sender, frames) = bounded(1);
+        device_sender
+            .send(Ok(gpu_device))
+            .expect("Test GPU device should be sent");
+
+        (sender, Self { device, frames })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        let (_, receiver) = Self::channel();
+
+        receiver
+    }
+}
+
+impl Drop for KmsCaptureLease {
     fn drop(&mut self) {
         let Some(thread) = self.thread.take() else {
             return;
@@ -90,54 +134,36 @@ impl Drop for KmsCaptureWorker {
     }
 }
 
-fn run_worker(
+fn run_capture_loop(
     screen_name: String,
     commands: Receiver<KmsCaptureCommand>,
+    device: Sender<eros::Result<GpuDevice>>,
     frames: Sender<eros::Result<KmsCapturedFrame>>,
     overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
 ) {
-    let mut capturer = None;
-
-    while let Ok(command) = commands.recv() {
-        match command {
-            KmsCaptureCommand::Start => {
-                if !run_capture_loop(
-                    &screen_name,
-                    &mut capturer,
-                    &commands,
-                    &frames,
-                    &overflow_frames,
-                ) {
-                    return;
-                }
-            }
-            KmsCaptureCommand::Stop => {}
-            KmsCaptureCommand::Shutdown => return,
+    let capturer = match KmsCapturer::new(&screen_name) {
+        Ok(capturer) => capturer,
+        Err(error) => {
+            let _ = device.send(Err(error));
+            return;
         }
-    }
-}
+    };
 
-fn run_capture_loop(
-    screen_name: &str,
-    capturer: &mut Option<KmsCapturer>,
-    commands: &Receiver<KmsCaptureCommand>,
-    frames: &Sender<eros::Result<KmsCapturedFrame>>,
-    overflow_frames: &Receiver<eros::Result<KmsCapturedFrame>>,
-) -> bool {
+    if device.send(Ok(capturer.gpu_device().clone())).is_err() {
+        return;
+    }
+
     loop {
         match commands.try_recv() {
-            Ok(KmsCaptureCommand::Start) | Err(TryRecvError::Empty) => {}
-            Ok(KmsCaptureCommand::Stop) => return true,
-            Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return false,
+            Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
+            Err(TryRecvError::Empty) => {}
         }
 
-        let frame = capture_frame(screen_name, capturer);
+        let frame = capturer.capture();
         let capture_failed = frame.is_err();
-        if !publish_latest(frames, overflow_frames, frame) {
-            return false;
-        }
-        if capture_failed {
-            return true;
+
+        if !publish_latest(&frames, &overflow_frames, frame) || capture_failed {
+            return;
         }
     }
 }
@@ -158,31 +184,19 @@ fn publish_latest<T>(sender: &Sender<T>, receiver: &Receiver<T>, mut item: T) ->
     }
 }
 
-fn capture_frame(
-    screen_name: &str,
-    capturer: &mut Option<KmsCapturer>,
-) -> eros::Result<KmsCapturedFrame> {
-    if let Some(capturer) = capturer.as_ref() {
-        return capturer.capture();
-    }
-
-    let capturer = capturer.insert(KmsCapturer::new(screen_name)?);
-    capturer.capture()
-}
-
 #[cfg(test)]
 mod tests {
     use flume::bounded;
 
-    use crate::infra::platform::screen_capture::kms::worker::{KmsCaptureWorker, publish_latest};
+    use crate::infra::platform::screen_capture::kms::worker::{KmsCaptureLease, publish_latest};
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn worker_starts_without_opening_the_kms_output() {
-        let worker = KmsCaptureWorker::new("not-a-real-output".to_owned())
-            .expect("KMS worker thread should start without opening the output");
+    fn lease_starts_without_opening_the_kms_output_on_the_main_thread() {
+        let source = KmsCaptureLease::new("not-a-real-output".to_owned())
+            .expect("KMS capture source should start asynchronously");
 
-        drop(worker);
+        drop(source);
     }
 
     #[test]
