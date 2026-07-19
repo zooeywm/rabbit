@@ -197,7 +197,7 @@ fn discover_planes(device: &KmsDevice, crtc: crtc::Handle) -> eros::Result<Vec<K
                     ?plane_id,
                     ?crtc,
                     device = %device.path().display(),
-                    %error,
+                    error = ?error,
                     "Skipping DRM plane after discovery failed"
                 );
                 continue;
@@ -218,7 +218,7 @@ fn discover_planes(device: &KmsDevice, crtc: crtc::Handle) -> eros::Result<Vec<K
                     ?plane_id,
                     ?crtc,
                     device = %device.path().display(),
-                    %error,
+                    error = ?error,
                     "Skipping DRM plane after type discovery failed"
                 );
                 continue;
