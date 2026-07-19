@@ -10,7 +10,7 @@ use flume::{Receiver, RecvError, Selector, Sender, bounded, unbounded};
 use crate::{
     infra::platform::{
         frame_pipeline::GbmFramePipelineFrame,
-        gpu::GpuDevice,
+        gpu::{GpuContext, GpuDevice},
         screen_capture::{KmsCapturedFrame, KmsFrameReceiver},
     },
     kernel::{frame_pipeline::FramePipelineParameters, screen_manager::ScreenId},
@@ -78,6 +78,12 @@ struct GpuPipeline {
 struct GpuScreen {
     device: Option<Receiver<eros::Result<GpuDevice>>>,
     frames: Receiver<eros::Result<KmsCapturedFrame>>,
+}
+
+#[derive(Debug)]
+struct BoundGpu {
+    device: GpuDevice,
+    _context: GpuContext,
 }
 
 #[derive(Debug)]
@@ -194,7 +200,7 @@ impl Drop for GpuScreenRegistration {
 fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWorkerNotification>) {
     let mut screens = HashMap::new();
     let mut pipelines = HashMap::new();
-    let mut gpu_device = None;
+    let mut gpu = None;
 
     loop {
         match wait_for_event(&commands, &screens) {
@@ -231,16 +237,9 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
             }
             GpuWorkerEvent::Command(Ok(GpuWorkerCommand::Shutdown) | Err(_)) => return,
             GpuWorkerEvent::ScreenReady(screen_id, Ok(Ok(device))) => {
-                let mismatch = gpu_device.as_ref().and_then(|bound: &GpuDevice| {
-                    (bound != &device).then(|| {
-                        eros::error!(
-                            "GPU worker for {} cannot capture screen {} from {}",
-                            bound.render_node_path().display(),
-                            screen_id.0,
-                            device.render_node_path().display()
-                        )
-                    })
-                });
+                let mismatch = gpu
+                    .as_ref()
+                    .and_then(|bound: &BoundGpu| gpu_mismatch(&bound.device, screen_id, &device));
 
                 if let Some(error) = mismatch {
                     screens.remove(&screen_id);
@@ -250,8 +249,27 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                     continue;
                 }
 
-                if gpu_device.is_none() {
-                    gpu_device = Some(device);
+                if gpu.is_none() {
+                    let context = match GpuContext::new(&device).with_context(|| {
+                        format!(
+                            "Failed to initialize GPU processing for screen {} on {}",
+                            screen_id.0,
+                            device.render_node_path().display()
+                        )
+                    }) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            screens.remove(&screen_id);
+                            if !notify_screen_failed(&notifications, screen_id, error) {
+                                return;
+                            }
+                            continue;
+                        }
+                    };
+                    gpu = Some(BoundGpu {
+                        device,
+                        _context: context,
+                    });
                 }
                 if let Some(screen) = screens.get_mut(&screen_id) {
                     screen.device = None;
@@ -280,6 +298,21 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
             }
         }
     }
+}
+
+fn gpu_mismatch(
+    bound: &GpuDevice,
+    screen_id: ScreenId,
+    device: &GpuDevice,
+) -> Option<eros::ErrorUnion> {
+    (bound != device).then(|| {
+        eros::error!(
+            "GPU worker for {} cannot capture screen {} from {}",
+            bound.render_node_path().display(),
+            screen_id.0,
+            device.render_node_path().display()
+        )
+    })
 }
 
 fn notify_screen_failed(
@@ -364,7 +397,8 @@ mod tests {
         infra::platform::{
             frame_pipeline::worker::{
                 FramePipelineId, GpuPipeline, GpuScreen, GpuWorker, GpuWorkerEvent,
-                GpuWorkerNotification, LatestSender, process_screen_frame, wait_for_event,
+                GpuWorkerNotification, LatestSender, gpu_mismatch, process_screen_frame,
+                wait_for_event,
             },
             gpu::GpuDevice,
             screen_capture::{KmsFrameReceiver, empty_kms_frame},
@@ -425,34 +459,14 @@ mod tests {
     }
 
     #[test]
-    fn one_gpu_worker_rejects_a_screen_from_a_different_render_node() {
-        let (worker, notifications) = GpuWorker::new().expect("GPU worker should start");
-        let (first_sender, first_receiver) =
-            KmsFrameReceiver::channel_on(GpuDevice::from(PathBuf::from("/dev/dri/renderD128")));
-        let (second_sender, second_receiver) =
-            KmsFrameReceiver::channel_on(GpuDevice::from(PathBuf::from("/dev/dri/renderD129")));
-        let first = worker
-            .register_screen(ScreenId(1), first_receiver)
-            .expect("First captured screen should register");
-        let second = worker
-            .register_screen(ScreenId(2), second_receiver)
-            .expect("Second captured screen should register");
+    fn gpu_binding_rejects_a_different_render_node() {
+        let bound = GpuDevice::from(PathBuf::from("/dev/dri/renderD128"));
+        let different = GpuDevice::from(PathBuf::from("/dev/dri/renderD129"));
 
-        match notifications
-            .recv()
-            .expect("GPU worker should reject one render node")
-        {
-            GpuWorkerNotification::ScreenFailed { screen_id, error } => {
-                assert!(screen_id == ScreenId(1) || screen_id == ScreenId(2));
-                assert!(error.to_string().contains("cannot capture screen"));
-            }
-        }
+        let error = gpu_mismatch(&bound, ScreenId(2), &different)
+            .expect("A different render node should be rejected");
 
-        drop(first_sender);
-        drop(second_sender);
-        drop(first);
-        drop(second);
-        drop(worker);
+        assert!(error.to_string().contains("cannot capture screen 2"));
     }
 
     #[test]

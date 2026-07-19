@@ -3,7 +3,7 @@ mod kms;
 #[cfg(test)]
 pub(crate) use kms::empty_kms_frame;
 pub(crate) use kms::{
-    KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver, KmsScreenCaptureManager,
+    EglContext, KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver, KmsScreenCaptureManager,
     KmsScreenCaptureManagerState,
 };
 

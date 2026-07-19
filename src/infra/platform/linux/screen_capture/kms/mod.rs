@@ -22,6 +22,7 @@ pub(crate) use crate::infra::platform::screen_capture::kms::worker::empty_kms_fr
 pub(crate) use crate::infra::platform::screen_capture::kms::worker::{
     KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver,
 };
+pub(crate) use egl_context::EglContext;
 
 #[derive(Debug, kudi::DepInj)]
 #[target(KmsScreenCaptureManager)]

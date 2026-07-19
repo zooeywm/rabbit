@@ -1,15 +1,13 @@
-use std::{fs::OpenOptions, os::fd::OwnedFd};
-
 use eros::Context;
-use gbm::{BufferObjectFlags, Device, Format};
+use gbm::{BufferObjectFlags, Format};
 
 use crate::{
     infra::platform::{
         dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+        gpu::{GpuContext, GpuDevice},
         screen_capture::kms::{
             composition::KmsCompositionTransform,
             device::KmsDevice,
-            egl_context::EglContext,
             types::{KmsFramebufferSnapshot, KmsPlaneIssue},
         },
     },
@@ -18,45 +16,28 @@ use crate::{
 
 #[derive(Debug)]
 pub(crate) struct GbmFrameAllocator {
-    egl: EglContext,
-    device: Device<OwnedFd>,
+    context: GpuContext,
 }
 
 impl GbmFrameAllocator {
     pub(crate) fn new(device: &KmsDevice) -> eros::Result<Self> {
-        let render_node_path = device.render_node_path()?;
-        let render_node = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&render_node_path)
-            .with_context(|| {
-                format!(
-                    "Failed to open DRM render node {}",
-                    render_node_path.display()
-                )
-            })?;
-        let render_node = OwnedFd::from(render_node);
-        let device = Device::new(render_node).with_context(|| {
-            format!(
-                "Failed to create GBM device from {}",
-                render_node_path.display()
-            )
-        })?;
-        let egl = EglContext::new(&device)?;
+        let gpu = GpuDevice::from(device.render_node_path()?);
+        let context = GpuContext::new(&gpu)?;
 
-        Ok(Self { egl, device })
+        Ok(Self { context })
     }
 
     pub(crate) fn allocate_composition_target(&self, size: PixelSize) -> eros::Result<DmaBufFrame> {
         let format = Format::Xrgb8888;
         let usage = BufferObjectFlags::RENDERING;
 
-        if !self.device.is_format_supported(format, usage) {
+        if !self.context.device().is_format_supported(format, usage) {
             eros::bail!("GBM does not support {:?} composition targets", format);
         }
 
         let buffer = self
-            .device
+            .context
+            .device()
             .create_buffer_object::<()>(size.width, size.height, format, usage)
             .with_context(|| {
                 format!(
@@ -115,18 +96,20 @@ impl GbmFrameAllocator {
             mut issues,
         } = snapshot;
         let mut frame = self.allocate_composition_target(output_size)?;
-        let image = self.egl.import_composition_target(&frame)?;
+        let image = self.context.egl().import_composition_target(&frame)?;
         let target = self
-            .egl
+            .context
+            .egl()
             .create_composition_target(&image)
             .with_context(|| "Failed to create the OpenGL KMS composition target")?;
 
-        self.egl
+        self.context
+            .egl()
             .clear_composition_target(&target)
             .with_context(|| "Failed to initialize the KMS composition target")?;
 
         for plane in planes {
-            let image = match self.egl.import_plane(&plane) {
+            let image = match self.context.egl().import_plane(&plane) {
                 Ok(image) => image,
                 Err(error) => {
                     issues.push(KmsPlaneIssue {
@@ -137,19 +120,25 @@ impl GbmFrameAllocator {
                     continue;
                 }
             };
-            let texture = self.egl.create_external_texture(&image).with_context(|| {
-                format!("Failed to bind KMS plane {:?} for composition", plane.id)
-            })?;
+            let texture = self
+                .context
+                .egl()
+                .create_external_texture(&image)
+                .with_context(|| {
+                    format!("Failed to bind KMS plane {:?} for composition", plane.id)
+                })?;
             let transform =
                 KmsCompositionTransform::new(output_size, plane.buffer.size, plane.placement);
 
-            self.egl
+            self.context
+                .egl()
                 .compose_plane(&target, &texture, &transform, plane.blend)
                 .with_context(|| format!("Failed to compose KMS plane {:?}", plane.id))?;
         }
 
         frame.readiness_fence = Some(
-            self.egl
+            self.context
+                .egl()
                 .finish_composition()
                 .with_context(|| "Failed to export KMS composition readiness")?,
         );
