@@ -22,6 +22,7 @@ use crate::{
     kernel::{
         connection_request::ConnectionRequest,
         frame_pipeline::{FramePipelineManager, FramePipelineParameters},
+        geometry::PixelSize,
         screen_configuration::{
             RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
             ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
@@ -93,6 +94,17 @@ pub(crate) enum RootMessage {
     ConnectionRequestFailed(eros::ErrorUnion),
     ConnectionListenerFailed(eros::ErrorUnion),
     SessionMessageReceived(SessionId, SessionMessage),
+    ScreenStreamConfigurationFinished {
+        session_id: SessionId,
+        streams: Vec<(ScreenId, FramePipelineParameters)>,
+        result: eros::Result<()>,
+    },
+    ScreenStreamRequestFinished {
+        session_id: SessionId,
+        screen_id: ScreenId,
+        frame_size: PixelSize,
+        result: eros::Result<()>,
+    },
     SessionClosed(SessionId),
     SessionFailed(SessionId, eros::ErrorUnion),
     ScreenStreamFinished(SessionId, ScreenId, u64, eros::Result<()>),
@@ -634,32 +646,21 @@ impl Component for RootComponent {
                             return Ok(false);
                         };
                         let session_send = Rc::clone(&session.send);
+                        let configuration_sender = sender.clone();
 
-                        if let Err(error) = session_send
-                            .send_screen_streams_configured(configured)
-                            .await
-                        {
-                            error!(
-                                session_id = id.0,
-                                error = ?error,
-                                "Failed to send screen stream results"
+                        compio::runtime::spawn(async move {
+                            let result = session_send
+                                .send_screen_streams_configured(configured)
+                                .await;
+                            configuration_sender.post(
+                                RootMessage::ScreenStreamConfigurationFinished {
+                                    session_id: id,
+                                    streams,
+                                    result,
+                                },
                             );
-                            self.remove_session(id).await?;
-                            return Ok(false);
-                        }
-
-                        for (screen_id, parameters) in streams {
-                            if let Err(error) =
-                                self.replace_screen_stream(id, screen_id, parameters, sender)
-                            {
-                                error!(
-                                    session_id = id.0,
-                                    screen_id = screen_id.0,
-                                    error = ?error,
-                                    "Failed to start screen stream"
-                                );
-                            }
-                        }
+                        })
+                        .detach();
                     }
                     SessionMessage::Control(ControlMessage::ScreenStreamsConfigured(
                         configured,
@@ -689,6 +690,44 @@ impl Component for RootComponent {
                 }
 
                 Ok(true)
+            }
+            RootMessage::ScreenStreamConfigurationFinished {
+                session_id,
+                streams,
+                result,
+            } => {
+                if let Err(error) = result {
+                    error!(
+                        session_id = session_id.0,
+                        error = ?error,
+                        "Failed to send screen stream results"
+                    );
+                    self.remove_session(session_id).await?;
+                    return Ok(false);
+                }
+
+                if !self
+                    .sessions
+                    .iter()
+                    .any(|session| session.send.id() == session_id)
+                {
+                    return Ok(false);
+                }
+
+                for (screen_id, parameters) in streams {
+                    if let Err(error) =
+                        self.replace_screen_stream(session_id, screen_id, parameters, sender)
+                    {
+                        error!(
+                            session_id = session_id.0,
+                            screen_id = screen_id.0,
+                            error = ?error,
+                            "Failed to start screen stream"
+                        );
+                    }
+                }
+
+                Ok(false)
             }
             RootMessage::SessionClosed(id) => {
                 self.remove_session(id).await?;
@@ -802,26 +841,54 @@ impl Component for RootComponent {
                         }],
                     };
 
-                    if let Err(error) = session_send.send_screen_streams_request(request).await {
-                        error!(
-                            session_id = session_id.0,
-                            screen_id = screen_id.0,
-                            error = ?error,
-                            "Failed to request screen stream"
-                        );
-                        self.remove_session(session_id).await?;
-                        self.set_connection_status(format!(
-                            "Session {} screen request failed: {error}",
-                            session_id.0
-                        ))
-                        .await?;
-                    } else {
-                        self.set_connection_status(format!(
-                            "Requested session {} screen {} at {}x{}",
-                            session_id.0, screen_id.0, frame_size.width, frame_size.height
-                        ))
-                        .await?;
-                    }
+                    let request_sender = sender.clone();
+                    compio::runtime::spawn(async move {
+                        let result = session_send.send_screen_streams_request(request).await;
+                        request_sender.post(RootMessage::ScreenStreamRequestFinished {
+                            session_id,
+                            screen_id,
+                            frame_size,
+                            result,
+                        });
+                    })
+                    .detach();
+                }
+
+                Ok(true)
+            }
+            RootMessage::ScreenStreamRequestFinished {
+                session_id,
+                screen_id,
+                frame_size,
+                result,
+            } => {
+                if !self
+                    .sessions
+                    .iter()
+                    .any(|session| session.send.id() == session_id)
+                {
+                    return Ok(false);
+                }
+
+                if let Err(error) = result {
+                    error!(
+                        session_id = session_id.0,
+                        screen_id = screen_id.0,
+                        error = ?error,
+                        "Failed to request screen stream"
+                    );
+                    self.remove_session(session_id).await?;
+                    self.set_connection_status(format!(
+                        "Session {} screen request failed: {error}",
+                        session_id.0
+                    ))
+                    .await?;
+                } else {
+                    self.set_connection_status(format!(
+                        "Requested session {} screen {} at {}x{}",
+                        session_id.0, screen_id.0, frame_size.width, frame_size.height
+                    ))
+                    .await?;
                 }
 
                 Ok(true)
