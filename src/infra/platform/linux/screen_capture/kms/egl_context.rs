@@ -439,15 +439,23 @@ impl EglContext {
     }
 
     pub(crate) fn finish_composition(&self) -> eros::Result<OwnedFd> {
+        self.export_readiness_fence("KMS composition")
+    }
+
+    pub(crate) fn finish_frame_pipeline(&self) -> eros::Result<OwnedFd> {
+        self.export_readiness_fence("frame-pipeline conversion")
+    }
+
+    fn export_readiness_fence(&self, operation: &str) -> eros::Result<OwnedFd> {
         let sync = unsafe {
             self.instance
                 .create_sync(self.display, SYNC_NATIVE_FENCE_ANDROID, &[egl::ATTRIB_NONE])
-                .with_context(|| "Failed to create an EGL native fence for KMS composition")?
+                .with_context(|| format!("Failed to create an EGL native fence for {operation}"))?
         };
 
-        if let Err(error) = self.gl.flush_composition() {
+        if let Err(error) = self.gl.flush() {
             let _ = unsafe { self.instance.destroy_sync(self.display, sync) };
-            return Err(error);
+            return Ok(Err(error).with_context(|| format!("Failed to flush {operation}"))?);
         }
 
         let raw_fd = unsafe { (self.dup_native_fence_fd)(self.display.as_ptr(), sync.as_ptr()) };
@@ -455,15 +463,17 @@ impl EglContext {
             let source = self.instance.get_error();
             let _ = unsafe { self.instance.destroy_sync(self.display, sync) };
             return match source {
-                Some(source) => Ok(Err(source)
-                    .with_context(|| "Failed to export the KMS composition readiness fence")?),
-                None => eros::bail!("Failed to export the KMS composition readiness fence"),
+                Some(source) => Ok(Err(source).with_context(|| {
+                    format!("Failed to export the {operation} readiness fence")
+                })?),
+                None => eros::bail!("Failed to export the {} readiness fence", operation),
             };
         }
 
         let fence = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-        unsafe { self.instance.destroy_sync(self.display, sync) }
-            .with_context(|| "Failed to destroy the exported EGL native fence")?;
+        unsafe { self.instance.destroy_sync(self.display, sync) }.with_context(|| {
+            format!("Failed to destroy the exported {operation} EGL native fence")
+        })?;
 
         Ok(fence)
     }

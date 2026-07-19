@@ -446,7 +446,7 @@ fn process_pipeline_frame(
         .egl()
         .create_dma_buf_texture(source)
         .with_context(|| "Failed to bind the frame-pipeline source texture")?;
-    let buffer = context
+    let mut buffer = context
         .allocate_dma_buf(
             parameters.frame_size,
             Format::Nv12,
@@ -475,6 +475,12 @@ fn process_pipeline_frame(
                 parameters.frame_size.width, parameters.frame_size.height
             )
         })?;
+    buffer.readiness_fence = Some(
+        context
+            .egl()
+            .finish_frame_pipeline()
+            .with_context(|| "Failed to export frame-pipeline output readiness")?,
+    );
 
     Ok(GbmFramePipelineFrame { buffer })
 }

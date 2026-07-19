@@ -108,7 +108,7 @@ mod tests {
             .egl()
             .create_dma_buf_texture(&image)
             .expect("Pipeline GPU context should bind the composed KMS frame as a texture");
-        let output = context
+        let mut output = context
             .allocate_dma_buf(
                 frame.buffer.size,
                 Format::Nv12,
@@ -127,6 +127,14 @@ mod tests {
             .egl()
             .convert_to_nv12(&texture, &output_target)
             .expect("Pipeline GPU context should convert the composed frame to NV12");
+        output.readiness_fence = Some(
+            context
+                .egl()
+                .finish_frame_pipeline()
+                .expect("Pipeline GPU context should export NV12 output readiness"),
+        );
+
+        assert!(output.readiness_fence.is_some());
 
         drop(lease);
     }

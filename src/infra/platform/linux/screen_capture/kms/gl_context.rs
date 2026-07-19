@@ -557,12 +557,12 @@ impl GlContext {
         Ok(())
     }
 
-    pub(crate) fn flush_composition(&self) -> eros::Result<()> {
+    pub(crate) fn flush(&self) -> eros::Result<()> {
         unsafe { self.api.flush() };
 
         let error = unsafe { self.api.get_error() };
         if error != glow::NO_ERROR {
-            eros::bail!("Failed to flush KMS composition: GL error 0x{:04X}", error);
+            eros::bail!("OpenGL ES flush failed with error 0x{:04X}", error);
         }
 
         Ok(())
