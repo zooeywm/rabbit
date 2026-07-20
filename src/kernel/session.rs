@@ -148,17 +148,12 @@ where
         self.send.close()
     }
 
-    pub async fn send_video(&self, message: VideoMessage) -> eros::Result<()> {
+    pub fn send_video(&self, message: VideoMessage) -> eros::Result<()> {
         require_role(self.role, SessionRole::Host, "send video")?;
         let screen_id = message.screen_id;
 
         self.send
-            .send(TransportMessage {
-                channel: TransportChannel::Video(screen_id),
-                delivery: Delivery::Unreliable,
-                payload: message.payload,
-            })
-            .await
+            .send_unreliable(TransportChannel::Video(screen_id), message.payload)
             .with_context(|| format!("Failed to send video packet for screen {}", screen_id.0))
     }
 
@@ -487,6 +482,15 @@ mod tests {
             Some(1173)
         }
 
+        fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
+            self.messages.borrow_mut().push(TransportMessage {
+                channel,
+                delivery: Delivery::Unreliable,
+                payload,
+            });
+            Ok(())
+        }
+
         fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
             self.messages.borrow_mut().push(message);
             ready(Ok(()))
@@ -526,13 +530,11 @@ mod tests {
             },
         };
         let packet = Bytes::from_static(b"standard RTP packet");
-        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
-
-        runtime
-            .block_on(session.send_video(VideoMessage {
+        session
+            .send_video(VideoMessage {
                 screen_id: ScreenId(3),
                 payload: packet,
-            }))
+            })
             .expect("Host should send one video packet");
 
         assert_eq!(session.max_video_packet_size(), Some(1173));

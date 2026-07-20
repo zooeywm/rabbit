@@ -45,6 +45,8 @@ pub(crate) enum Nv12OutputStrategy {
 }
 
 impl Nv12OutputStrategy {
+    pub(crate) const ALL: [Self; 2] = [Self::GbmNv12, Self::GbmSeparatePlanes];
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::GbmNv12 => "gbm_nv12",
@@ -193,28 +195,25 @@ impl GpuContext {
         &self,
         size: PixelSize,
     ) -> eros::Result<(DmaBufFrame, Nv12OutputStrategy)> {
-        let usage = BufferObjectFlags::RENDERING;
+        for strategy in Nv12OutputStrategy::ALL {
+            if !self.supports_nv12_output(strategy) {
+                tracing::debug!(
+                    target: "rabbit::frame_pipeline",
+                    strategy = strategy.name(),
+                    "NV12 output strategy is unsupported"
+                );
+                continue;
+            }
 
-        if self.device.is_format_supported(Format::Nv12, usage) {
-            return Ok((
-                self.allocate_dma_buf(size, Format::Nv12, usage)?,
-                Nv12OutputStrategy::GbmNv12,
-            ));
-        }
-
-        tracing::debug!(
-            target: "rabbit::frame_pipeline",
-            strategy = Nv12OutputStrategy::GbmNv12.name(),
-            "NV12 output strategy is unsupported"
-        );
-
-        if self.device.is_format_supported(Format::R8, usage)
-            && self.device.is_format_supported(Format::Gr88, usage)
-        {
-            return Ok((
-                self.allocate_separate_nv12_dma_buf(size, usage)?,
-                Nv12OutputStrategy::GbmSeparatePlanes,
-            ));
+            match self.allocate_nv12_output(size, strategy) {
+                Ok(frame) => return Ok((frame, strategy)),
+                Err(error) => tracing::debug!(
+                    target: "rabbit::frame_pipeline",
+                    strategy = strategy.name(),
+                    error = ?error,
+                    "NV12 output strategy allocation failed"
+                ),
+            }
         }
 
         eros::bail!(
@@ -233,6 +232,18 @@ impl GpuContext {
             Nv12OutputStrategy::GbmNv12 => self.allocate_dma_buf(size, Format::Nv12, usage),
             Nv12OutputStrategy::GbmSeparatePlanes => {
                 self.allocate_separate_nv12_dma_buf(size, usage)
+            }
+        }
+    }
+
+    pub(crate) fn supports_nv12_output(&self, strategy: Nv12OutputStrategy) -> bool {
+        let usage = BufferObjectFlags::RENDERING;
+
+        match strategy {
+            Nv12OutputStrategy::GbmNv12 => self.device.is_format_supported(Format::Nv12, usage),
+            Nv12OutputStrategy::GbmSeparatePlanes => {
+                self.device.is_format_supported(Format::R8, usage)
+                    && self.device.is_format_supported(Format::Gr88, usage)
             }
         }
     }

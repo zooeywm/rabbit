@@ -161,6 +161,10 @@ impl TransportSend for QuicTransportSend {
         max_tlv_payload_size(self.connection.max_datagram_size())
     }
 
+    fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
+        self.send_unreliable_message(channel, payload)
+    }
+
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
         self.send_message(message)
     }
@@ -187,11 +191,15 @@ impl QuicTransportSend {
         match delivery {
             Delivery::ReliableOrdered => self.send_reliable_ordered(channel, payload).await,
             Delivery::ReliableUnordered => self.send_reliable_unordered(channel, payload).await,
-            Delivery::Unreliable => self.send_unreliable(channel, payload),
+            Delivery::Unreliable => self.send_unreliable_message(channel, payload),
         }
     }
 
-    fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
+    fn send_unreliable_message(
+        &self,
+        channel: TransportChannel,
+        payload: Bytes,
+    ) -> eros::Result<()> {
         let datagram =
             encode_tlv(channel, payload).with_context(|| "Failed to encode QUIC datagram")?;
 
@@ -299,11 +307,13 @@ async fn receive_reliable_ordered(
     mut reader: ReliableStreamReader,
     messages: UnsyncQueue<ReceiveItem>,
 ) {
+    let consumed = UnsyncQueue::default();
+
     loop {
         let message = recv_reliable_ordered(&mut reader).await;
         let finished = !matches!(&message, Ok(Some(_)));
 
-        publish_received(&messages, message).await;
+        publish_received(&messages, &consumed, message).await;
 
         if finished {
             return;
@@ -324,11 +334,13 @@ async fn receive_reliable_unordered(
     connection: compio::quic::Connection,
     messages: UnsyncQueue<ReceiveItem>,
 ) {
+    let consumed = UnsyncQueue::default();
+
     loop {
         let message = recv_reliable_unordered(&connection).await;
         let finished = !matches!(&message, Ok(Some(_)));
 
-        publish_received(&messages, message).await;
+        publish_received(&messages, &consumed, message).await;
 
         if finished {
             return;
@@ -340,11 +352,13 @@ async fn receive_unreliable(
     connection: compio::quic::Connection,
     messages: UnsyncQueue<ReceiveItem>,
 ) {
+    let consumed = UnsyncQueue::default();
+
     loop {
         let message = recv_unreliable(&connection).await;
         let finished = !matches!(&message, Ok(Some(_)));
 
-        publish_received(&messages, message).await;
+        publish_received(&messages, &consumed, message).await;
 
         if finished {
             return;
@@ -352,9 +366,11 @@ async fn receive_unreliable(
     }
 }
 
-async fn publish_received(messages: &UnsyncQueue<ReceiveItem>, result: ReceiveResult) {
-    let consumed = UnsyncQueue::default();
-
+async fn publish_received(
+    messages: &UnsyncQueue<ReceiveItem>,
+    consumed: &UnsyncQueue<()>,
+    result: ReceiveResult,
+) {
     messages.push(ReceiveItem {
         result,
         consumed: consumed.clone(),
@@ -483,10 +499,12 @@ impl ReliableStreamReader {
 }
 
 fn encode_tlv(channel: TransportChannel, payload: Bytes) -> eros::Result<Bytes> {
-    let header = encode_tlv_header(channel, payload.len())?;
+    let payload_length = u16::try_from(payload.len())
+        .with_context(|| "Failed to encode Transport TLV payload length")?;
     let mut tlv = BytesMut::with_capacity(TLV_HEADER_SIZE + payload.len());
 
-    tlv.extend_from_slice(&header);
+    tlv.put_u8(channel.into());
+    tlv.put_u16(payload_length);
     tlv.extend_from_slice(&payload);
 
     Ok(tlv.freeze())

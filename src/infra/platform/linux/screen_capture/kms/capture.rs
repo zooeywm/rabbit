@@ -89,7 +89,6 @@ impl KmsCapturer {
 
 #[cfg(test)]
 mod tests {
-    use gbm::{BufferObjectFlags, Format};
 
     use crate::{
         infra::platform::{gpu::GpuContext, screen_capture::kms::KmsCaptureLease},
@@ -146,12 +145,8 @@ mod tests {
             .egl()
             .create_dma_buf_texture(&image)
             .expect("Pipeline GPU context should bind the composed KMS frame as a texture");
-        let mut output = context
-            .allocate_dma_buf(
-                frame.buffer.size,
-                Format::Nv12,
-                BufferObjectFlags::RENDERING,
-            )
+        let (mut output, _) = context
+            .select_nv12_output(frame.buffer.size)
             .expect("Pipeline GPU context should allocate an NV12 output");
         let output_image = context
             .egl()

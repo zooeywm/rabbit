@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use drm::{
     Device as _, VblankWaitFlags, VblankWaitTarget,
-    control::{Device as _, PlaneType, connector, crtc, plane},
+    control::{Device as _, PlaneType, connector, crtc, plane, property},
 };
 use eros::Context;
 use tracing::{error, warn};
@@ -35,6 +35,33 @@ pub(crate) struct KmsOutput {
 struct KmsPlane {
     id: plane::Handle,
     plane_type: PlaneType,
+    properties: Vec<KmsPlaneProperty>,
+}
+
+#[derive(Debug)]
+struct KmsPlaneProperty {
+    handle: property::Handle,
+    kind: KmsPlanePropertyKind,
+}
+
+#[derive(Debug)]
+enum KmsPlanePropertyKind {
+    Zpos,
+    SourceX,
+    SourceY,
+    SourceWidth,
+    SourceHeight,
+    DestinationX,
+    DestinationY,
+    DestinationWidth,
+    DestinationHeight,
+    Rotation,
+    Alpha,
+    PixelBlendMode(property::Info),
+    ColorEncoding(property::Info),
+    ColorRange(property::Info),
+    HotspotX,
+    HotspotY,
 }
 
 impl KmsOutput {
@@ -137,7 +164,7 @@ impl KmsOutput {
                 continue;
             };
 
-            let properties = match query_plane_properties(&self.device, known_plane.id) {
+            let properties = match query_plane_properties(&self.device, known_plane) {
                 Ok(properties) => properties,
                 Err(error) => {
                     issues.push(KmsPlaneIssue {
@@ -211,15 +238,15 @@ fn discover_planes(device: &KmsDevice, crtc: crtc::Handle) -> eros::Result<Vec<K
             continue;
         }
 
-        let plane_type = match query_plane_type(device, plane_id) {
-            Ok(plane_type) => plane_type,
+        let (plane_type, properties) = match discover_plane_properties(device, plane_id) {
+            Ok(properties) => properties,
             Err(error) => {
                 error!(
                     ?plane_id,
                     ?crtc,
                     device = %device.path().display(),
                     error = ?error,
-                    "Skipping DRM plane after type discovery failed"
+                    "Skipping DRM plane after property metadata discovery failed"
                 );
                 continue;
             }
@@ -228,6 +255,7 @@ fn discover_planes(device: &KmsDevice, crtc: crtc::Handle) -> eros::Result<Vec<K
         planes.push(KmsPlane {
             id: plane_id,
             plane_type,
+            properties,
         });
     }
 
@@ -249,66 +277,100 @@ fn discover_planes(device: &KmsDevice, crtc: crtc::Handle) -> eros::Result<Vec<K
     Ok(planes)
 }
 
-fn query_plane_type(
+fn discover_plane_properties(
     device: &KmsDevice,
     plane_id: plane::Handle,
-) -> Result<PlaneType, KmsPlaneCaptureError> {
+) -> Result<(PlaneType, Vec<KmsPlaneProperty>), KmsPlaneCaptureError> {
     let properties = device
         .get_properties(plane_id)
         .map_err(KmsPlaneCaptureError::QueryProperties)?;
+    let mut discovered_plane_type = None;
+    let mut cached = Vec::with_capacity(properties.as_props_and_values().0.len());
 
     for (property_id, value) in properties.iter() {
-        let property = device
+        let info = device
             .get_property(*property_id)
             .map_err(KmsPlaneCaptureError::QueryProperties)?;
 
-        if property.name().to_bytes() == b"type" {
-            return plane_type(*value);
-        }
+        let kind = match info.name().to_bytes() {
+            b"type" => {
+                discovered_plane_type = Some(plane_type(*value)?);
+                continue;
+            }
+            b"zpos" => KmsPlanePropertyKind::Zpos,
+            b"SRC_X" => KmsPlanePropertyKind::SourceX,
+            b"SRC_Y" => KmsPlanePropertyKind::SourceY,
+            b"SRC_W" => KmsPlanePropertyKind::SourceWidth,
+            b"SRC_H" => KmsPlanePropertyKind::SourceHeight,
+            b"CRTC_X" => KmsPlanePropertyKind::DestinationX,
+            b"CRTC_Y" => KmsPlanePropertyKind::DestinationY,
+            b"CRTC_W" => KmsPlanePropertyKind::DestinationWidth,
+            b"CRTC_H" => KmsPlanePropertyKind::DestinationHeight,
+            b"rotation" => KmsPlanePropertyKind::Rotation,
+            b"alpha" => KmsPlanePropertyKind::Alpha,
+            b"pixel blend mode" => KmsPlanePropertyKind::PixelBlendMode(info),
+            b"COLOR_ENCODING" => KmsPlanePropertyKind::ColorEncoding(info),
+            b"COLOR_RANGE" => KmsPlanePropertyKind::ColorRange(info),
+            b"HOTSPOT_X" => KmsPlanePropertyKind::HotspotX,
+            b"HOTSPOT_Y" => KmsPlanePropertyKind::HotspotY,
+            _ => continue,
+        };
+        cached.push(KmsPlaneProperty {
+            handle: *property_id,
+            kind,
+        });
     }
 
-    Err(KmsPlaneCaptureError::MissingProperty { property: "type" })
+    Ok((
+        discovered_plane_type.ok_or(KmsPlaneCaptureError::MissingProperty { property: "type" })?,
+        cached,
+    ))
 }
 
 fn query_plane_properties(
     device: &KmsDevice,
-    plane_id: plane::Handle,
+    plane: &KmsPlane,
 ) -> Result<KmsPlaneProperties, KmsPlaneCaptureError> {
     let properties = device
-        .get_properties(plane_id)
+        .get_properties(plane.id)
         .map_err(KmsPlaneCaptureError::QueryProperties)?;
-    let mut values = RawPlaneProperties::default();
+    let mut values = RawPlaneProperties {
+        plane_type: Some(u64::from(plane.plane_type as u32)),
+        ..RawPlaneProperties::default()
+    };
 
     for (property_id, value) in properties.iter() {
-        let property = device
-            .get_property(*property_id)
-            .map_err(KmsPlaneCaptureError::QueryProperties)?;
+        let Some(property) = plane
+            .properties
+            .iter()
+            .find(|property| property.handle == *property_id)
+        else {
+            continue;
+        };
 
-        match property.name().to_bytes() {
-            b"type" => values.plane_type = Some(*value),
-            b"zpos" => values.zpos = Some(*value),
-            b"SRC_X" => values.source_x = Some(*value),
-            b"SRC_Y" => values.source_y = Some(*value),
-            b"SRC_W" => values.source_width = Some(*value),
-            b"SRC_H" => values.source_height = Some(*value),
-            b"CRTC_X" => values.destination_x = Some(*value),
-            b"CRTC_Y" => values.destination_y = Some(*value),
-            b"CRTC_W" => values.destination_width = Some(*value),
-            b"CRTC_H" => values.destination_height = Some(*value),
-            b"rotation" => values.rotation = Some(*value),
-            b"alpha" => values.alpha = Some(*value),
-            b"pixel blend mode" => {
-                values.pixel_blend_mode = Some(pixel_blend_mode(&property, *value)?);
+        match &property.kind {
+            KmsPlanePropertyKind::Zpos => values.zpos = Some(*value),
+            KmsPlanePropertyKind::SourceX => values.source_x = Some(*value),
+            KmsPlanePropertyKind::SourceY => values.source_y = Some(*value),
+            KmsPlanePropertyKind::SourceWidth => values.source_width = Some(*value),
+            KmsPlanePropertyKind::SourceHeight => values.source_height = Some(*value),
+            KmsPlanePropertyKind::DestinationX => values.destination_x = Some(*value),
+            KmsPlanePropertyKind::DestinationY => values.destination_y = Some(*value),
+            KmsPlanePropertyKind::DestinationWidth => values.destination_width = Some(*value),
+            KmsPlanePropertyKind::DestinationHeight => values.destination_height = Some(*value),
+            KmsPlanePropertyKind::Rotation => values.rotation = Some(*value),
+            KmsPlanePropertyKind::Alpha => values.alpha = Some(*value),
+            KmsPlanePropertyKind::PixelBlendMode(info) => {
+                values.pixel_blend_mode = Some(pixel_blend_mode(info, *value)?);
             }
-            b"COLOR_ENCODING" => {
-                values.color_encoding = Some(color_encoding(&property, *value)?);
+            KmsPlanePropertyKind::ColorEncoding(info) => {
+                values.color_encoding = Some(color_encoding(info, *value)?);
             }
-            b"COLOR_RANGE" => {
-                values.color_range = Some(color_range(&property, *value)?);
+            KmsPlanePropertyKind::ColorRange(info) => {
+                values.color_range = Some(color_range(info, *value)?);
             }
-            b"HOTSPOT_X" => values.hotspot_x = Some(*value),
-            b"HOTSPOT_Y" => values.hotspot_y = Some(*value),
-            _ => {}
+            KmsPlanePropertyKind::HotspotX => values.hotspot_x = Some(*value),
+            KmsPlanePropertyKind::HotspotY => values.hotspot_y = Some(*value),
         }
     }
 

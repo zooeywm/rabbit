@@ -14,7 +14,7 @@ use crate::{
         frame_pipeline::{GbmFramePipelineFrame, SharedFramePipelineError},
         gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
         screen_capture::{EglDmaBufImage, KmsCapturedFrame, KmsFrameReceiver},
-        video_encoder::{hardware_h264_encoder_for, va_vpp_input_modifier},
+        video_encoder::{hardware_h264_encoder_for, va_vpp_input_modifiers},
     },
     kernel::{frame_pipeline::FramePipelineParameters, screen_manager::ScreenId},
 };
@@ -85,6 +85,7 @@ struct GpuPipeline {
 
 #[derive(Debug, Clone, Copy)]
 enum FrameOutputStrategy {
+    PassthroughXrgb(Modifier),
     DirectNv12(Nv12OutputStrategy),
     VaapiXrgb(Modifier),
 }
@@ -386,6 +387,12 @@ fn process_screen_frame(
         probe.mark_gpu_received();
     }
 
+    let frame = match publish_single_pipeline_passthrough(screen_id, frame, pipelines) {
+        Ok(()) => return,
+        Err(frame) => frame,
+    };
+
+    let mut frame = frame;
     let source = match prepare_pipeline_source(context, screen_id, &mut frame) {
         Ok(source) => source,
         Err(error) => {
@@ -400,6 +407,83 @@ fn process_screen_frame(
     route_screen_frame(screen_id, frame, pipelines, |parameters, frame| {
         process_pipeline_frame(context, &source, parameters, frame)
     });
+}
+
+fn publish_single_pipeline_passthrough(
+    screen_id: ScreenId,
+    mut frame: KmsCapturedFrame,
+    pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
+) -> Result<(), KmsCapturedFrame> {
+    let mut matching = pipelines
+        .iter()
+        .filter(|(_, pipeline)| pipeline.screen_id == screen_id)
+        .map(|(id, _)| *id);
+    let Some(pipeline_id) = matching.next() else {
+        return Err(frame);
+    };
+    if matching.next().is_some() {
+        return Err(frame);
+    }
+
+    let Some(pipeline) = pipelines.get_mut(&pipeline_id) else {
+        return Err(frame);
+    };
+    if pipeline.parameters.frame_size != frame.buffer.size
+        || frame.buffer.format != Format::Xrgb8888
+        || frame.buffer.planes.len() != 1
+    {
+        return Err(frame);
+    }
+    let modifier = frame.buffer.planes[0].modifier;
+
+    match pipeline.output_strategy {
+        None => {
+            if let Err(error) = hardware_h264_encoder_for(&frame.buffer) {
+                tracing::debug!(
+                    target: "rabbit::frame_pipeline",
+                    screen_id = screen_id.0,
+                    modifier = ?modifier,
+                    error = ?error,
+                    "Hardware H.264 pipeline rejected KMS XRGB pass-through"
+                );
+                return Err(frame);
+            }
+            pipeline.output_strategy = Some(FrameOutputStrategy::PassthroughXrgb(modifier));
+            tracing::info!(
+                target: "rabbit::frame_pipeline",
+                screen_id = screen_id.0,
+                width = frame.buffer.size.width,
+                height = frame.buffer.size.height,
+                strategy = FrameOutputStrategy::PassthroughXrgb(modifier).name(),
+                "Selected frame-pipeline output strategy"
+            );
+        }
+        Some(FrameOutputStrategy::PassthroughXrgb(expected)) if expected == modifier => {}
+        Some(FrameOutputStrategy::PassthroughXrgb(expected)) => {
+            pipeline.outputs.publish(Err(eros::error!(
+                "Screen {} XRGB pass-through modifier changed from {:?} to {:?}",
+                screen_id.0,
+                expected,
+                modifier
+            )));
+            pipelines.remove(&pipeline_id);
+            return Ok(());
+        }
+        Some(FrameOutputStrategy::DirectNv12(_) | FrameOutputStrategy::VaapiXrgb(_)) => {
+            return Err(frame);
+        }
+    }
+
+    let probe = frame.probe.take().map(|mut probe| {
+        probe.mark_gpu_submitted();
+        probe
+    });
+    pipeline.outputs.publish(Ok(GbmFramePipelineFrame {
+        buffer: frame.buffer,
+        probe,
+    }));
+
+    Ok(())
 }
 
 fn prepare_pipeline_source<'context>(
@@ -490,6 +574,9 @@ fn process_pipeline_frame(
         .output_strategy
         .with_context(|| "Frame-pipeline output strategy was not selected")?
     {
+        FrameOutputStrategy::PassthroughXrgb(_) => {
+            eros::bail!("XRGB pass-through reached the GPU processing path")
+        }
         FrameOutputStrategy::DirectNv12(_) => {
             let target_image = context
                 .egl()
@@ -538,6 +625,7 @@ fn process_pipeline_frame(
 impl FrameOutputStrategy {
     fn name(self) -> &'static str {
         match self {
+            Self::PassthroughXrgb(_) => "kms_xrgb_passthrough",
             Self::DirectNv12(strategy) => strategy.name(),
             Self::VaapiXrgb(_) => "vaapi_xrgb",
         }
@@ -551,21 +639,92 @@ fn select_output(
     crate::infra::platform::dma_buf::DmaBufFrame,
     FrameOutputStrategy,
 )> {
-    if let Ok((buffer, strategy)) = context.select_nv12_output(size) {
-        if hardware_h264_encoder_for(&buffer).is_ok() {
-            return Ok((buffer, FrameOutputStrategy::DirectNv12(strategy)));
+    for strategy in Nv12OutputStrategy::ALL {
+        if !context.supports_nv12_output(strategy) {
+            continue;
         }
-        tracing::debug!(
-            target: "rabbit::frame_pipeline",
-            strategy = strategy.name(),
-            "Hardware H.264 encoder rejected direct NV12 output"
-        );
+
+        let buffer = match context.allocate_nv12_output(size, strategy) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                tracing::debug!(
+                    target: "rabbit::frame_pipeline",
+                    strategy = strategy.name(),
+                    error = ?error,
+                    "Failed to allocate direct NV12 output candidate"
+                );
+                continue;
+            }
+        };
+        let renderable = context
+            .egl()
+            .import_nv12_target(&buffer)
+            .and_then(|image| context.egl().create_nv12_target(&image));
+        if let Err(error) = renderable {
+            tracing::debug!(
+                target: "rabbit::frame_pipeline",
+                strategy = strategy.name(),
+                error = ?error,
+                "EGL rejected direct NV12 output candidate"
+            );
+            continue;
+        }
+        if let Err(error) = hardware_h264_encoder_for(&buffer) {
+            tracing::debug!(
+                target: "rabbit::frame_pipeline",
+                strategy = strategy.name(),
+                error = ?error,
+                "Hardware H.264 encoder rejected direct NV12 output candidate"
+            );
+            continue;
+        }
+
+        return Ok((buffer, FrameOutputStrategy::DirectNv12(strategy)));
     }
 
-    let modifier = va_vpp_input_modifier(Format::Xrgb8888)
-        .with_context(|| "Failed to find a VAAPI-compatible XRGB DMA-BUF modifier")?;
-    let strategy = FrameOutputStrategy::VaapiXrgb(modifier);
-    Ok((allocate_output(context, size, strategy)?, strategy))
+    for modifier in va_vpp_input_modifiers(Format::Xrgb8888)
+        .with_context(|| "Failed to find VAAPI-compatible XRGB DMA-BUF modifiers")?
+    {
+        let strategy = FrameOutputStrategy::VaapiXrgb(modifier);
+        let buffer = match allocate_output(context, size, strategy) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                tracing::debug!(
+                    target: "rabbit::frame_pipeline",
+                    modifier = ?modifier,
+                    error = ?error,
+                    "Failed to allocate VAAPI XRGB output candidate"
+                );
+                continue;
+            }
+        };
+        let renderable = context
+            .egl()
+            .import_composition_target(&buffer)
+            .and_then(|image| context.egl().create_composition_target(&image));
+        if let Err(error) = renderable {
+            tracing::debug!(
+                target: "rabbit::frame_pipeline",
+                modifier = ?modifier,
+                error = ?error,
+                "EGL rejected VAAPI XRGB output candidate"
+            );
+            continue;
+        }
+        if let Err(error) = hardware_h264_encoder_for(&buffer) {
+            tracing::debug!(
+                target: "rabbit::frame_pipeline",
+                modifier = ?modifier,
+                error = ?error,
+                "Hardware H.264 pipeline rejected VAAPI XRGB output candidate"
+            );
+            continue;
+        }
+
+        return Ok((buffer, strategy));
+    }
+
+    eros::bail!("No VAAPI XRGB DMA-BUF output candidate is usable")
 }
 
 fn allocate_output(
@@ -574,6 +733,9 @@ fn allocate_output(
     strategy: FrameOutputStrategy,
 ) -> eros::Result<crate::infra::platform::dma_buf::DmaBufFrame> {
     match strategy {
+        FrameOutputStrategy::PassthroughXrgb(_) => {
+            eros::bail!("XRGB pass-through does not allocate a frame-pipeline output")
+        }
         FrameOutputStrategy::DirectNv12(strategy) => context.allocate_nv12_output(size, strategy),
         FrameOutputStrategy::VaapiXrgb(modifier) => context.allocate_dma_buf_with_modifier(
             size,
