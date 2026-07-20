@@ -1738,8 +1738,8 @@ mod tests {
     fn init_host_video_tracing() {
         let targets = Targets::new()
             .with_default(LevelFilter::WARN)
-            .with_target("rabbit::video_probe", LevelFilter::TRACE)
-            .with_target("rabbit::frame_pipeline", LevelFilter::DEBUG);
+            .with_target("rabbit::video_probe", LevelFilter::INFO)
+            .with_target("rabbit::frame_pipeline", LevelFilter::INFO);
 
         tracing_subscriber::registry()
             .with(targets)

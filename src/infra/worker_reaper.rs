@@ -7,7 +7,6 @@ use flume::{Receiver, Sender, unbounded};
 
 enum WorkerReaperCommand {
     Reap(JoinHandle<()>),
-    Shutdown,
 }
 
 #[derive(Clone, Debug)]
@@ -17,7 +16,7 @@ pub(crate) struct WorkerReaperHandle {
 
 #[derive(Debug)]
 pub(crate) struct WorkerReaper {
-    commands: Sender<WorkerReaperCommand>,
+    commands: Option<Sender<WorkerReaperCommand>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -30,7 +29,7 @@ impl WorkerReaper {
 
         Ok((
             Self {
-                commands: commands.clone(),
+                commands: Some(commands.clone()),
                 thread: Some(thread),
             },
             WorkerReaperHandle { commands },
@@ -50,7 +49,7 @@ impl Drop for WorkerReaper {
             return;
         };
 
-        let _ = self.commands.send(WorkerReaperCommand::Shutdown);
+        drop(self.commands.take());
         let _ = thread.join();
     }
 }
@@ -63,7 +62,32 @@ fn run_worker_reaper(commands: Receiver<WorkerReaperCommand>) {
                     tracing::error!("Background worker thread panicked while shutting down");
                 }
             }
-            WorkerReaperCommand::Shutdown => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use crate::infra::WorkerReaper;
+
+    #[test]
+    fn drains_queued_workers_before_shutdown() {
+        let (reaper, handle) = WorkerReaper::new().expect("Test worker reaper should start");
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker_completed = Arc::clone(&completed);
+        let worker = std::thread::spawn(move || {
+            worker_completed.store(true, Ordering::Release);
+        });
+
+        handle.reap(worker);
+        drop(handle);
+        drop(reaper);
+
+        assert!(completed.load(Ordering::Acquire));
     }
 }

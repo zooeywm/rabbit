@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+const REPORT_WINDOW: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VideoCaptureTiming {
     pub(crate) vblank_wait_started: Instant,
@@ -235,7 +237,7 @@ impl VideoProbeReporter {
 
         if self
             .window_started
-            .is_some_and(|started| now.duration_since(started) >= Duration::from_secs(1))
+            .is_some_and(|started| now.duration_since(started) >= REPORT_WINDOW)
         {
             self.report_window(false);
         }
@@ -256,7 +258,7 @@ impl VideoProbeReporter {
         let elapsed = now.duration_since(started);
         let frames = self.frames;
 
-        tracing::debug!(
+        tracing::info!(
             target: "rabbit::video_probe",
             partial,
             window_ms = duration_ms(elapsed),

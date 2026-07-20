@@ -259,13 +259,16 @@ impl FramePipelineSource {
 
         compio::runtime::spawn(async move {
             while let Ok(frame) = frames.recv_async().await {
-                let Some(source) = weak_source.upgrade() else {
+                if weak_source.strong_count() == 0 {
                     return;
-                };
+                }
 
                 let frame = match frame {
                     Ok(frame) => wait_until_ready(frame).await,
                     Err(error) => Err(error),
+                };
+                let Some(source) = weak_source.upgrade() else {
+                    return;
                 };
 
                 match frame {
