@@ -160,6 +160,16 @@ impl TransportSend for QuicTransportSend {
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
         self.send_message(message)
     }
+
+    fn close(&self) -> impl Future<Output = ()> {
+        async {
+            self.connection.close(
+                compio::quic::VarInt::from_u32(0),
+                b"Session closed normally",
+            );
+            self.connection.closed().await;
+        }
+    }
 }
 
 impl QuicTransportSend {
@@ -311,12 +321,12 @@ async fn receive_reliable_unordered(
     messages: UnsyncQueue<ReceiveItem>,
 ) {
     loop {
-        let message = recv_reliable_unordered(&connection).await.map(Some);
-        let failed = message.is_err();
+        let message = recv_reliable_unordered(&connection).await;
+        let finished = !matches!(&message, Ok(Some(_)));
 
         publish_received(&messages, message).await;
 
-        if failed {
+        if finished {
             return;
         }
     }
@@ -327,12 +337,13 @@ async fn receive_unreliable(
     messages: UnsyncQueue<ReceiveItem>,
 ) {
     loop {
-        match recv_unreliable(&connection).await {
-            Ok(message) => publish_received(&messages, Ok(Some(message))).await,
-            Err(error) => {
-                publish_received(&messages, Err(error)).await;
-                return;
-            }
+        let message = recv_unreliable(&connection).await;
+        let finished = !matches!(&message, Ok(Some(_)));
+
+        publish_received(&messages, message).await;
+
+        if finished {
+            return;
         }
     }
 }
@@ -347,22 +358,25 @@ async fn publish_received(messages: &UnsyncQueue<ReceiveItem>, result: ReceiveRe
     consumed.pop().await;
 }
 
-async fn recv_unreliable(connection: &compio::quic::Connection) -> eros::Result<TransportMessage> {
-    let datagram = connection
-        .recv_datagram()
-        .await
-        .with_context(|| "Failed to receive QUIC datagram")?;
+async fn recv_unreliable(connection: &compio::quic::Connection) -> ReceiveResult {
+    let datagram = connection.recv_datagram().await;
+    if datagram.as_ref().is_err_and(is_normal_connection_close) {
+        return Ok(None);
+    }
+    let datagram = datagram.with_context(|| "Failed to receive QUIC datagram")?;
 
-    decode_tlv(datagram, Delivery::Unreliable).with_context(|| "Failed to decode QUIC datagram")
+    Ok(Some(
+        decode_tlv(datagram, Delivery::Unreliable)
+            .with_context(|| "Failed to decode QUIC datagram")?,
+    ))
 }
 
-async fn recv_reliable_unordered(
-    connection: &compio::quic::Connection,
-) -> eros::Result<TransportMessage> {
-    let stream = connection
-        .accept_uni()
-        .await
-        .with_context(|| "Failed to accept unordered reliable QUIC stream")?;
+async fn recv_reliable_unordered(connection: &compio::quic::Connection) -> ReceiveResult {
+    let stream = connection.accept_uni().await;
+    if stream.as_ref().is_err_and(is_normal_connection_close) {
+        return Ok(None);
+    }
+    let stream = stream.with_context(|| "Failed to accept unordered reliable QUIC stream")?;
     let mut reader = ReliableStreamReader::from(stream);
 
     let Some(message) = reader
@@ -373,7 +387,17 @@ async fn recv_reliable_unordered(
         eros::bail!("Unordered reliable QUIC stream ended before one complete message");
     };
 
-    Ok(message)
+    Ok(Some(message))
+}
+
+fn is_normal_connection_close(error: &compio::quic::ConnectionError) -> bool {
+    match error {
+        compio::quic::ConnectionError::ApplicationClosed(close) => {
+            close.error_code == compio::quic::VarInt::from_u32(0)
+        }
+        compio::quic::ConnectionError::LocallyClosed => true,
+        _ => false,
+    }
 }
 
 impl From<compio::quic::RecvStream> for ReliableStreamReader {
@@ -433,12 +457,17 @@ impl ReliableStreamReader {
     async fn fill_to(&mut self, length: usize) -> eros::Result<bool> {
         while self.buffer.len() < length {
             let remaining = length - self.buffer.len();
-            let Some(chunk) = self
-                .stream
-                .read_chunk(remaining, true)
-                .await
-                .with_context(|| "Failed to read reliable QUIC stream")?
-            else {
+            let chunk = self.stream.read_chunk(remaining, true).await;
+            if chunk.as_ref().is_err_and(|error| {
+                matches!(
+                    error,
+                    compio::quic::ReadError::ConnectionLost(error)
+                        if is_normal_connection_close(error)
+                )
+            }) {
+                return Ok(false);
+            }
+            let Some(chunk) = chunk.with_context(|| "Failed to read reliable QUIC stream")? else {
                 return Ok(false);
             };
 
@@ -587,6 +616,54 @@ mod tests {
                     .expect("Second Control message should exist")
                     .payload,
                 Bytes::from_static(b"second")
+            );
+        });
+    }
+
+    #[test]
+    fn normal_close_ends_the_remote_transport_receive() {
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime.block_on(async {
+            let outgoing = QuicEndpoint::new()
+                .await
+                .expect("Outgoing QUIC endpoint should start");
+            let incoming = QuicEndpoint::new()
+                .await
+                .expect("Incoming QUIC endpoint should start");
+            let remote_address = SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                incoming
+                    .local_address()
+                    .expect("Incoming endpoint should report its port")
+                    .port(),
+            );
+            let (outgoing_connection, incoming_connection) = futures_util::join!(
+                outgoing.connect(remote_address),
+                incoming.accept_connection()
+            );
+            let outgoing_connection = outgoing_connection.expect("QUIC client should connect");
+            let incoming_connection = incoming_connection
+                .expect("QUIC server should accept without error")
+                .expect("QUIC server should receive one connection");
+            let (outgoing_transport, incoming_transport) = futures_util::join!(
+                QuicTransport::open(outgoing_connection),
+                QuicTransport::accept(incoming_connection)
+            );
+            let (send, _) = outgoing_transport
+                .expect("Outgoing Transport should open")
+                .split();
+            let (_, mut recv) = incoming_transport
+                .expect("Incoming Transport should open")
+                .split();
+
+            send.close().await;
+
+            assert!(
+                recv.recv()
+                    .await
+                    .expect("Normal QUIC close should not be a receive failure")
+                    .is_none()
             );
         });
     }

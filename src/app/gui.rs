@@ -410,6 +410,12 @@ impl Component for RootComponent {
             RootMessage::Close => {
                 self.closing = true;
                 let tasks = self.model.begin_screen_stream_shutdown();
+                let sessions = self
+                    .model
+                    .sessions
+                    .iter()
+                    .map(|session| Rc::clone(&session.send))
+                    .collect::<Vec<_>>();
                 let shutdown_sender = sender.clone();
 
                 info!(
@@ -425,6 +431,10 @@ impl Component for RootComponent {
                                 "Screen stream task failed during application shutdown"
                             );
                         }
+                    }
+
+                    for session in sessions {
+                        session.close().await;
                     }
 
                     shutdown_sender.post(RootMessage::ShutdownFinished);

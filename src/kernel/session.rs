@@ -144,6 +144,10 @@ where
         self.send.max_unreliable_payload_size()
     }
 
+    pub fn close(&self) -> impl Future<Output = ()> {
+        self.send.close()
+    }
+
     pub async fn send_video(&self, message: VideoMessage) -> eros::Result<()> {
         require_role(self.role, SessionRole::Host, "send video")?;
         let screen_id = message.screen_id;
@@ -360,7 +364,11 @@ fn validate_received_control(role: SessionRole, message: &ControlMessage) -> ero
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashMap, future::ready};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+        future::ready,
+    };
 
     use crate::kernel::{
         geometry::PixelSize,
@@ -444,6 +452,7 @@ mod tests {
 
     struct TestTransportSend {
         messages: RefCell<Vec<TransportMessage>>,
+        closed: Cell<bool>,
     }
 
     struct TestTransportRecv(Option<TransportMessage>);
@@ -482,6 +491,28 @@ mod tests {
             self.messages.borrow_mut().push(message);
             ready(Ok(()))
         }
+
+        fn close(&self) -> impl Future<Output = ()> {
+            self.closed.set(true);
+            ready(())
+        }
+    }
+
+    #[test]
+    fn session_close_closes_its_transport() {
+        let session = SessionSend {
+            id: SessionId(6),
+            role: SessionRole::Controller,
+            send: TestTransportSend {
+                messages: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
+            },
+        };
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime.block_on(session.close());
+
+        assert!(session.send.closed.get());
     }
 
     #[test]
@@ -491,6 +522,7 @@ mod tests {
             role: SessionRole::Host,
             send: TestTransportSend {
                 messages: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
             },
         };
         let packet = Bytes::from_static(b"standard RTP packet");
@@ -521,6 +553,7 @@ mod tests {
             role: SessionRole::Host,
             send: TestTransportSend {
                 messages: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
             },
         };
         let screens = [Screen {

@@ -49,6 +49,8 @@ pub trait TransportSend {
     fn max_unreliable_payload_size(&self) -> Option<usize>;
 
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>>;
+
+    fn close(&self) -> impl Future<Output = ()>;
 }
 
 pub trait TransportRecv {
