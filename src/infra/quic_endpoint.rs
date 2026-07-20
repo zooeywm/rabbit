@@ -6,17 +6,25 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bytes::Bytes;
 use eros::Context;
 use tracing::{debug, info};
 
 const BASE_PORT: u16 = 52731;
 const LAST_PORT: u16 = BASE_PORT + 4;
 const SERVER_NAME: &str = "rabbit";
+pub(crate) const SELF_CONNECTION_CLOSE_REASON: &[u8] = b"Self-connection is not allowed";
+
+pub(crate) enum QuicConnectOutcome {
+    Connected(compio::quic::Connection),
+    SelfConnection,
+}
 
 #[derive(Clone)]
 pub(crate) struct QuicEndpoint {
     endpoint: compio::quic::Endpoint,
     client_config: compio::quic::ClientConfig,
+    certificate: Bytes,
 }
 
 impl QuicEndpoint {
@@ -28,6 +36,7 @@ impl QuicEndpoint {
             rcgen::generate_simple_self_signed(vec!["rabbit".into()])
                 .with_context(|| "Failed to generate temporary QUIC certificate")?;
         let certificate = cert.der().clone();
+        let endpoint_certificate = Bytes::copy_from_slice(certificate.as_ref());
         let private_key = signing_key.serialize_der().try_into().map_err(|error| {
             eros::error!("Failed to decode generated PKCS#8 private key: {}", error)
         })?;
@@ -44,6 +53,7 @@ impl QuicEndpoint {
         Ok(Self {
             endpoint,
             client_config,
+            certificate: endpoint_certificate,
         })
     }
 
@@ -58,10 +68,26 @@ impl QuicEndpoint {
         BASE_PORT..=LAST_PORT
     }
 
+    #[cfg(test)]
     pub(crate) async fn connect(
         &self,
         remote_address: SocketAddr,
     ) -> eros::Result<compio::quic::Connection> {
+        match self.connect_outcome(remote_address).await? {
+            QuicConnectOutcome::Connected(connection) => Ok(connection),
+            QuicConnectOutcome::SelfConnection => {
+                eros::bail!(
+                    "Refusing to connect Rabbit to its own QUIC endpoint at {}",
+                    remote_address
+                )
+            }
+        }
+    }
+
+    pub(crate) async fn connect_outcome(
+        &self,
+        remote_address: SocketAddr,
+    ) -> eros::Result<QuicConnectOutcome> {
         info!(
             event = "quic_connection_started",
             direction = "outgoing",
@@ -80,6 +106,20 @@ impl QuicEndpoint {
         let connection = connecting
             .await
             .with_context(|| format!("Failed to connect QUIC peer {remote_address}"))?;
+
+        if peer_uses_certificate(&connection, &self.certificate) {
+            connection.close(
+                compio::quic::VarInt::from_u32(0),
+                SELF_CONNECTION_CLOSE_REASON,
+            );
+            info!(
+                event = "self_connection_rejected",
+                %remote_address,
+                "Self-connection rejected"
+            );
+            return Ok(QuicConnectOutcome::SelfConnection);
+        }
+
         let elapsed = started_at.elapsed();
         let rtt = connection.rtt();
 
@@ -100,7 +140,7 @@ impl QuicEndpoint {
             "Established outgoing QUIC connection"
         );
 
-        Ok(connection)
+        Ok(QuicConnectOutcome::Connected(connection))
     }
 
     pub(crate) async fn accept_connection(&self) -> eros::Result<Option<compio::quic::Connection>> {
@@ -142,6 +182,14 @@ impl QuicEndpoint {
     }
 }
 
+fn peer_uses_certificate(connection: &compio::quic::Connection, certificate: &[u8]) -> bool {
+    connection.peer_identity().is_some_and(|peer_certificates| {
+        peer_certificates
+            .first()
+            .is_some_and(|peer_certificate| peer_certificate.as_ref() == certificate)
+    })
+}
+
 async fn bind_endpoint(
     server_config: compio::quic::ServerConfig,
 ) -> eros::Result<compio::quic::Endpoint> {
@@ -159,4 +207,77 @@ async fn bind_endpoint(
     }
 
     eros::bail!("QUIC ports {BASE_PORT} through {LAST_PORT} are already in use");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv6Addr, SocketAddr};
+
+    use crate::infra::{quic_endpoint::peer_uses_certificate, receive_request};
+
+    #[test]
+    fn rejects_only_the_endpoint_with_the_same_certificate() {
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime.block_on(async {
+            let endpoint = crate::infra::QuicEndpoint::new()
+                .await
+                .expect("Test QUIC endpoint should start");
+            let local_address = endpoint
+                .local_address()
+                .expect("Test QUIC endpoint address should be available");
+            let remote_address = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), local_address.port());
+            let accepting_endpoint = endpoint.clone();
+            let accept_task = compio::runtime::spawn(async move {
+                accepting_endpoint
+                    .accept_connection()
+                    .await
+                    .expect("Self-connection should reach the accepting endpoint")
+                    .expect("Self-connection should produce an incoming connection")
+            });
+
+            let result = endpoint.connect(remote_address).await;
+
+            assert!(
+                result.is_err(),
+                "The endpoint must reject its own certificate"
+            );
+            let incoming = accept_task
+                .await
+                .expect("Self-connection accept task should finish");
+            assert!(!peer_uses_certificate(&incoming, &endpoint.certificate));
+            assert!(
+                receive_request(incoming)
+                    .await
+                    .expect("Self-connection closure should not be a request error")
+                    .is_none()
+            );
+
+            let other_endpoint = crate::infra::QuicEndpoint::new()
+                .await
+                .expect("Second test QUIC endpoint should start");
+            let other_address = other_endpoint
+                .local_address()
+                .expect("Second test QUIC endpoint address should be available");
+            let other_address = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), other_address.port());
+            let accepting_endpoint = other_endpoint.clone();
+            let accept_task = compio::runtime::spawn(async move {
+                accepting_endpoint
+                    .accept_connection()
+                    .await
+                    .expect("Connection should reach the second endpoint")
+                    .expect("Second endpoint should produce an incoming connection")
+            });
+
+            let outgoing = endpoint
+                .connect(other_address)
+                .await
+                .expect("A different local Rabbit endpoint should remain connectable");
+            let _incoming = accept_task
+                .await
+                .expect("Second endpoint accept task should finish");
+
+            assert!(!peer_uses_certificate(&outgoing, &endpoint.certificate));
+        });
+    }
 }

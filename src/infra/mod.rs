@@ -9,7 +9,7 @@ pub(crate) mod unsync_queue;
 mod worker_reaper;
 
 pub(crate) use connection_request::{
-    PendingQuicConnectionRequest, connect_transport, receive_request,
+    DirectConnectionOutcome, PendingQuicConnectionRequest, connect_transport, receive_request,
 };
 pub(crate) use platform::{
     GStreamerVideoEncoder, GbmFramePipelineManager, GbmFramePipelineManagerState,
@@ -17,6 +17,6 @@ pub(crate) use platform::{
     NiriScreenLayoutManagerState, create_frame_pipeline_manager_state,
     create_screen_capture_manager_state, create_screen_layout_manager_state,
 };
-pub(crate) use quic_endpoint::QuicEndpoint;
+pub(crate) use quic_endpoint::{QuicConnectOutcome, QuicEndpoint};
 pub(crate) use transport::{QuicTransport, QuicTransportRecv, QuicTransportSend};
 pub(crate) use worker_reaper::{WorkerReaper, WorkerReaperHandle};

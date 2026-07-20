@@ -15,10 +15,10 @@ use crate::app::{
 use crate::{
     app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
     infra::{
-        PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportRecv,
-        QuicTransportSend, WorkerReaper, connect_transport, create_frame_pipeline_manager_state,
-        create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
-        unsync_queue::UnsyncQueue,
+        DirectConnectionOutcome, PendingQuicConnectionRequest, QuicEndpoint, QuicTransport,
+        QuicTransportRecv, QuicTransportSend, WorkerReaper, connect_transport,
+        create_frame_pipeline_manager_state, create_screen_capture_manager_state,
+        create_screen_layout_manager_state, receive_request, unsync_queue::UnsyncQueue,
     },
     kernel::{
         connection_request::ConnectionRequest,
@@ -57,7 +57,7 @@ pub(crate) enum RootMessage {
     Close,
     ShutdownFinished,
     ConnectDirect(String),
-    DirectConnectionFinished(eros::Result<Option<QuicTransport>>),
+    DirectConnectionFinished(eros::Result<DirectConnectionOutcome>),
     ConnectionRequest(PendingQuicConnectionRequest),
     ConnectionRequestSelectionChanged(Option<usize>),
     AcceptSelectedConnection(Option<usize>),
@@ -523,7 +523,7 @@ impl Component for RootComponent {
                 self.view.post(RootViewMessage::SetConnecting(false));
 
                 match result {
-                    Ok(Some(transport)) => {
+                    Ok(DirectConnectionOutcome::Connected(transport)) => {
                         let peer_address = transport.remote_address();
                         let id = self.model.next_session_id()?;
                         let session = Session::new(id, SessionRole::Controller, transport);
@@ -535,7 +535,12 @@ impl Component for RootComponent {
                             self.set_connection_status("Session already connected");
                         }
                     }
-                    Ok(None) => self.set_connection_status("Connection rejected"),
+                    Ok(DirectConnectionOutcome::Rejected) => {
+                        self.set_connection_status("Connection rejected")
+                    }
+                    Ok(DirectConnectionOutcome::SelfConnection) => {
+                        self.set_connection_status("Cannot connect to this Rabbit instance")
+                    }
                     Err(error) => self.set_connection_status(format!("Connection failed: {error}")),
                 }
 
@@ -973,7 +978,8 @@ async fn receive_connection_requests(
         };
 
         match receive_request(connection).await {
-            Ok(request) => sender.post(RootMessage::ConnectionRequest(request)),
+            Ok(Some(request)) => sender.post(RootMessage::ConnectionRequest(request)),
+            Ok(None) => {}
             Err(error) => sender.post(RootMessage::ConnectionRequestFailed(error)),
         }
     }

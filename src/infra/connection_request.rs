@@ -8,12 +8,18 @@ use eros::Context;
 use tracing::{debug, info};
 
 use crate::{
-    infra::{QuicEndpoint, QuicTransport},
+    infra::{QuicConnectOutcome, QuicEndpoint, QuicTransport},
     kernel::connection_request::{ConnectionRequest, ConnectionResponse},
 };
 
 const REQUESTER_NAME_LENGTH_SIZE: usize = size_of::<u16>();
 const RESPONSE_SIZE: usize = size_of::<u8>();
+
+pub(crate) enum DirectConnectionOutcome {
+    Connected(QuicTransport),
+    Rejected,
+    SelfConnection,
+}
 
 pub(crate) struct PendingQuicConnectionRequest {
     request: ConnectionRequest,
@@ -27,10 +33,15 @@ pub(crate) async fn connect_transport(
     remote_ip: IpAddr,
     remote_port: Option<u16>,
     request: ConnectionRequest,
-) -> eros::Result<Option<QuicTransport>> {
+) -> eros::Result<DirectConnectionOutcome> {
     if let Some(remote_port) = remote_port {
         let remote_address = SocketAddr::new(remote_ip, remote_port);
-        let connection = endpoint.connect(remote_address).await?;
+        let connection = match endpoint.connect_outcome(remote_address).await? {
+            QuicConnectOutcome::Connected(connection) => connection,
+            QuicConnectOutcome::SelfConnection => {
+                return Ok(DirectConnectionOutcome::SelfConnection);
+            }
+        };
 
         return request_transport(connection, request).await;
     }
@@ -40,8 +51,13 @@ pub(crate) async fn connect_transport(
     for remote_port in QuicEndpoint::default_ports() {
         let remote_address = SocketAddr::new(remote_ip, remote_port);
 
-        match endpoint.connect(remote_address).await {
-            Ok(connection) => return request_transport(connection, request).await,
+        match endpoint.connect_outcome(remote_address).await {
+            Ok(QuicConnectOutcome::Connected(connection)) => {
+                return request_transport(connection, request).await;
+            }
+            Ok(QuicConnectOutcome::SelfConnection) => {
+                return Ok(DirectConnectionOutcome::SelfConnection);
+            }
             Err(error) => last_error = Some(error),
         }
     }
@@ -58,7 +74,7 @@ pub(crate) async fn connect_transport(
 pub(crate) async fn request_transport(
     connection: compio::quic::Connection,
     request: ConnectionRequest,
-) -> eros::Result<Option<QuicTransport>> {
+) -> eros::Result<DirectConnectionOutcome> {
     let remote_address = connection.remote_address();
     let (mut request_stream, mut response_stream) = connection
         .open_bi_wait()
@@ -80,20 +96,32 @@ pub(crate) async fn request_transport(
     );
 
     match response {
-        ConnectionResponse::Accepted => Ok(Some(QuicTransport::open(connection).await?)),
-        ConnectionResponse::Rejected => Ok(None),
+        ConnectionResponse::Accepted => Ok(DirectConnectionOutcome::Connected(
+            QuicTransport::open(connection).await?,
+        )),
+        ConnectionResponse::Rejected => Ok(DirectConnectionOutcome::Rejected),
     }
 }
 
 pub(crate) async fn receive_request(
     connection: compio::quic::Connection,
-) -> eros::Result<PendingQuicConnectionRequest> {
+) -> eros::Result<Option<PendingQuicConnectionRequest>> {
     let remote_address = connection.remote_address();
     let started_at = Instant::now();
-    let (response_stream, mut request_stream) = connection
-        .accept_bi()
-        .await
-        .with_context(|| "Failed to accept QUIC connection request stream")?;
+    let (response_stream, mut request_stream) = match connection.accept_bi().await {
+        Ok(streams) => streams,
+        Err(compio::quic::ConnectionError::ApplicationClosed(close))
+            if close.reason.as_ref()
+                == crate::infra::quic_endpoint::SELF_CONNECTION_CLOSE_REASON =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Ok(
+                Err(error).with_context(|| "Failed to accept QUIC connection request stream")?
+            );
+        }
+    };
     let request = recv_request(&mut request_stream).await?;
 
     info!(
@@ -109,12 +137,12 @@ pub(crate) async fn receive_request(
         "Received QUIC connection request"
     );
 
-    Ok(PendingQuicConnectionRequest {
+    Ok(Some(PendingQuicConnectionRequest {
         request,
         remote_address,
         connection,
         response_stream,
-    })
+    }))
 }
 
 impl PendingQuicConnectionRequest {
