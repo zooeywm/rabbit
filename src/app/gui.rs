@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     rc::Rc,
 };
@@ -11,8 +12,8 @@ use crate::app::{
     gui::{
         state::{
             ConnectedDeviceView, ConnectionRequestView, DirectConnectionCompletion,
-            DirectConnectionState, DirectTarget, RemoteScreenView, ScreenStreamState,
-            ScreenStreamTarget, ViewPage, ViewState,
+            DirectConnectionState, DirectTarget, HostedScreenStreamView, RemoteScreenView,
+            ScreenStreamState, ScreenStreamTarget, ViewPage, ViewState, WorkspaceSection,
         },
         view::{Gui, GuiIntent, ViewPublisher},
     },
@@ -92,14 +93,18 @@ pub(crate) struct RootApplication {
     finished: bool,
     local_port: u16,
     listener_online: bool,
+    active_section: WorkspaceSection,
     status_message: String,
     direct_connection: DirectConnectionState,
     screen_stream: ScreenStreamState,
+    pending_screen_stream_starts: HashSet<(SessionId, ScreenId)>,
+    pending_host_screen_stream_stops: HashSet<(SessionId, ScreenId)>,
     _connection_listener: compio::runtime::JoinHandle<()>,
     _logger_guard: LoggerGuard,
 }
 
 pub(crate) enum RootMessage {
+    SelectSection(WorkspaceSection),
     Close,
     ShutdownFinished,
     ConnectDirect(String),
@@ -132,12 +137,25 @@ pub(crate) enum RootMessage {
         frame_size: PixelSize,
         result: eros::Result<()>,
     },
+    ScreenStreamStopFinished {
+        session_id: SessionId,
+        screen_id: ScreenId,
+        result: eros::Result<()>,
+    },
+    HostScreenStreamStopFinished {
+        session_id: SessionId,
+        screen_id: ScreenId,
+        result: eros::Result<()>,
+    },
     SessionClosed(SessionId),
     SessionFailed(SessionId, eros::ErrorUnion),
     ScreenStreamFinished(SessionId, ScreenId, u64, eros::Result<()>),
     OpenRemoteScreen(usize),
+    DisconnectRemoteSession,
+    StopHostedScreenStream(usize),
+    DisconnectDevice(usize),
     ResetDirectConnection,
-    LeaveScreenStream,
+    StopCurrentScreenStream,
 }
 
 #[derive(Clone)]
@@ -309,6 +327,10 @@ impl RootApplication {
             session.send.id() == id && session.key.role() == SessionRole::Controller
         });
         self.model.remove_session(id);
+        self.pending_screen_stream_starts
+            .retain(|(session_id, _)| *session_id != id);
+        self.pending_host_screen_stream_stops
+            .retain(|(session_id, _)| *session_id != id);
         if was_controller {
             self.direct_connection.reset();
         }
@@ -353,6 +375,103 @@ impl RootApplication {
         }
 
         Some(self.model.pending_connection_requests.remove(index))
+    }
+
+    fn host_session_ids(&self) -> Vec<SessionId> {
+        let mut sessions = self
+            .model
+            .sessions
+            .iter()
+            .filter(|session| session.key.role() == SessionRole::Host)
+            .map(|session| (session.key.peer_address(), session.send.id()))
+            .collect::<Vec<_>>();
+        sessions.sort_by_key(|(address, session_id)| (*address, session_id.0));
+        sessions
+            .into_iter()
+            .map(|(_, session_id)| session_id)
+            .collect()
+    }
+
+    fn hosted_screen_stream_entries(&self) -> Vec<(SessionId, ScreenId)> {
+        let mut streams =
+            self.model
+                .sessions
+                .iter()
+                .filter(|session| session.key.role() == SessionRole::Host)
+                .flat_map(|session| {
+                    session.screen_streams.keys().map(|screen_id| {
+                        (session.key.peer_address(), session.send.id(), *screen_id)
+                    })
+                })
+                .collect::<Vec<_>>();
+        streams
+            .sort_by_key(|(address, session_id, screen_id)| (*address, session_id.0, screen_id.0));
+        streams
+            .into_iter()
+            .map(|(_, session_id, screen_id)| (session_id, screen_id))
+            .collect()
+    }
+
+    fn controller_session_id(&self) -> Option<SessionId> {
+        let DirectConnectionState::Connected { peer } = &self.direct_connection else {
+            return None;
+        };
+
+        self.model
+            .sessions
+            .iter()
+            .find(|session| {
+                session.key.role() == SessionRole::Controller && session.key.peer_address() == *peer
+            })
+            .map(|session| session.send.id())
+    }
+
+    fn disconnect_session(&mut self, session_id: SessionId) -> bool {
+        let Some(session) = self
+            .model
+            .sessions
+            .iter_mut()
+            .find(|session| session.send.id() == session_id)
+        else {
+            return false;
+        };
+
+        let send = Rc::clone(&session.send);
+        let tasks = session
+            .screen_streams
+            .values_mut()
+            .filter_map(RunningScreenStream::begin_shutdown)
+            .collect::<Vec<_>>();
+        if self
+            .screen_stream
+            .active_screen()
+            .is_some_and(|(active_session_id, _)| active_session_id == session_id)
+        {
+            self.screen_stream.reset();
+        }
+
+        self.remove_session(session_id);
+        compio::runtime::spawn(async move {
+            for task in tasks {
+                if let Err(error) = task.await {
+                    error!(
+                        session_id = session_id.0,
+                        error = ?error,
+                        "Screen stream task failed while disconnecting Session"
+                    );
+                }
+            }
+            send.close().await;
+        })
+        .detach();
+
+        info!(
+            event = "session_disconnect_requested",
+            session_id = session_id.0,
+            "Session disconnect requested"
+        );
+        self.set_connection_status(format!("Disconnected Session {}", session_id.0));
+        true
     }
 }
 
@@ -404,9 +523,12 @@ impl RootApplication {
             finished: false,
             local_port: local_address.port(),
             listener_online: true,
+            active_section: WorkspaceSection::default(),
             status_message: String::new(),
             direct_connection: DirectConnectionState::default(),
             screen_stream: ScreenStreamState::default(),
+            pending_screen_stream_starts: HashSet::new(),
+            pending_host_screen_stream_stops: HashSet::new(),
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -443,6 +565,7 @@ impl RootApplication {
         match futures_util::future::select(internal, gui).await {
             Either::Left((message, _)) => message,
             Either::Right((Ok(intent), _)) => match intent {
+                GuiIntent::SelectSection(section) => RootMessage::SelectSection(section),
                 GuiIntent::Connect(address) => RootMessage::ConnectDirect(address),
                 GuiIntent::DecideConnectionRequest { index, accept } => {
                     if accept {
@@ -452,8 +575,13 @@ impl RootApplication {
                     }
                 }
                 GuiIntent::OpenRemoteScreen(index) => RootMessage::OpenRemoteScreen(index),
+                GuiIntent::DisconnectRemoteSession => RootMessage::DisconnectRemoteSession,
+                GuiIntent::StopHostedScreenStream(index) => {
+                    RootMessage::StopHostedScreenStream(index)
+                }
+                GuiIntent::DisconnectDevice(index) => RootMessage::DisconnectDevice(index),
                 GuiIntent::RetryConnection => RootMessage::ResetDirectConnection,
-                GuiIntent::LeaveScreenStream => RootMessage::LeaveScreenStream,
+                GuiIntent::StopScreenStream => RootMessage::StopCurrentScreenStream,
                 GuiIntent::Close => RootMessage::Close,
             },
             Either::Right((Err(_), _)) => RootMessage::Close,
@@ -475,25 +603,50 @@ impl RootApplication {
             })
             .collect::<Vec<_>>();
 
-        let mut connected_devices = self
-            .model
-            .sessions
-            .iter()
-            .filter(|session| session.key.role() == SessionRole::Host)
-            .map(|session| ConnectedDeviceView {
-                name: session
-                    .peer_name
-                    .clone()
-                    .unwrap_or_else(|| "Rabbit".to_string()),
-                address: session.key.peer_address().to_string(),
-                status: if session.screen_streams.is_empty() {
-                    "Connected".to_string()
-                } else {
-                    "Streaming".to_string()
-                },
+        let connected_devices = self
+            .host_session_ids()
+            .into_iter()
+            .filter_map(|session_id| {
+                let session = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == session_id)?;
+                let streaming = !session.screen_streams.is_empty();
+                Some(ConnectedDeviceView {
+                    name: session
+                        .peer_name
+                        .clone()
+                        .unwrap_or_else(|| "Rabbit".to_string()),
+                    address: session.key.peer_address().to_string(),
+                    status: if streaming {
+                        "Streaming".to_string()
+                    } else {
+                        "Connected".to_string()
+                    },
+                })
             })
             .collect::<Vec<_>>();
-        connected_devices.sort_by(|left, right| left.address.cmp(&right.address));
+
+        let hosted_screen_streams = self
+            .hosted_screen_stream_entries()
+            .into_iter()
+            .filter_map(|(session_id, screen_id)| {
+                let session = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == session_id)?;
+                let screen = self.model.app.screen(&screen_id)?;
+                Some(HostedScreenStreamView {
+                    device_name: session
+                        .peer_name
+                        .clone()
+                        .unwrap_or_else(|| session.key.peer_address().to_string()),
+                    screen_name: screen.name.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
 
         let remote_screens = self
             .model
@@ -514,22 +667,29 @@ impl RootApplication {
                     })
             })
             .collect::<Vec<_>>();
-        let host_is_streaming = self.model.sessions.iter().any(|session| {
-            session.key.role() == SessionRole::Host && !session.screen_streams.is_empty()
-        });
-
         let (page, page_title, page_subtitle, status_text, stream_title, stream_resolution) =
-            if !connection_requests.is_empty() {
-                (
+            match self.active_section {
+                WorkspaceSection::ThisDevice if !connection_requests.is_empty() => (
                     ViewPage::Requests,
                     "Connection requests".to_string(),
                     "Devices are requesting access to this Rabbit instance".to_string(),
                     String::new(),
                     String::new(),
                     String::new(),
-                )
-            } else {
-                match &self.screen_stream {
+                ),
+                WorkspaceSection::ThisDevice => (
+                    ViewPage::Connected,
+                    "This device".to_string(),
+                    if connected_devices.is_empty() {
+                        "Waiting for clients to connect".to_string()
+                    } else {
+                        "Clients currently accessing this Rabbit instance".to_string()
+                    },
+                    self.status_message.clone(),
+                    String::new(),
+                    String::new(),
+                ),
+                WorkspaceSection::RemoteDevices => match &self.screen_stream {
                     ScreenStreamState::Requesting(target) => (
                         ViewPage::StreamRequest,
                         "Requesting screen stream...".to_string(),
@@ -607,24 +767,16 @@ impl RootApplication {
                             String::new(),
                             String::new(),
                         ),
-                        _ if !connected_devices.is_empty() || !remote_screens.is_empty() => (
+                        _ if !remote_screens.is_empty() => (
                             ViewPage::Connected,
-                            if host_is_streaming {
-                                "Streaming".to_string()
-                            } else if let DirectConnectionState::Connected { peer } =
+                            if let DirectConnectionState::Connected { peer } =
                                 &self.direct_connection
                             {
                                 format!("Connected to {peer}")
                             } else {
-                                "Connected devices".to_string()
+                                "Remote devices".to_string()
                             },
-                            if !remote_screens.is_empty() {
-                                "Select a remote screen to open".to_string()
-                            } else if host_is_streaming {
-                                "Sending a local screen to the connected device".to_string()
-                            } else {
-                                "Devices currently accessing this Rabbit instance".to_string()
-                            },
+                            "Select a remote screen to open".to_string(),
                             self.status_message.clone(),
                             String::new(),
                             String::new(),
@@ -646,10 +798,24 @@ impl RootApplication {
                             String::new(),
                         ),
                     },
+                },
+            };
+
+        let (connection_requests, connected_devices, hosted_screen_streams, remote_screens) =
+            match self.active_section {
+                WorkspaceSection::RemoteDevices => {
+                    (Vec::new(), Vec::new(), Vec::new(), remote_screens)
                 }
+                WorkspaceSection::ThisDevice => (
+                    connection_requests,
+                    connected_devices,
+                    hosted_screen_streams,
+                    Vec::new(),
+                ),
             };
 
         ViewState {
+            section: self.active_section,
             page,
             page_title,
             page_subtitle,
@@ -660,6 +826,7 @@ impl RootApplication {
             stream_resolution,
             connection_requests,
             connected_devices,
+            hosted_screen_streams,
             remote_screens,
         }
     }
@@ -670,36 +837,97 @@ impl RootApplication {
         }
 
         match message {
+            RootMessage::SelectSection(section) => {
+                if self.active_section == section {
+                    return Ok(false);
+                }
+                self.active_section = section;
+                Ok(true)
+            }
             RootMessage::ResetDirectConnection => {
                 self.direct_connection.reset();
                 self.status_message.clear();
                 Ok(true)
             }
-            RootMessage::LeaveScreenStream => {
-                let session_id = self.screen_stream.active_session_id();
-                self.screen_stream.reset();
-                self.model.selected_remote_screen = None;
+            RootMessage::StopCurrentScreenStream => {
+                let Some((session_id, screen_id)) = self.screen_stream.active_screen() else {
+                    return Ok(false);
+                };
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == session_id)
+                else {
+                    self.screen_stream.reset();
+                    self.model.selected_remote_screen = None;
+                    return Ok(true);
+                };
+                let session = Rc::clone(&session.send);
+                let stop_sender = sender.clone();
 
-                if let Some(session_id) = session_id {
-                    self.model.remote_screens.remove(&session_id);
-                    self.model.screen_stream_results.remove(&session_id);
-                    self.direct_connection.reset();
-                    self.refresh_remote_screen_list();
+                compio::runtime::spawn(async move {
+                    let result = session.stop_screen_stream(screen_id).await;
+                    stop_sender.post(RootMessage::ScreenStreamStopFinished {
+                        session_id,
+                        screen_id,
+                        result,
+                    });
+                })
+                .detach();
 
-                    if let Some(session) = self
-                        .model
-                        .sessions
-                        .iter()
-                        .find(|session| session.send.id() == session_id)
-                    {
-                        let session = Rc::clone(&session.send);
-                        compio::runtime::spawn(async move {
-                            session.close().await;
-                        })
-                        .detach();
-                    }
+                Ok(false)
+            }
+            RootMessage::DisconnectRemoteSession => {
+                let Some(session_id) = self.controller_session_id() else {
+                    return Ok(false);
+                };
+                Ok(self.disconnect_session(session_id))
+            }
+            RootMessage::DisconnectDevice(index) => {
+                let Some(session_id) = self.host_session_ids().get(index).copied() else {
+                    return Ok(false);
+                };
+                Ok(self.disconnect_session(session_id))
+            }
+            RootMessage::StopHostedScreenStream(index) => {
+                let Some((session_id, screen_id)) =
+                    self.hosted_screen_stream_entries().get(index).copied()
+                else {
+                    return Ok(false);
+                };
+                if !self
+                    .pending_host_screen_stream_stops
+                    .insert((session_id, screen_id))
+                {
+                    return Ok(false);
                 }
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == session_id)
+                else {
+                    self.pending_host_screen_stream_stops
+                        .remove(&(session_id, screen_id));
+                    return Ok(false);
+                };
+                let session_send = Rc::clone(&session.send);
+                let stop_sender = sender.clone();
 
+                compio::runtime::spawn(async move {
+                    let result = session_send.stop_screen_stream(screen_id).await;
+                    stop_sender.post(RootMessage::HostScreenStreamStopFinished {
+                        session_id,
+                        screen_id,
+                        result,
+                    });
+                })
+                .detach();
+                self.set_connection_status(format!(
+                    "Stopping Session {} screen {} stream",
+                    session_id.0, screen_id.0
+                ));
                 Ok(true)
             }
             RootMessage::Close => {
@@ -955,6 +1183,8 @@ impl RootApplication {
                             return Ok(false);
                         };
                         let session_send = Rc::clone(&session.send);
+                        self.pending_screen_stream_starts
+                            .extend(streams.iter().map(|(screen_id, _)| (id, *screen_id)));
                         let configuration_sender = sender.clone();
 
                         compio::runtime::spawn(async move {
@@ -989,6 +1219,46 @@ impl RootApplication {
                             id.0, configured.request_id.0, configured_count, failed_count
                         ));
                         self.model.screen_stream_results.insert(id, configured);
+                    }
+                    SessionMessage::Control(ControlMessage::StopScreenStream(stop)) => {
+                        let role = self
+                            .model
+                            .sessions
+                            .iter()
+                            .find(|session| session.send.id() == id)
+                            .map(|session| session.key.role());
+                        match role {
+                            Some(SessionRole::Host) => {
+                                self.pending_screen_stream_starts
+                                    .remove(&(id, stop.screen_id));
+                                if let Some(session) = self
+                                    .model
+                                    .sessions
+                                    .iter_mut()
+                                    .find(|session| session.send.id() == id)
+                                {
+                                    session.screen_streams.remove(&stop.screen_id);
+                                }
+                            }
+                            Some(SessionRole::Controller) => {
+                                if self.screen_stream.active_screen() == Some((id, stop.screen_id))
+                                {
+                                    self.screen_stream.reset();
+                                    self.model.selected_remote_screen = None;
+                                    self.set_connection_status(format!(
+                                        "The remote device stopped screen {} stream",
+                                        stop.screen_id.0
+                                    ));
+                                }
+                            }
+                            None => return Ok(false),
+                        }
+                        info!(
+                            event = "screen_stream_stop_received",
+                            session_id = id.0,
+                            screen_id = stop.screen_id.0,
+                            "Screen stream stop received"
+                        );
                     }
                     SessionMessage::Video(_) => {
                         eros::bail!("Video frame bypassed the latest-frame session queue")
@@ -1051,6 +1321,12 @@ impl RootApplication {
 
                 let mut changed = false;
                 for (screen_id, parameters) in streams {
+                    if !self
+                        .pending_screen_stream_starts
+                        .remove(&(session_id, screen_id))
+                    {
+                        continue;
+                    }
                     if let Err(error) =
                         self.replace_screen_stream(session_id, screen_id, parameters, sender)
                     {
@@ -1105,6 +1381,7 @@ impl RootApplication {
                     return Ok(false);
                 }
 
+                let session_closed_normally = session.send.is_closed_normally();
                 session.screen_streams.remove(&screen_id);
 
                 match result {
@@ -1113,6 +1390,12 @@ impl RootApplication {
                         session_id = id.0,
                         screen_id = screen_id.0,
                         "Screen stream finished"
+                    ),
+                    Err(_) if session_closed_normally => info!(
+                        event = "screen_stream_finished",
+                        session_id = id.0,
+                        screen_id = screen_id.0,
+                        "Screen stream finished during normal Session close"
                     ),
                     Err(error) => {
                         error!(
@@ -1252,6 +1535,76 @@ impl RootApplication {
                     );
                 }
 
+                Ok(true)
+            }
+            RootMessage::ScreenStreamStopFinished {
+                session_id,
+                screen_id,
+                result,
+            } => {
+                if let Err(error) = result {
+                    error!(
+                        session_id = session_id.0,
+                        screen_id = screen_id.0,
+                        error = ?error,
+                        "Failed to stop screen stream"
+                    );
+                    self.screen_stream.fail(
+                        session_id,
+                        screen_id,
+                        format!("Failed to stop screen stream: {error}"),
+                    );
+                    return Ok(true);
+                }
+
+                self.screen_stream.reset();
+                self.model.selected_remote_screen = None;
+                self.set_connection_status(format!(
+                    "Stopped screen {} stream; Session {} remains connected",
+                    screen_id.0, session_id.0
+                ));
+                Ok(true)
+            }
+            RootMessage::HostScreenStreamStopFinished {
+                session_id,
+                screen_id,
+                result,
+            } => {
+                self.pending_host_screen_stream_stops
+                    .remove(&(session_id, screen_id));
+                if let Err(error) = result {
+                    error!(
+                        session_id = session_id.0,
+                        screen_id = screen_id.0,
+                        error = ?error,
+                        "Failed to notify the remote device that its screen stream was stopped"
+                    );
+                    self.set_connection_status(format!(
+                        "Failed to stop Session {} screen {}: {error}",
+                        session_id.0, screen_id.0
+                    ));
+                    return Ok(true);
+                }
+
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.send.id() == session_id)
+                else {
+                    return Ok(false);
+                };
+                session.screen_streams.remove(&screen_id);
+                info!(
+                    event = "host_screen_stream_stopped",
+                    session_id = session_id.0,
+                    screen_id = screen_id.0,
+                    "Host stopped screen stream"
+                );
+                self.set_connection_status(format!(
+                    "Stopped Session {} screen {} stream",
+                    session_id.0, screen_id.0
+                ));
                 Ok(true)
             }
         }

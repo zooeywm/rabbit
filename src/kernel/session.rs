@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use eros::Context as _;
 
 use crate::kernel::{
-    screen_configuration::{ScreenStreamsConfigured, SetScreenStreams},
+    screen_configuration::{ScreenStreamsConfigured, SetScreenStreams, StopScreenStream},
     screen_manager::ScreenId,
     session_control::{ControlMessage, OutgoingScreenList},
     transport::{
@@ -144,6 +144,10 @@ where
         self.send.max_unreliable_payload_size()
     }
 
+    pub fn is_closed_normally(&self) -> bool {
+        self.send.is_closed_normally()
+    }
+
     pub fn close(&self) -> impl Future<Output = ()> {
         self.send.close()
     }
@@ -170,6 +174,12 @@ where
         self.send_control(request)
             .await
             .with_context(|| "Failed to send the screen stream request")
+    }
+
+    pub async fn stop_screen_stream(&self, screen_id: ScreenId) -> eros::Result<()> {
+        self.send_control(StopScreenStream { screen_id })
+            .await
+            .with_context(|| format!("Failed to stop screen {} stream", screen_id.0))
     }
 
     pub async fn send_screen_streams_configured(
@@ -344,6 +354,7 @@ fn validate_received_control(role: SessionRole, message: &ControlMessage) -> ero
         ControlMessage::ScreenStreamsConfigured(_) => {
             (SessionRole::Controller, "ScreenStreamsConfigured")
         }
+        ControlMessage::StopScreenStream(_) => return Ok(()),
     };
 
     if role != expected {
@@ -517,6 +528,40 @@ mod tests {
         runtime.block_on(session.close());
 
         assert!(session.send.closed.get());
+    }
+
+    #[test]
+    fn both_session_roles_can_stop_only_the_selected_screen() {
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        for role in [SessionRole::Controller, SessionRole::Host] {
+            let session = SessionSend {
+                id: SessionId(9),
+                role,
+                send: TestTransportSend {
+                    messages: RefCell::new(Vec::new()),
+                    closed: Cell::new(false),
+                },
+            };
+
+            runtime
+                .block_on(session.stop_screen_stream(ScreenId(4)))
+                .expect("Selected screen stop should be sent");
+
+            let message = session
+                .send
+                .messages
+                .into_inner()
+                .pop()
+                .expect("Transport should receive the screen stop message");
+            let ControlMessage::StopScreenStream(stop) =
+                ControlMessage::try_from(message).expect("Screen stop should decode")
+            else {
+                panic!("Decoded control message should stop one screen");
+            };
+
+            assert_eq!(stop.screen_id, ScreenId(4));
+        }
     }
 
     #[test]

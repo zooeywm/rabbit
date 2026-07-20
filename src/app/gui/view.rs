@@ -1,19 +1,27 @@
 use eros::Context as _;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::app::gui::state::{
-    ConnectedDeviceView, ConnectionRequestView, RemoteScreenView, ViewPage, ViewState,
+use crate::app::{
+    config::APP_ID,
+    gui::state::{
+        ConnectedDeviceView, ConnectionRequestView, HostedScreenStreamView, RemoteScreenView,
+        ViewPage, ViewState, WorkspaceSection,
+    },
 };
 
 slint::include_modules!();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GuiIntent {
+    SelectSection(WorkspaceSection),
     Connect(String),
     DecideConnectionRequest { index: usize, accept: bool },
     OpenRemoteScreen(usize),
+    DisconnectRemoteSession,
+    StopHostedScreenStream(usize),
+    DisconnectDevice(usize),
     RetryConnection,
-    LeaveScreenStream,
+    StopScreenStream,
     Close,
 }
 
@@ -30,8 +38,19 @@ pub(crate) struct ViewPublisher {
 impl Gui {
     pub(crate) fn new() -> eros::Result<(Self, ViewPublisher, flume::Receiver<GuiIntent>)> {
         let window = RabbitWindow::new().context("Failed to create the Slint Rabbit window")?;
+        slint::set_xdg_app_id(APP_ID).context("Failed to set the Rabbit XDG application ID")?;
         let (sender, intents) = flume::unbounded();
 
+        {
+            let sender = sender.clone();
+            window.on_select_section(move |section| {
+                let section = match section {
+                    NavigationSection::RemoteDevices => WorkspaceSection::RemoteDevices,
+                    NavigationSection::ThisDevice => WorkspaceSection::ThisDevice,
+                };
+                send_intent(&sender, GuiIntent::SelectSection(section));
+            });
+        }
         {
             let sender = sender.clone();
             window.on_connect(move |address| {
@@ -61,14 +80,38 @@ impl Gui {
         }
         {
             let sender = sender.clone();
+            window.on_disconnect_remote_session(move || {
+                send_intent(&sender, GuiIntent::DisconnectRemoteSession);
+            });
+        }
+        {
+            let sender = sender.clone();
+            window.on_stop_hosted_screen_stream(move |index| {
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                send_intent(&sender, GuiIntent::StopHostedScreenStream(index));
+            });
+        }
+        {
+            let sender = sender.clone();
+            window.on_disconnect_device(move |index| {
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                send_intent(&sender, GuiIntent::DisconnectDevice(index));
+            });
+        }
+        {
+            let sender = sender.clone();
             window.on_retry_connect(move || {
                 send_intent(&sender, GuiIntent::RetryConnection);
             });
         }
         {
             let sender = sender.clone();
-            window.on_leave_stream(move || {
-                send_intent(&sender, GuiIntent::LeaveScreenStream);
+            window.on_stop_stream(move || {
+                send_intent(&sender, GuiIntent::StopScreenStream);
             });
         }
         let close_sender = sender.clone();
@@ -135,6 +178,10 @@ fn send_intent(sender: &flume::Sender<GuiIntent>, intent: GuiIntent) {
 }
 
 fn apply_view_state(window: &RabbitWindow, state: ViewState) {
+    window.set_section(match state.section {
+        WorkspaceSection::RemoteDevices => NavigationSection::RemoteDevices,
+        WorkspaceSection::ThisDevice => NavigationSection::ThisDevice,
+    });
     window.set_page(match state.page {
         ViewPage::Connect => AppPage::Connect,
         ViewPage::Connecting => AppPage::Connecting,
@@ -154,6 +201,7 @@ fn apply_view_state(window: &RabbitWindow, state: ViewState) {
     window.set_stream_resolution(state.stream_resolution.into());
     window.set_connection_requests(connection_request_model(state.connection_requests));
     window.set_connected_devices(connected_device_model(state.connected_devices));
+    window.set_hosted_screen_streams(hosted_screen_stream_model(state.hosted_screen_streams));
     window.set_remote_screens(remote_screen_model(state.remote_screens));
 }
 
@@ -177,6 +225,20 @@ fn connected_device_model(entries: Vec<ConnectedDeviceView>) -> ModelRc<Connecte
                 name: SharedString::from(entry.name),
                 address: SharedString::from(entry.address),
                 status: SharedString::from(entry.status),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn hosted_screen_stream_model(
+    entries: Vec<HostedScreenStreamView>,
+) -> ModelRc<HostedScreenStreamItem> {
+    ModelRc::new(VecModel::from(
+        entries
+            .into_iter()
+            .map(|entry| HostedScreenStreamItem {
+                device_name: SharedString::from(entry.device_name),
+                screen_name: SharedString::from(entry.screen_name),
             })
             .collect::<Vec<_>>(),
     ))

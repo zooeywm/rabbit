@@ -196,12 +196,12 @@ impl ScreenStreamState {
         self.fail(session_id, screen_id, message)
     }
 
-    pub(crate) fn active_session_id(&self) -> Option<SessionId> {
+    pub(crate) fn active_screen(&self) -> Option<(SessionId, ScreenId)> {
         match self {
             Self::Requesting(target)
             | Self::WaitingForVideo(target)
             | Self::Streaming(target)
-            | Self::Failed { target, .. } => Some(target.session_id),
+            | Self::Failed { target, .. } => Some((target.session_id, target.screen_id)),
             Self::Idle => None,
         }
     }
@@ -224,6 +224,13 @@ pub(crate) enum ViewPage {
     StreamError,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WorkspaceSection {
+    #[default]
+    RemoteDevices,
+    ThisDevice,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ConnectionRequestView {
     pub(crate) name: String,
@@ -238,6 +245,12 @@ pub(crate) struct ConnectedDeviceView {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HostedScreenStreamView {
+    pub(crate) device_name: String,
+    pub(crate) screen_name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RemoteScreenView {
     pub(crate) name: String,
     pub(crate) resolution: String,
@@ -245,6 +258,7 @@ pub(crate) struct RemoteScreenView {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ViewState {
+    pub(crate) section: WorkspaceSection,
     pub(crate) page: ViewPage,
     pub(crate) page_title: String,
     pub(crate) page_subtitle: String,
@@ -255,6 +269,7 @@ pub(crate) struct ViewState {
     pub(crate) stream_resolution: String,
     pub(crate) connection_requests: Vec<ConnectionRequestView>,
     pub(crate) connected_devices: Vec<ConnectedDeviceView>,
+    pub(crate) hosted_screen_streams: Vec<HostedScreenStreamView>,
     pub(crate) remote_screens: Vec<RemoteScreenView>,
 }
 

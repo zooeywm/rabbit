@@ -7,6 +7,7 @@ use crate::kernel::{
     screen_configuration::{
         RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
         ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
+        StopScreenStream,
     },
     screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
@@ -28,6 +29,7 @@ pub enum ControlMessage {
     ScreenList(Vec<ScreenInfo>),
     SetScreenStreams(SetScreenStreams),
     ScreenStreamsConfigured(ScreenStreamsConfigured),
+    StopScreenStream(StopScreenStream),
 }
 
 #[derive(BinRead, BinWrite)]
@@ -36,6 +38,7 @@ enum WireControlMessageTag {
     ScreenList = 0,
     SetScreenStreams = 1,
     ScreenStreamsConfigured = 2,
+    StopScreenStream = 3,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -111,6 +114,11 @@ struct WireScreenStreamRequest {
     screen_id: u8,
     remote_display: WireRemoteDisplayMode,
     frame_size: WirePixelSize,
+}
+
+#[derive(BinRead, BinWrite)]
+struct WireStopScreenStream {
+    screen_id: u8,
 }
 
 #[binrw]
@@ -508,6 +516,27 @@ impl TryFrom<ScreenStreamsConfigured> for TransportMessage {
     }
 }
 
+impl TryFrom<StopScreenStream> for TransportMessage {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(stop: StopScreenStream) -> eros::Result<Self> {
+        let mut writer = begin_control_message(WireControlMessageTag::StopScreenStream)?;
+
+        writer
+            .write_be(&WireStopScreenStream {
+                screen_id: stop.screen_id.0,
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to encode StopScreenStream for screen {}",
+                    stop.screen_id.0
+                )
+            })?;
+
+        Ok(finish_control_message(writer))
+    }
+}
+
 impl TryFrom<TransportMessage> for ControlMessage {
     type Error = eros::ErrorUnion;
 
@@ -569,6 +598,15 @@ impl TryFrom<TransportMessage> for ControlMessage {
                         .into_iter()
                         .map(ScreenResolutionOutcome::try_from)
                         .collect::<eros::Result<Vec<_>>>()?,
+                })
+            }
+            WireControlMessageTag::StopScreenStream => {
+                let wire = reader
+                    .read_be::<WireStopScreenStream>()
+                    .with_context(|| "Failed to decode StopScreenStream")?;
+
+                Self::StopScreenStream(StopScreenStream {
+                    screen_id: ScreenId(wire.screen_id),
                 })
             }
         };

@@ -48,6 +48,10 @@ pub trait Transport {
 pub trait TransportSend {
     fn max_unreliable_payload_size(&self) -> Option<usize>;
 
+    fn is_closed_normally(&self) -> bool {
+        false
+    }
+
     fn send_unreliable(&self, channel: TransportChannel, payload: bytes::Bytes)
     -> eros::Result<()>;
 

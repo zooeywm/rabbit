@@ -161,6 +161,10 @@ impl TransportSend for QuicTransportSend {
         max_tlv_payload_size(self.connection.max_datagram_size())
     }
 
+    fn is_closed_normally(&self) -> bool {
+        is_normal_close_reason(self.connection.close_reason())
+    }
+
     fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
         self.send_unreliable_message(channel, payload)
     }
@@ -177,6 +181,16 @@ impl TransportSend for QuicTransportSend {
             );
             self.connection.closed().await;
         }
+    }
+}
+
+fn is_normal_close_reason(reason: Option<compio::quic::ConnectionError>) -> bool {
+    match reason {
+        Some(compio::quic::ConnectionError::LocallyClosed) => true,
+        Some(compio::quic::ConnectionError::ApplicationClosed(close)) => {
+            close.error_code.into_inner() == 0
+        }
+        _ => false,
     }
 }
 
@@ -556,7 +570,7 @@ mod tests {
     use crate::{
         infra::{
             QuicEndpoint,
-            transport::quic::{QuicTransport, max_tlv_payload_size},
+            transport::quic::{QuicTransport, is_normal_close_reason, max_tlv_payload_size},
         },
         kernel::transport::{
             Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
@@ -569,6 +583,26 @@ mod tests {
         assert_eq!(max_tlv_payload_size(Some(2)), Some(0));
         assert_eq!(max_tlv_payload_size(Some(1200)), Some(1197));
         assert_eq!(max_tlv_payload_size(Some(usize::MAX)), Some(65535));
+    }
+
+    #[test]
+    fn only_zero_application_close_and_local_close_are_normal() {
+        assert!(is_normal_close_reason(Some(
+            compio::quic::ConnectionError::LocallyClosed
+        )));
+        assert!(is_normal_close_reason(Some(
+            compio::quic::ConnectionError::ApplicationClosed(compio::quic::ApplicationClose {
+                error_code: compio::quic::VarInt::from_u32(0),
+                reason: Bytes::from_static(b"normal"),
+            })
+        )));
+        assert!(!is_normal_close_reason(Some(
+            compio::quic::ConnectionError::ApplicationClosed(compio::quic::ApplicationClose {
+                error_code: compio::quic::VarInt::from_u32(7),
+                reason: Bytes::from_static(b"failure"),
+            })
+        )));
+        assert!(!is_normal_close_reason(None));
     }
 
     #[test]

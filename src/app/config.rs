@@ -5,6 +5,7 @@ use eros::Context;
 use serde::{Deserialize, Serialize};
 
 pub const APP_NAME: &str = "rabbit";
+pub const APP_ID: &str = "io.github.zooeywm.rabbit";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
 /// Rabbit configuration.

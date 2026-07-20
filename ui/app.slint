@@ -16,6 +16,11 @@ export enum AppPage {
     stream-error,
 }
 
+export enum NavigationSection {
+    remote-devices,
+    this-device,
+}
+
 export struct ConnectionRequestItem {
     name: string,
     address: string,
@@ -25,6 +30,11 @@ export struct ConnectedDeviceItem {
     name: string,
     address: string,
     status: string,
+}
+
+export struct HostedScreenStreamItem {
+    device-name: string,
+    screen-name: string,
 }
 
 export struct RemoteScreenItem {
@@ -158,6 +168,8 @@ component OnlineStatus inherits HorizontalLayout {
 component Sidebar inherits Rectangle {
     in property <string> local-port;
     in property <bool> local-server-online;
+    in property <NavigationSection> active-section;
+    callback select-section(NavigationSection);
 
     width: 188px;
     background: #ffffff;
@@ -165,6 +177,8 @@ component Sidebar inherits Rectangle {
     border-width: 1px;
 
     VerticalLayout {
+        width: 100%;
+        height: 100%;
         padding: 18px;
         spacing: 12px;
 
@@ -200,7 +214,7 @@ component Sidebar inherits Rectangle {
         Rectangle {
             height: 40px;
             border-radius: 8px;
-            background: #eaf3ff;
+            background: root.active-section == NavigationSection.remote-devices ? #eaf3ff : #ffffff;
 
             HorizontalLayout {
                 padding-left: 12px;
@@ -209,40 +223,51 @@ component Sidebar inherits Rectangle {
 
                 Rectangle {
                     width: 16px;
-                    height: 16px;
-                    border-radius: 5px;
-                    background: #0b7df1;
+                    vertical-stretch: 1;
 
                     Rectangle {
-                        x: 4px;
-                        y: 7px;
-                        width: 8px;
-                        height: 2px;
-                        background: #ffffff;
-                    }
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 5px;
+                        background: #0b7df1;
 
-                    Rectangle {
-                        x: 7px;
-                        y: 4px;
-                        width: 2px;
-                        height: 8px;
-                        background: #ffffff;
+                        Rectangle {
+                            x: 4px;
+                            y: 7px;
+                            width: 8px;
+                            height: 2px;
+                            background: #ffffff;
+                        }
+
+                        Rectangle {
+                            x: 7px;
+                            y: 4px;
+                            width: 2px;
+                            height: 8px;
+                            background: #ffffff;
+                        }
                     }
                 }
 
                 Text {
-                    text: "Connect";
-                    color: #087cf0;
+                    text: "Remote devices";
+                    color: root.active-section == NavigationSection.remote-devices ? #087cf0 : #656d78;
                     font-size: 13px;
-                    font-weight: 600;
+                    font-weight: root.active-section == NavigationSection.remote-devices ? 600 : 400;
                     vertical-alignment: center;
                 }
+            }
+
+            TouchArea {
+                clicked => { root.select-section(NavigationSection.remote-devices); }
             }
         }
 
         Rectangle {
             height: 40px;
             border-radius: 8px;
+            background: root.active-section == NavigationSection.this-device ? #eaf3ff : #ffffff;
 
             HorizontalLayout {
                 padding-left: 12px;
@@ -251,33 +276,44 @@ component Sidebar inherits Rectangle {
 
                 Rectangle {
                     width: 16px;
-                    height: 16px;
-                    border-radius: 5px;
-                    background: #8b929c;
+                    vertical-stretch: 1;
 
                     Rectangle {
-                        x: 4px;
-                        y: 4px;
-                        width: 8px;
-                        height: 2px;
-                        background: #ffffff;
-                    }
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 5px;
+                        background: #8b929c;
 
-                    Rectangle {
-                        x: 4px;
-                        y: 8px;
-                        width: 6px;
-                        height: 2px;
-                        background: #ffffff;
+                        Rectangle {
+                            x: 4px;
+                            y: 4px;
+                            width: 8px;
+                            height: 2px;
+                            background: #ffffff;
+                        }
+
+                        Rectangle {
+                            x: 4px;
+                            y: 8px;
+                            width: 6px;
+                            height: 2px;
+                            background: #ffffff;
+                        }
                     }
                 }
 
                 Text {
-                    text: "Connection history";
-                    color: #656d78;
+                    text: "This device";
+                    color: root.active-section == NavigationSection.this-device ? #087cf0 : #656d78;
                     font-size: 13px;
+                    font-weight: root.active-section == NavigationSection.this-device ? 600 : 400;
                     vertical-alignment: center;
                 }
+            }
+
+            TouchArea {
+                clicked => { root.select-section(NavigationSection.this-device); }
             }
         }
 
@@ -323,6 +359,7 @@ component PageHeader inherits VerticalLayout {
     in property <string> subtitle;
 
     height: 62px;
+    min-width: 0px;
     spacing: 5px;
 
     Text {
@@ -341,11 +378,15 @@ component PageHeader inherits VerticalLayout {
 
 export component RabbitWindow inherits Window {
     title: "Rabbit";
-    width: 1000px;
-    height: 680px;
+    preferred-width: 1000px;
+    preferred-height: 680px;
+    min-width: 720px;
+    min-height: 480px;
+    max-width: 100000px;
     background: #f7f8fa;
 
     in property <AppPage> page: AppPage.connect;
+    in property <NavigationSection> section: NavigationSection.remote-devices;
     in-out property <string> direct-address: "127.0.0.1";
     in property <string> page-title: "Connect to a device";
     in property <string> page-subtitle: "Enter the server IP address or IP:port";
@@ -356,13 +397,18 @@ export component RabbitWindow inherits Window {
     in property <string> stream-resolution;
     in property <[ConnectionRequestItem]> connection-requests;
     in property <[ConnectedDeviceItem]> connected-devices;
+    in property <[HostedScreenStreamItem]> hosted-screen-streams;
     in property <[RemoteScreenItem]> remote-screens;
 
     callback connect(string);
+    callback select-section(NavigationSection);
     callback decide-request(int, bool);
     callback open-screen(int);
+    callback disconnect-remote-session();
+    callback stop-hosted-screen-stream(int);
+    callback disconnect-device(int);
     callback retry-connect();
-    callback leave-stream();
+    callback stop-stream();
 
     HorizontalLayout {
         spacing: 0px;
@@ -370,13 +416,19 @@ export component RabbitWindow inherits Window {
         Sidebar {
             local-port: root.local-port;
             local-server-online: root.local-server-online;
+            active-section: root.section;
+            select-section(section) => { root.select-section(section); }
         }
 
         Rectangle {
+            min-width: 0px;
             horizontal-stretch: 1;
+            vertical-stretch: 1;
             background: #f7f8fa;
 
             VerticalLayout {
+                width: 100%;
+                height: 100%;
                 padding-left: 34px;
                 padding-right: 34px;
                 padding-top: 30px;
@@ -388,7 +440,15 @@ export component RabbitWindow inherits Window {
                     subtitle: root.page-subtitle;
                 }
 
+                content-area := Rectangle {
+                    width: 100%;
+                    min-height: 0px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
                 if root.page == AppPage.connect: VerticalLayout {
+                    width: content-area.width;
+                    height: content-area.height;
                     spacing: 16px;
 
                     Card {
@@ -486,7 +546,8 @@ export component RabbitWindow inherits Window {
                 }
 
                 if root.page == AppPage.connecting || root.page == AppPage.stream-request: Card {
-                    vertical-stretch: 1;
+                    width: content-area.width;
+                    height: content-area.height;
 
                     VerticalLayout {
                         alignment: center;
@@ -494,8 +555,8 @@ export component RabbitWindow inherits Window {
                         spacing: 18px;
 
                         ProgressIndicator {
-                            width: 48px;
-                            height: 48px;
+                            height: 3px;
+                            horizontal-stretch: 1;
                             indeterminate: true;
                         }
 
@@ -515,7 +576,8 @@ export component RabbitWindow inherits Window {
                 }
 
                 if root.page == AppPage.connection-error: Card {
-                    vertical-stretch: 1;
+                    width: content-area.width;
+                    height: content-area.height;
 
                     VerticalLayout {
                         alignment: center;
@@ -548,7 +610,8 @@ export component RabbitWindow inherits Window {
                 }
 
                 if root.page == AppPage.requests: ScrollView {
-                    vertical-stretch: 1;
+                    width: content-area.width;
+                    height: content-area.height;
 
                     VerticalLayout {
                         spacing: 12px;
@@ -597,18 +660,50 @@ export component RabbitWindow inherits Window {
                     }
                 }
 
-                if root.page == AppPage.connected: ScrollView {
-                    vertical-stretch: 1;
+                if root.page == AppPage.connected: connected-page := Rectangle {
+                    width: content-area.width;
+                    height: content-area.height;
+                    clip: true;
 
-                    VerticalLayout {
-                        spacing: 14px;
+                    connected-scroll := ScrollView {
+                        viewport-width: connected-page.width;
+                        min-width: 0px;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
-                        if root.connected-devices.length > 0: Heading {
+                        VerticalLayout {
+                            width: connected-page.width;
+                            spacing: 14px;
+
+                            if root.section == NavigationSection.this-device
+                                && root.connected-devices.length == 0
+                                && root.hosted-screen-streams.length == 0: Card {
+                            height: 108px;
+
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 7px;
+
+                                OnlineStatus {
+                                    online: root.local-server-online;
+                                    height: 20px;
+                                }
+
+                                BodyText {
+                                    text: root.local-server-online
+                                        ? "Listening for incoming connections on UDP " + root.local-port
+                                        : "The local connection listener has stopped";
+                                    horizontal-alignment: center;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                            if root.connected-devices.length > 0: Heading {
                             text: "Devices accessing this device";
                             height: 28px;
                         }
 
-                        for device in root.connected-devices: Card {
+                            for device[index] in root.connected-devices: Card {
                             height: 92px;
 
                             HorizontalLayout {
@@ -651,20 +746,78 @@ export component RabbitWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                 }
+
+                                Button {
+                                    text: "Disconnect";
+                                    clicked => { root.disconnect-device(index); }
+                                }
                             }
                         }
 
-                        if root.remote-screens.length > 0: Heading {
-                            text: "Remote screens";
+                            if root.hosted-screen-streams.length > 0: Heading {
+                            text: "Outgoing screen streams";
                             height: 28px;
                         }
 
-                        HorizontalLayout {
+                            for stream[index] in root.hosted-screen-streams: Card {
+                            height: 88px;
+
+                            HorizontalLayout {
+                                padding: 16px;
+                                spacing: 14px;
+
+                                ScreenIcon { }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+
+                                    Heading {
+                                        text: stream.screen-name;
+                                    }
+
+                                    BodyText {
+                                        text: "Sending to " + stream.device-name;
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                Button {
+                                    text: "Stop streaming";
+                                    clicked => { root.stop-hosted-screen-stream(index); }
+                                }
+                            }
+                        }
+
+                            if root.remote-screens.length > 0: HorizontalLayout {
+                            height: 28px;
+                            min-width: 0px;
+
+                            Heading {
+                                text: "Remote screens";
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+
+                            Button {
+                                text: "Disconnect";
+                                clicked => { root.disconnect-remote-session(); }
+                            }
+                        }
+
+                            HorizontalLayout {
                             spacing: 12px;
 
                             for screen[index] in root.remote-screens: Card {
-                                width: 220px;
+                                min-width: 160px;
+                                preferred-width: 220px;
                                 height: 194px;
+                                horizontal-stretch: 1;
 
                                 VerticalLayout {
                                     alignment: center;
@@ -695,15 +848,14 @@ export component RabbitWindow inherits Window {
                                 }
                             }
 
-                            Rectangle {
-                                horizontal-stretch: 1;
                             }
                         }
                     }
                 }
 
                 if root.page == AppPage.streaming: VerticalLayout {
-                    vertical-stretch: 1;
+                    width: content-area.width;
+                    height: content-area.height;
                     spacing: 10px;
 
                     HorizontalLayout {
@@ -730,12 +882,13 @@ export component RabbitWindow inherits Window {
                         }
 
                         Button {
-                            text: "Disconnect";
-                            clicked => { root.leave-stream(); }
+                            text: "Stop screen";
+                            clicked => { root.stop-stream(); }
                         }
                     }
 
                     Rectangle {
+                        width: 100%;
                         vertical-stretch: 1;
                         background: #17191c;
                         border-radius: 10px;
@@ -744,19 +897,31 @@ export component RabbitWindow inherits Window {
                             alignment: center;
                             spacing: 14px;
 
-                            Rectangle {
-                                width: 64px;
-                                height: 48px;
-                                border-color: #8d9299;
-                                border-width: 2px;
-                                border-radius: 3px;
+                            HorizontalLayout {
+                                height: 56px;
 
                                 Rectangle {
-                                    x: 27px;
-                                    y: 49px;
-                                    width: 10px;
-                                    height: 7px;
-                                    background: #8d9299;
+                                    horizontal-stretch: 1;
+                                }
+
+                                Rectangle {
+                                    width: 64px;
+                                    height: 48px;
+                                    border-color: #8d9299;
+                                    border-width: 2px;
+                                    border-radius: 3px;
+
+                                    Rectangle {
+                                        x: 27px;
+                                        y: 49px;
+                                        width: 10px;
+                                        height: 7px;
+                                        background: #8d9299;
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
                                 }
                             }
 
@@ -778,7 +943,8 @@ export component RabbitWindow inherits Window {
                 }
 
                 if root.page == AppPage.stream-error: Card {
-                    vertical-stretch: 1;
+                    width: content-area.width;
+                    height: content-area.height;
 
                     VerticalLayout {
                         alignment: center;
@@ -803,10 +969,11 @@ export component RabbitWindow inherits Window {
                         }
 
                         Button {
-                            text: "Back to screens";
-                            clicked => { root.leave-stream(); }
+                            text: "Stop and return";
+                            clicked => { root.stop-stream(); }
                         }
                     }
+                }
                 }
             }
         }
