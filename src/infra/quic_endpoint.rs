@@ -28,15 +28,13 @@ impl QuicEndpoint {
             rcgen::generate_simple_self_signed(vec!["rabbit".into()])
                 .with_context(|| "Failed to generate temporary QUIC certificate")?;
         let certificate = cert.der().clone();
-        let mut server_config = compio::quic::ServerBuilder::new_with_single_cert(
-            vec![certificate],
-            signing_key
-                .serialize_der()
-                .try_into()
-                .expect("rcgen must serialize the generated private key as PKCS#8 DER"),
-        )
-        .with_context(|| "Failed to configure QUIC server certificate")?
-        .build();
+        let private_key = signing_key.serialize_der().try_into().map_err(|error| {
+            eros::error!("Failed to decode generated PKCS#8 private key: {}", error)
+        })?;
+        let mut server_config =
+            compio::quic::ServerBuilder::new_with_single_cert(vec![certificate], private_key)
+                .with_context(|| "Failed to configure QUIC server certificate")?
+                .build();
         server_config.transport_config(transport_config.clone());
         let endpoint = bind_endpoint(server_config).await?;
         let mut client_config =

@@ -10,7 +10,7 @@ impl From<TransportChannel> for u8 {
     fn from(channel: TransportChannel) -> Self {
         match channel {
             TransportChannel::Control => 0,
-            TransportChannel::Video(ScreenId(id)) => id + 1,
+            TransportChannel::Video(id) => u8::from(id) + 1,
         }
     }
 }

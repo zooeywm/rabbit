@@ -77,17 +77,13 @@ impl NiriScreenLayoutManagerState {
             return Ok(Vec::new());
         }
 
-        let min_x = mapped_outputs
-            .iter()
-            .map(|(_, logical, _)| logical.x)
-            .min()
-            .expect("mapped_outputs is not empty");
+        let Some(min_x) = mapped_outputs.iter().map(|(_, logical, _)| logical.x).min() else {
+            eros::bail!("Niri mapped output list became empty while calculating its layout");
+        };
 
-        let min_y = mapped_outputs
-            .iter()
-            .map(|(_, logical, _)| logical.y)
-            .min()
-            .expect("mapped_outputs is not empty");
+        let Some(min_y) = mapped_outputs.iter().map(|(_, logical, _)| logical.y).min() else {
+            eros::bail!("Niri mapped output list became empty while calculating its layout");
+        };
 
         let mut mapped_screens = Vec::with_capacity(mapped_outputs.len());
 
@@ -146,7 +142,8 @@ impl NiriScreenLayoutManagerState {
                 u8::try_from(index).with_context(|| "Failed to assign a logical Niri screen ID")?;
 
             screens.push(Screen {
-                id: ScreenId(id),
+                id: ScreenId::try_from(id)
+                    .with_context(|| format!("Failed to validate Niri screen ID {id}"))?,
                 name,
                 resolution,
                 layout,

@@ -39,10 +39,13 @@ impl FormatTime for LocalTimeWithOffset {
 }
 
 pub(crate) fn init_logging(config: &Config) -> eros::Result<LoggerGuard> {
-    let log_base_dir = config
+    let project_dirs = config
         .project_dirs
+        .as_ref()
+        .with_context(|| "Application project directories are not initialized")?;
+    let log_base_dir = project_dirs
         .state_dir()
-        .unwrap_or_else(|| config.project_dirs.data_local_dir());
+        .unwrap_or_else(|| project_dirs.data_local_dir());
     create_dir_all(log_base_dir).context("Failed create log dir")?;
 
     let now = OffsetDateTime::now_utc();

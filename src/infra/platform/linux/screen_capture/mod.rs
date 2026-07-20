@@ -10,6 +10,7 @@ pub(crate) use kms::{
 /// Creates the screen-capture manager state selected for Linux.
 pub(crate) fn create_screen_capture_manager_state(
     enable_probing: bool,
+    worker_reaper: crate::infra::WorkerReaperHandle,
 ) -> KmsScreenCaptureManagerState {
-    KmsScreenCaptureManagerState::new(enable_probing)
+    KmsScreenCaptureManagerState::new(enable_probing, worker_reaper)
 }

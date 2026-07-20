@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     net::{IpAddr, SocketAddr},
     rc::Rc,
 };
@@ -8,14 +7,16 @@ use eros::Context;
 use tracing::{error, info, trace, warn};
 use winio::prelude::*;
 
-use crate::app::gui::view::{RootView, RootViewEvent, RootViewInit, RootViewMessage};
+use crate::app::{
+    gui::view::{RootView, RootViewEvent, RootViewInit, RootViewMessage},
+    model::{ApplicationModel, LatestVideoFrames, RunningScreenStream, RunningSession},
+};
 
 use crate::{
     app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
     infra::{
-        GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
         PendingQuicConnectionRequest, QuicEndpoint, QuicTransport, QuicTransportRecv,
-        QuicTransportSend, connect_transport, create_frame_pipeline_manager_state,
+        QuicTransportSend, WorkerReaper, connect_transport, create_frame_pipeline_manager_state,
         create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
         unsync_queue::UnsyncQueue,
     },
@@ -25,62 +26,25 @@ use crate::{
         geometry::PixelSize,
         screen_configuration::{
             RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
-            ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
+            ScreenStreamRequest, ScreenStreamsConfigured, SetScreenStreams,
         },
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole, SessionSend},
-        session_control::{ControlMessage, OutgoingScreenList, ScreenInfo},
+        session_control::{ControlMessage, OutgoingScreenList},
         transport::TransportRecv,
     },
 };
 
 mod view;
 
-struct RunningSession {
-    send: Rc<SessionSend<QuicTransportSend>>,
-    screen_streams: HashMap<ScreenId, RunningScreenStream>,
-    _receiver: compio::runtime::JoinHandle<()>,
-}
-
 pub(crate) struct PendingHostSession {
     send: SessionSend<QuicTransportSend>,
     recv: SessionRecv<QuicTransportRecv>,
 }
 
-struct RunningScreenStream {
-    id: u64,
-    cancellation: UnsyncQueue<()>,
-    task: Option<compio::runtime::JoinHandle<()>>,
-}
-
-impl Drop for RunningScreenStream {
-    fn drop(&mut self) {
-        self.cancellation.push(());
-
-        if let Some(task) = self.task.take() {
-            task.detach();
-        }
-    }
-}
-
 pub(crate) struct RootComponent {
-    _app: App<
-        NiriScreenLayoutManagerState,
-        KmsScreenCaptureManagerState,
-        GbmFramePipelineManagerState,
-    >,
+    model: ApplicationModel,
     view: Child<RootView>,
-    requester_name: String,
-    pending_connection_requests: Vec<PendingQuicConnectionRequest>,
-    selected_connection_request: Option<usize>,
-    sessions: Vec<RunningSession>,
-    remote_screens: HashMap<SessionId, Vec<ScreenInfo>>,
-    remote_screen_entries: Vec<(SessionId, ScreenId)>,
-    selected_remote_screen: Option<(SessionId, ScreenId)>,
-    screen_stream_results: HashMap<SessionId, ScreenStreamsConfigured>,
-    next_session_id: u32,
-    next_screen_stream_id: u64,
-    next_screen_stream_request_id: u32,
     _connection_listener: compio::runtime::JoinHandle<()>,
     _logger_guard: LoggerGuard,
 }
@@ -103,6 +67,7 @@ pub(crate) enum RootMessage {
     ConnectionRequestFailed(eros::ErrorUnion),
     ConnectionListenerFailed(eros::ErrorUnion),
     SessionMessageReceived(SessionId, SessionMessage),
+    VideoFrameAvailable(SessionId, ScreenId),
     ScreenStreamConfigurationFinished {
         session_id: SessionId,
         streams: Vec<(ScreenId, FramePipelineParameters)>,
@@ -136,7 +101,7 @@ impl RootComponent {
         let outcomes = desired_streams
             .into_iter()
             .map(|desired_stream| {
-                let status = match self._app.screen(&desired_stream.screen_id) {
+                let status = match self.model.app.screen(&desired_stream.screen_id) {
                     Some(screen) => match desired_stream.remote_display {
                         RemoteDisplayMode::Preserve => {
                             streams.push((
@@ -181,37 +146,23 @@ impl RootComponent {
     ) where
         R: TransportRecv + 'static,
     {
+        let received_video_frames = LatestVideoFrames::default();
         info!(
             event = "session_started",
             session_id = send.id().0,
             role = ?send.role(),
             "Session started"
         );
-        self.sessions.push(RunningSession {
+        self.model.sessions.push(RunningSession {
             send: Rc::new(send),
-            screen_streams: HashMap::new(),
-            _receiver: compio::runtime::spawn(receive_session(recv, sender.clone())),
+            screen_streams: Default::default(),
+            received_video_frames: received_video_frames.clone(),
+            _receiver: compio::runtime::spawn(receive_session(
+                recv,
+                received_video_frames,
+                sender.clone(),
+            )),
         });
-    }
-
-    fn next_screen_stream_id(&mut self) -> eros::Result<u64> {
-        let id = self.next_screen_stream_id;
-        self.next_screen_stream_id = self
-            .next_screen_stream_id
-            .checked_add(1)
-            .context("Failed to allocate a screen stream task ID")?;
-
-        Ok(id)
-    }
-
-    fn next_screen_stream_request_id(&mut self) -> eros::Result<ScreenStreamRequestId> {
-        let id = ScreenStreamRequestId(self.next_screen_stream_request_id);
-        self.next_screen_stream_request_id = self
-            .next_screen_stream_request_id
-            .checked_add(1)
-            .context("Failed to allocate a screen stream request ID")?;
-
-        Ok(id)
     }
 
     fn replace_screen_stream(
@@ -221,9 +172,10 @@ impl RootComponent {
         parameters: FramePipelineParameters,
         sender: &ComponentSender<Self>,
     ) -> eros::Result<()> {
-        let frames = FramePipelineManager::subscribe(&mut self._app, &screen_id, parameters)?;
-        let stream_id = self.next_screen_stream_id()?;
+        let frames = FramePipelineManager::subscribe(&mut self.model.app, &screen_id, parameters)?;
+        let stream_id = self.model.next_screen_stream_id()?;
         let Some(session) = self
+            .model
             .sessions
             .iter_mut()
             .find(|session| session.send.id() == session_id)
@@ -239,8 +191,13 @@ impl RootComponent {
         let task_cancellation = cancellation.clone();
         let task_sender = sender.clone();
         let task = compio::runtime::spawn(async move {
-            let result =
-                run_host_screen_stream(frames, screen_id, session_send, task_cancellation).await;
+            let result = run_host_screen_stream::<_, _, crate::infra::GStreamerVideoEncoder>(
+                frames,
+                screen_id,
+                session_send,
+                task_cancellation,
+            )
+            .await;
             task_sender.post(RootMessage::ScreenStreamFinished(
                 session_id, screen_id, stream_id, result,
             ));
@@ -259,14 +216,13 @@ impl RootComponent {
     }
 
     fn remove_session(&mut self, id: SessionId) {
-        self.sessions.retain(|session| session.send.id() != id);
-        self.remote_screens.remove(&id);
-        self.screen_stream_results.remove(&id);
+        self.model.remove_session(id);
         self.refresh_remote_screen_list();
     }
 
     fn refresh_remote_screen_list(&mut self) {
         let mut entries = self
+            .model
             .remote_screens
             .iter()
             .flat_map(|(session_id, screens)| {
@@ -288,26 +244,16 @@ impl RootComponent {
             .collect::<Vec<_>>();
 
         entries.sort_by_key(|(session_id, screen_id, _)| (session_id.0, screen_id.0));
-        self.remote_screen_entries.clear();
-        self.remote_screen_entries.extend(
+        self.model.remote_screen_entries.clear();
+        self.model.remote_screen_entries.extend(
             entries
                 .iter()
                 .map(|(session_id, screen_id, _)| (*session_id, *screen_id)),
         );
-        self.selected_remote_screen = None;
+        self.model.selected_remote_screen = None;
         self.view.post(RootViewMessage::SetRemoteScreens(
             entries.into_iter().map(|(_, _, entry)| entry).collect(),
         ));
-    }
-
-    fn next_session_id(&mut self) -> eros::Result<SessionId> {
-        let id = SessionId(self.next_session_id);
-        self.next_session_id = self
-            .next_session_id
-            .checked_add(1)
-            .context("Failed to allocate a Session ID")?;
-
-        Ok(id)
     }
 
     fn set_connection_status(&mut self, status: impl Into<String>) {
@@ -330,9 +276,10 @@ impl RootComponent {
     }
 
     fn refresh_connection_request_list(&mut self, selected: Option<usize>) {
-        self.selected_connection_request = selected;
+        self.model.selected_connection_request = selected;
         self.view.post(RootViewMessage::SetConnectionRequests {
             entries: self
+                .model
                 .pending_connection_requests
                 .iter()
                 .map(|request| {
@@ -351,18 +298,16 @@ impl RootComponent {
         &mut self,
         selected: Option<usize>,
     ) -> Option<PendingQuicConnectionRequest> {
-        let Some(selected) = selected else {
-            return None;
-        };
-        if selected >= self.pending_connection_requests.len() {
+        let selected = selected?;
+        if selected >= self.model.pending_connection_requests.len() {
             return None;
         }
 
-        let request = self.pending_connection_requests.remove(selected);
-        let next = if self.pending_connection_requests.is_empty() {
+        let request = self.model.pending_connection_requests.remove(selected);
+        let next = if self.model.pending_connection_requests.is_empty() {
             None
         } else {
-            Some(selected.min(self.pending_connection_requests.len() - 1))
+            Some(selected.min(self.model.pending_connection_requests.len() - 1))
         };
         self.refresh_connection_request_list(next);
 
@@ -379,11 +324,16 @@ impl Component for RootComponent {
     async fn init(_init: Self::Init<'_>, sender: &ComponentSender<Self>) -> eros::Result<Self> {
         let config = Config::new()?;
         let logger_guard = init_logging(&config)?;
+        let (worker_reaper, worker_reaper_handle) =
+            WorkerReaper::new().context("Failed to start the background worker reaper")?;
         let screen_layout_manager_state = create_screen_layout_manager_state()
             .context("Failed to create the screen layout manager state")?;
-        let screen_capture_manager_state =
-            create_screen_capture_manager_state(config.video.enable_probing);
-        let frame_pipeline_manager_state = create_frame_pipeline_manager_state();
+        let screen_capture_manager_state = create_screen_capture_manager_state(
+            config.video.enable_probing,
+            worker_reaper_handle.clone(),
+        );
+        let frame_pipeline_manager_state =
+            create_frame_pipeline_manager_state(worker_reaper_handle);
         let quic_endpoint = QuicEndpoint::new()
             .await
             .context("Failed to create the QUIC endpoint")?;
@@ -402,6 +352,7 @@ impl Component for RootComponent {
             screen_capture_manager_state,
             frame_pipeline_manager_state,
             quic_endpoint.clone(),
+            worker_reaper,
         );
         app.run().await?;
         let view = Child::<RootView>::init(RootViewInit {
@@ -410,19 +361,8 @@ impl Component for RootComponent {
         .await?;
 
         Ok(Self {
-            _app: app,
+            model: ApplicationModel::new(app, requester_name),
             view,
-            requester_name,
-            pending_connection_requests: Vec::new(),
-            selected_connection_request: None,
-            sessions: Vec::new(),
-            remote_screens: HashMap::new(),
-            remote_screen_entries: Vec::new(),
-            selected_remote_screen: None,
-            screen_stream_results: HashMap::new(),
-            next_session_id: 0,
-            next_screen_stream_id: 0,
-            next_screen_stream_request_id: 0,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -472,10 +412,10 @@ impl Component for RootComponent {
                         return Ok(true);
                     }
                 };
-                let endpoint: &QuicEndpoint = self._app.as_ref();
+                let endpoint: &QuicEndpoint = self.model.app.as_ref();
                 let endpoint = endpoint.clone();
                 let request = ConnectionRequest {
-                    requester_name: self.requester_name.clone(),
+                    requester_name: self.model.requester_name.clone(),
                 };
                 let connection_sender = sender.clone();
 
@@ -502,7 +442,7 @@ impl Component for RootComponent {
 
                 match result {
                     Ok(Some(transport)) => {
-                        let id = self.next_session_id()?;
+                        let id = self.model.next_session_id()?;
                         let session = Session::new(id, SessionRole::Controller, transport);
                         let (send, recv) = session.split();
 
@@ -516,16 +456,16 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::ConnectionRequest(request) => {
-                let first_request = self.pending_connection_requests.is_empty();
-                let selected = self.selected_connection_request;
+                let first_request = self.model.pending_connection_requests.is_empty();
+                let selected = self.model.selected_connection_request;
 
-                self.pending_connection_requests.push(request);
+                self.model.pending_connection_requests.push(request);
                 self.refresh_connection_request_list(selected.or(first_request.then_some(0)));
 
                 Ok(true)
             }
             RootMessage::ConnectionRequestSelectionChanged(selected) => {
-                self.selected_connection_request = selected;
+                self.model.selected_connection_request = selected;
                 Ok(false)
             }
             RootMessage::AcceptSelectedConnection(selected) => {
@@ -571,10 +511,10 @@ impl Component for RootComponent {
             RootMessage::ConnectionAccepted(result) => {
                 match result {
                     Ok(transport) => {
-                        let id = self.next_session_id()?;
+                        let id = self.model.next_session_id()?;
                         let session = Session::new(id, SessionRole::Host, transport);
                         let (send, recv) = session.split();
-                        let screen_list = OutgoingScreenList::try_from(self._app.screens())?;
+                        let screen_list = OutgoingScreenList::try_from(self.model.app.screens())?;
                         let session = PendingHostSession { send, recv };
                         let screen_list_sender = sender.clone();
 
@@ -625,13 +565,16 @@ impl Component for RootComponent {
                             id.0,
                             screens.len()
                         ));
-                        self.remote_screens.insert(id, screens);
+                        self.model.remote_screens.insert(id, screens);
                         self.refresh_remote_screen_list();
                     }
                     SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
                         let (configured, streams) = self.configure_preserved_screens(request);
-                        let Some(session) =
-                            self.sessions.iter().find(|session| session.send.id() == id)
+                        let Some(session) = self
+                            .model
+                            .sessions
+                            .iter()
+                            .find(|session| session.send.id() == id)
                         else {
                             warn!(
                                 session_id = id.0,
@@ -672,17 +615,38 @@ impl Component for RootComponent {
                             "Session {} request {}: {} configured, {} failed",
                             id.0, configured.request_id.0, configured_count, failed_count
                         ));
-                        self.screen_stream_results.insert(id, configured);
+                        self.model.screen_stream_results.insert(id, configured);
                     }
-                    SessionMessage::Video(video) => trace!(
-                        session_id = id.0,
-                        screen_id = video.screen_id.0,
-                        packet_size = video.payload.len(),
-                        "Received video RTP packet"
-                    ),
+                    SessionMessage::Video(_) => {
+                        eros::bail!("Video frame bypassed the latest-frame session queue")
+                    }
                 }
 
                 Ok(true)
+            }
+            RootMessage::VideoFrameAvailable(id, screen_id) => {
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == id)
+                else {
+                    return Ok(false);
+                };
+                let Some(video) = session.received_video_frames.take(&screen_id) else {
+                    return Ok(false);
+                };
+                let payload_size = video.packets.iter().map(bytes::Bytes::len).sum::<usize>();
+
+                trace!(
+                    session_id = id.0,
+                    screen_id = video.screen_id.0,
+                    packet_count = video.packets.len(),
+                    payload_size,
+                    "Received latest complete video RTP frame"
+                );
+
+                Ok(false)
             }
             RootMessage::ScreenStreamConfigurationFinished {
                 session_id,
@@ -700,6 +664,7 @@ impl Component for RootComponent {
                 }
 
                 if !self
+                    .model
                     .sessions
                     .iter()
                     .any(|session| session.send.id() == session_id)
@@ -740,6 +705,7 @@ impl Component for RootComponent {
             }
             RootMessage::ScreenStreamFinished(id, screen_id, stream_id, result) => {
                 let Some(session) = self
+                    .model
                     .sessions
                     .iter_mut()
                     .find(|session| session.send.id() == id)
@@ -782,12 +748,12 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::RemoteScreenSelectionChanged(selected_index) => {
-                let previous = self.selected_remote_screen;
+                let previous = self.model.selected_remote_screen;
                 let selected = selected_index
-                    .and_then(|index| self.remote_screen_entries.get(index))
+                    .and_then(|index| self.model.remote_screen_entries.get(index))
                     .copied();
 
-                self.selected_remote_screen = selected;
+                self.model.selected_remote_screen = selected;
 
                 if selected == previous {
                     return Ok(false);
@@ -795,12 +761,15 @@ impl Component for RootComponent {
 
                 if let Some((session_id, screen_id)) = selected {
                     let Some(frame_size) =
-                        self.remote_screens.get(&session_id).and_then(|screens| {
-                            screens
-                                .iter()
-                                .find(|screen| screen.id == screen_id)
-                                .map(|screen| screen.resolution)
-                        })
+                        self.model
+                            .remote_screens
+                            .get(&session_id)
+                            .and_then(|screens| {
+                                screens
+                                    .iter()
+                                    .find(|screen| screen.id == screen_id)
+                                    .map(|screen| screen.resolution)
+                            })
                     else {
                         warn!(
                             session_id = session_id.0,
@@ -810,6 +779,7 @@ impl Component for RootComponent {
                         return Ok(false);
                     };
                     let Some(session) = self
+                        .model
                         .sessions
                         .iter()
                         .find(|session| session.send.id() == session_id)
@@ -821,7 +791,7 @@ impl Component for RootComponent {
                         return Ok(false);
                     };
                     let session_send = Rc::clone(&session.send);
-                    let request_id = self.next_screen_stream_request_id()?;
+                    let request_id = self.model.next_screen_stream_request_id()?;
                     let request = SetScreenStreams {
                         request_id,
                         desired_streams: vec![ScreenStreamRequest {
@@ -853,6 +823,7 @@ impl Component for RootComponent {
                 result,
             } => {
                 if !self
+                    .model
                     .sessions
                     .iter()
                     .any(|session| session.send.id() == session_id)
@@ -910,14 +881,24 @@ async fn receive_connection_requests(
     }
 }
 
-async fn receive_session<R>(mut session: SessionRecv<R>, sender: ComponentSender<RootComponent>)
-where
+async fn receive_session<R>(
+    mut session: SessionRecv<R>,
+    received_video_frames: LatestVideoFrames,
+    sender: ComponentSender<RootComponent>,
+) where
     R: TransportRecv,
 {
     let id = session.id();
 
     loop {
         match session.recv().await {
+            Ok(Some(SessionMessage::Video(frame))) => {
+                let screen_id = frame.screen_id;
+                let first_pending_frame = received_video_frames.publish(frame);
+                if first_pending_frame {
+                    sender.post(RootMessage::VideoFrameAvailable(id, screen_id));
+                }
+            }
             Ok(Some(message)) => sender.post(RootMessage::SessionMessageReceived(id, message)),
             Ok(None) => {
                 sender.post(RootMessage::SessionClosed(id));

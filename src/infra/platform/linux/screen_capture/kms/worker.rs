@@ -8,6 +8,7 @@ use std::{
 use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 
 use crate::{
+    infra::WorkerReaperHandle,
     infra::platform::{
         dma_buf::DmaBufFrame,
         gpu::GpuDevice,
@@ -47,6 +48,7 @@ enum KmsCaptureCommand {
 pub(crate) struct KmsCaptureLease {
     commands: Sender<KmsCaptureCommand>,
     thread: Option<JoinHandle<()>>,
+    reaper: Option<WorkerReaperHandle>,
 }
 
 #[derive(Debug)]
@@ -59,6 +61,7 @@ impl KmsCaptureLease {
     pub(crate) fn new(
         screen_name: String,
         enable_probing: bool,
+        reaper: WorkerReaperHandle,
     ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
         let (commands, command_receiver) = bounded(1);
         let (device_sender, device) = bounded(1);
@@ -80,6 +83,7 @@ impl KmsCaptureLease {
             lease: Self {
                 commands,
                 thread: Some(thread),
+                reaper: Some(reaper),
             },
             receiver: KmsFrameReceiver { device, frames },
         })
@@ -92,6 +96,7 @@ impl KmsCaptureLease {
         Self {
             commands,
             thread: None,
+            reaper: None,
         }
     }
 }
@@ -138,8 +143,10 @@ impl Drop for KmsCaptureLease {
             return;
         };
 
-        let _ = self.commands.send(KmsCaptureCommand::Shutdown);
-        let _ = thread.join();
+        let _ = self.commands.try_send(KmsCaptureCommand::Shutdown);
+        if let Some(reaper) = &self.reaper {
+            reaper.reap(thread);
+        }
     }
 }
 
@@ -219,7 +226,9 @@ mod tests {
     #[test]
     #[ignore = "run through scripts/test-kms"]
     fn lease_starts_without_opening_the_kms_output_on_the_main_thread() {
-        let source = KmsCaptureLease::new("not-a-real-output".to_owned(), false)
+        let (_reaper, reaper_handle) =
+            crate::infra::WorkerReaper::new().expect("Test worker reaper should start");
+        let source = KmsCaptureLease::new("not-a-real-output".to_owned(), false, reaper_handle)
             .expect("KMS capture source should start asynchronously");
 
         drop(source);

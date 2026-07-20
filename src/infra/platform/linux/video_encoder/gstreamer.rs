@@ -356,7 +356,7 @@ pub(crate) struct GStreamerVideoEncoder {
 }
 
 impl GStreamerVideoEncoder {
-    pub(crate) async fn run<Frames, SendPacket, SendFuture>(
+    async fn run_inner<Frames, SendPacket, SendFuture>(
         mut frames: Frames,
         max_rtp_packet_size: usize,
         mut send_packet: SendPacket,
@@ -737,6 +737,24 @@ impl GStreamerVideoEncoder {
     }
 }
 
+impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
+    type Input = GbmFramePipelineFrame;
+    type Packet = GStreamerRtpPacket;
+
+    fn run<Frames, SendPacket, SendFuture>(
+        frames: Frames,
+        max_packet_size: usize,
+        send_packet: SendPacket,
+    ) -> impl Future<Output = eros::Result<()>>
+    where
+        Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
+        SendPacket: FnMut(Self::Packet) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
+        Self::run_inner(frames, max_packet_size, send_packet)
+    }
+}
+
 fn terminal_messages(
     pipeline: &gstreamer::Pipeline,
 ) -> eros::Result<flume::Receiver<gstreamer::Message>> {
@@ -893,17 +911,20 @@ mod tests {
     };
 
     use crate::{
-        infra::platform::{
-            GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
-            GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
-            KmsScreenCaptureManagerState,
-            dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
-            frame_pipeline::GbmFramePipelineFrame,
-            gpu::{GpuContext, GpuDevice},
-            screen_capture::{KmsCaptureLease, KmsFrameReceiver},
-            video_encoder::gstreamer::{
-                create_required_element, h264_rtp_caps, va_vpp_input_modifier,
-                validate_dmabuf_buffer,
+        infra::{
+            WorkerReaper,
+            platform::{
+                GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
+                KmsScreenCaptureManagerState,
+                dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+                frame_pipeline::GbmFramePipelineFrame,
+                gpu::{GpuContext, GpuDevice},
+                screen_capture::{KmsCaptureLease, KmsFrameReceiver},
+                video_encoder::gstreamer::{
+                    GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
+                    create_required_element, h264_rtp_caps, va_vpp_input_modifier,
+                    validate_dmabuf_buffer,
+                },
             },
         },
         kernel::{
@@ -1062,9 +1083,11 @@ mod tests {
         let rtp_packets_for_callback = Rc::clone(&rtp_packets);
 
         runtime.block_on(async {
+            let (_reaper, reaper_handle) =
+                WorkerReaper::new().expect("Test worker reaper should start");
             let mut deps = HostVideoTestDeps {
-                capture: KmsScreenCaptureManagerState::new(true),
-                pipeline: GbmFramePipelineManagerState::new(),
+                capture: KmsScreenCaptureManagerState::new(true, reaper_handle.clone()),
+                pipeline: GbmFramePipelineManagerState::new(reaper_handle),
                 screens: vec![host_video_test_screen(screen_name, source_size)],
             };
             let frames = GbmFramePipelineManager::inj_ref_mut(&mut deps)
@@ -1076,18 +1099,19 @@ mod tests {
                 )
                 .expect("Host video frame pipeline should start");
             let frames = TimedFrames::new(frames, run_duration);
-            let encoding = GStreamerVideoEncoder::run(frames, MAX_RTP_PACKET_SIZE, move |packet| {
-                assert!(
-                    packet.payload.len() <= MAX_RTP_PACKET_SIZE,
-                    "Encoded RTP packet should respect the transport packet size"
-                );
-                rtp_packets_for_callback.set(rtp_packets_for_callback.get() + 1);
-                if packet.is_frame_end() {
-                    encoded_frames_for_callback.set(encoded_frames_for_callback.get() + 1);
-                }
+            let encoding =
+                GStreamerVideoEncoder::run_inner(frames, MAX_RTP_PACKET_SIZE, move |packet| {
+                    assert!(
+                        packet.payload.len() <= MAX_RTP_PACKET_SIZE,
+                        "Encoded RTP packet should respect the transport packet size"
+                    );
+                    rtp_packets_for_callback.set(rtp_packets_for_callback.get() + 1);
+                    if packet.is_frame_end() {
+                        encoded_frames_for_callback.set(encoded_frames_for_callback.get() + 1);
+                    }
 
-                ready(Ok::<(), eros::ErrorUnion>(()))
-            });
+                    ready(Ok::<(), eros::ErrorUnion>(()))
+                });
 
             let result = compio::time::timeout(test_timeout, encoding).await;
             result
@@ -1742,8 +1766,10 @@ mod tests {
     }
 
     fn host_video_test_source_size(screen_name: &str) -> PixelSize {
+        let (_reaper, reaper_handle) =
+            WorkerReaper::new().expect("Test worker reaper should start");
         let ScreenCaptureSource { lease, receiver } =
-            KmsCaptureLease::new(screen_name.to_owned(), false)
+            KmsCaptureLease::new(screen_name.to_owned(), false, reaper_handle)
                 .expect("KMS capture source should start");
         let (device, frames) = receiver.into_parts();
         device

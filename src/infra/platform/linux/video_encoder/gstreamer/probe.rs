@@ -73,10 +73,7 @@ impl GStreamerVideoProbe {
         };
         let stats = self.pending_rtp_frames.entry(pts_ns).or_default();
         stats.packets += 1;
-        stats.bytes += match u64::try_from(packet.payload_len()) {
-            Ok(bytes) => bytes,
-            Err(_) => u64::MAX,
-        };
+        stats.bytes += u64::try_from(packet.payload_len()).unwrap_or(u64::MAX);
 
         if !packet.is_frame_end() {
             return;

@@ -10,9 +10,9 @@ use std::{
 
 use compio::runtime::fd::PollFd;
 use eros::Context as _;
-use futures_core::Stream as _;
 
 use crate::{
+    infra::WorkerReaperHandle,
     infra::platform::{
         dma_buf::DmaBufFrame,
         frame_pipeline::worker::{
@@ -37,6 +37,7 @@ pub(crate) struct GbmFramePipelineManagerState {
     captured_screens: Rc<RefCell<HashMap<ScreenId, Rc<CapturedScreenSource>>>>,
     worker: Rc<RefCell<Option<GpuWorker>>>,
     next_pipeline_id: Cell<u64>,
+    worker_reaper: WorkerReaperHandle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -324,18 +325,19 @@ async fn wait_until_ready(mut frame: GbmFramePipelineFrame) -> eros::Result<GbmF
 }
 
 impl GbmFramePipelineManagerState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(worker_reaper: WorkerReaperHandle) -> Self {
         Self {
             sources: Rc::new(RefCell::new(HashMap::new())),
             captured_screens: Rc::new(RefCell::new(HashMap::new())),
             worker: Rc::new(RefCell::new(None)),
             next_pipeline_id: Cell::new(0),
+            worker_reaper,
         }
     }
 
     fn ensure_worker(&self) -> eros::Result<()> {
         if self.worker.borrow().is_none() {
-            let (worker, notifications) = GpuWorker::new()
+            let (worker, notifications) = GpuWorker::new(self.worker_reaper.clone())
                 .with_context(|| "Failed to start the GPU frame-pipeline worker")?;
             *self.worker.borrow_mut() = Some(worker);
             self.monitor_worker(notifications);
@@ -552,10 +554,8 @@ impl Drop for GbmFramePipelineSubscription {
             )
         };
 
-        if !screen_still_used {
-            if let Some(captured_screens) = self.captured_screens.upgrade() {
-                captured_screens.borrow_mut().remove(&self.key.screen_id);
-            }
+        if !screen_still_used && let Some(captured_screens) = self.captured_screens.upgrade() {
+            captured_screens.borrow_mut().remove(&self.key.screen_id);
         }
 
         if !is_empty {
@@ -582,11 +582,14 @@ mod tests {
     use futures_core::Stream;
 
     use crate::{
-        infra::platform::{
-            frame_pipeline::{
-                GbmFramePipelineManager, GbmFramePipelineManagerState, LatestFramePublisher,
+        infra::{
+            WorkerReaper,
+            platform::{
+                frame_pipeline::{
+                    GbmFramePipelineManager, GbmFramePipelineManagerState, LatestFramePublisher,
+                },
+                screen_capture::{KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver},
             },
-            screen_capture::{KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver},
         },
         kernel::{
             frame_pipeline::{FramePipelineManager, FramePipelineParameters},
@@ -600,6 +603,7 @@ mod tests {
         frame_pipeline: GbmFramePipelineManagerState,
         capture_acquisitions: usize,
         capture_senders: Vec<flume::Sender<eros::Result<KmsCapturedFrame>>>,
+        _reaper: WorkerReaper,
     }
 
     impl AsRef<GbmFramePipelineManagerState> for TestDeps {
@@ -640,7 +644,7 @@ mod tests {
         runtime.block_on(async {
             let mut deps = test_deps();
             let shared_parameters = parameters(1920, 1080);
-            let mut manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
+            let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
             let first = manager
                 .subscribe(&ScreenId(1), shared_parameters)
                 .expect("First frame pipeline subscription should be created");
@@ -694,7 +698,7 @@ mod tests {
         runtime.block_on(async {
             let mut deps = test_deps();
             let first = {
-                let mut manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
+                let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
                     .subscribe(&ScreenId(1), parameters(1920, 1080))
                     .expect("First frame pipeline subscription should be created")
@@ -704,7 +708,7 @@ mod tests {
                 .worker_thread_id()
                 .expect("First frame pipeline should start the GPU worker");
             let second = {
-                let mut manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
+                let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
                     .subscribe(&ScreenId(1), parameters(1280, 720))
                     .expect("Second frame pipeline subscription should be created")
@@ -731,13 +735,13 @@ mod tests {
         runtime.block_on(async {
             let mut deps = test_deps();
             let mut first = {
-                let mut manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
+                let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
                     .subscribe(&ScreenId(1), parameters(1920, 1080))
                     .expect("First frame pipeline subscription should be created")
             };
             let mut second = {
-                let mut manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
+                let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
                     .subscribe(&ScreenId(1), parameters(1280, 720))
                     .expect("Second frame pipeline subscription should be created")
@@ -773,10 +777,12 @@ mod tests {
     }
 
     fn test_deps() -> TestDeps {
+        let (reaper, reaper_handle) = WorkerReaper::new().expect("Test worker reaper should start");
         TestDeps {
-            frame_pipeline: GbmFramePipelineManagerState::new(),
+            frame_pipeline: GbmFramePipelineManagerState::new(reaper_handle),
             capture_acquisitions: 0,
             capture_senders: Vec::new(),
+            _reaper: reaper,
         }
     }
 

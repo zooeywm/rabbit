@@ -31,7 +31,7 @@ impl GbmFrameAllocator {
         let format = Format::Xrgb8888;
         let usage = BufferObjectFlags::RENDERING;
 
-        Ok(self.context.allocate_dma_buf(size, format, usage)?)
+        self.context.allocate_dma_buf(size, format, usage)
     }
 
     pub(crate) fn compose(

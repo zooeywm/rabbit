@@ -291,7 +291,8 @@ impl TryFrom<WireScreenInfo> for ScreenInfo {
             .with_context(|| format!("Failed to decode name for ScreenInfo {}", screen.id))?;
 
         Ok(Self {
-            id: ScreenId(screen.id),
+            id: ScreenId::try_from(screen.id)
+                .with_context(|| format!("Failed to decode ScreenInfo {} screen ID", screen.id))?,
             name,
             resolution: screen.resolution.into(),
             layout: screen.layout.into(),
@@ -299,13 +300,20 @@ impl TryFrom<WireScreenInfo> for ScreenInfo {
     }
 }
 
-impl From<WireScreenStreamRequest> for ScreenStreamRequest {
-    fn from(request: WireScreenStreamRequest) -> Self {
-        Self {
-            screen_id: ScreenId(request.screen_id),
+impl TryFrom<WireScreenStreamRequest> for ScreenStreamRequest {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(request: WireScreenStreamRequest) -> eros::Result<Self> {
+        Ok(Self {
+            screen_id: ScreenId::try_from(request.screen_id).with_context(|| {
+                format!(
+                    "Failed to decode SetScreenStreams screen ID {}",
+                    request.screen_id
+                )
+            })?,
             remote_display: request.remote_display.into(),
             frame_size: request.frame_size.into(),
-        }
+        })
     }
 }
 
@@ -410,12 +418,19 @@ impl From<ScreenResolutionStatus> for WireScreenResolutionStatus {
     }
 }
 
-impl From<WireScreenResolutionOutcome> for ScreenResolutionOutcome {
-    fn from(outcome: WireScreenResolutionOutcome) -> Self {
-        Self {
-            screen_id: ScreenId(outcome.screen_id),
+impl TryFrom<WireScreenResolutionOutcome> for ScreenResolutionOutcome {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(outcome: WireScreenResolutionOutcome) -> eros::Result<Self> {
+        Ok(Self {
+            screen_id: ScreenId::try_from(outcome.screen_id).with_context(|| {
+                format!(
+                    "Failed to decode ScreenStreamsConfigured screen ID {}",
+                    outcome.screen_id
+                )
+            })?,
             status: outcome.status.into(),
-        }
+        })
     }
 }
 
@@ -535,7 +550,11 @@ impl TryFrom<TransportMessage> for ControlMessage {
 
                 Self::SetScreenStreams(SetScreenStreams {
                     request_id: ScreenStreamRequestId(wire.request_id),
-                    desired_streams: wire.desired_streams.into_iter().map(Into::into).collect(),
+                    desired_streams: wire
+                        .desired_streams
+                        .into_iter()
+                        .map(ScreenStreamRequest::try_from)
+                        .collect::<eros::Result<Vec<_>>>()?,
                 })
             }
             WireControlMessageTag::ScreenStreamsConfigured => {
@@ -545,7 +564,11 @@ impl TryFrom<TransportMessage> for ControlMessage {
 
                 Self::ScreenStreamsConfigured(ScreenStreamsConfigured {
                     request_id: ScreenStreamRequestId(wire.request_id),
-                    outcomes: wire.outcomes.into_iter().map(Into::into).collect(),
+                    outcomes: wire
+                        .outcomes
+                        .into_iter()
+                        .map(ScreenResolutionOutcome::try_from)
+                        .collect::<eros::Result<Vec<_>>>()?,
                 })
             }
         };

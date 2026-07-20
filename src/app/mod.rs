@@ -3,12 +3,15 @@ pub(crate) mod config;
 mod deps;
 mod gui;
 mod logging;
+mod model;
 mod screen_stream;
 
 use tracing::{info, warn};
 
 use crate::{
-    app::config::Config, infra::QuicEndpoint, kernel::screen_manager::ScreenLayoutManager,
+    app::config::Config,
+    infra::{QuicEndpoint, WorkerReaper},
+    kernel::screen_manager::ScreenLayoutManager,
 };
 
 pub(crate) use gui::RootComponent;
@@ -21,6 +24,7 @@ pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelin
     screen_capture_manager_state: ScreenCaptureManagerState,
     frame_pipeline_manager_state: FramePipelineManagerState,
     quic_endpoint: QuicEndpoint,
+    _worker_reaper: WorkerReaper,
 }
 
 impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
@@ -33,6 +37,7 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerSt
         screen_capture_manager_state: ScreenCaptureManagerState,
         frame_pipeline_manager_state: FramePipelineManagerState,
         quic_endpoint: QuicEndpoint,
+        worker_reaper: WorkerReaper,
     ) -> Self {
         Self {
             config,
@@ -40,6 +45,7 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerSt
             screen_capture_manager_state,
             frame_pipeline_manager_state,
             quic_endpoint,
+            _worker_reaper: worker_reaper,
         }
     }
 }

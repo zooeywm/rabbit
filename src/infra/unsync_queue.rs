@@ -55,30 +55,8 @@ impl<T> UnsyncQueue<T> {
         UnsyncQueuePop { queue: self }
     }
 
-    pub(crate) fn push_latest_by(&self, item: T, mut should_replace: impl FnMut(&T) -> bool) {
-        let receiver_waker = {
-            let mut inner = self.inner.borrow();
-
-            match inner
-                .items
-                .iter_mut()
-                .rev()
-                .find(|queued| should_replace(queued))
-            {
-                Some(queued) => {
-                    *queued = item;
-                    None
-                }
-                None => {
-                    inner.items.push_back(item);
-                    inner.receiver_waker.take()
-                }
-            }
-        };
-
-        if let Some(receiver_waker) = receiver_waker {
-            receiver_waker.wake();
-        }
+    pub(crate) fn try_pop(&self) -> Option<T> {
+        self.inner.borrow().items.pop_front()
     }
 }
 

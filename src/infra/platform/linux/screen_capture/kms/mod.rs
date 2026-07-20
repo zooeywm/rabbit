@@ -1,5 +1,6 @@
 use eros::Context;
 
+use crate::infra::WorkerReaperHandle;
 use crate::kernel::{
     screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
     screen_manager::{ScreenId, ScreenLayoutManager},
@@ -28,11 +29,15 @@ pub(crate) use egl_context::{EglContext, EglDmaBufImage};
 #[target(KmsScreenCaptureManager)]
 pub(crate) struct KmsScreenCaptureManagerState {
     enable_probing: bool,
+    worker_reaper: WorkerReaperHandle,
 }
 
 impl KmsScreenCaptureManagerState {
-    pub(crate) fn new(enable_probing: bool) -> Self {
-        Self { enable_probing }
+    pub(crate) fn new(enable_probing: bool, worker_reaper: WorkerReaperHandle) -> Self {
+        Self {
+            enable_probing,
+            worker_reaper,
+        }
     }
 }
 
@@ -57,18 +62,25 @@ where
             .clone();
         let context = format!("Failed to start KMS capture worker for screen {screen_name}");
 
-        let enable_probing =
-            <Deps as AsRef<KmsScreenCaptureManagerState>>::as_ref(self.prj_ref()).enable_probing;
+        let state = <Deps as AsRef<KmsScreenCaptureManagerState>>::as_ref(self.prj_ref());
 
-        Ok(KmsCaptureLease::new(screen_name, enable_probing).with_context(|| context)?)
+        Ok(KmsCaptureLease::new(
+            screen_name,
+            state.enable_probing,
+            state.worker_reaper.clone(),
+        )
+        .with_context(|| context)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        infra::platform::screen_capture::kms::{
-            KmsScreenCaptureManager, KmsScreenCaptureManagerState,
+        infra::{
+            WorkerReaper,
+            platform::screen_capture::kms::{
+                KmsScreenCaptureManager, KmsScreenCaptureManagerState,
+            },
         },
         kernel::{
             geometry::PixelSize,
@@ -120,8 +132,9 @@ mod tests {
     #[test]
     #[ignore = "run through scripts/test-kms"]
     fn acquires_one_owned_source_for_an_existing_screen() {
+        let (reaper, reaper_handle) = WorkerReaper::new().expect("Test worker reaper should start");
         let mut deps = TestDeps {
-            capture: KmsScreenCaptureManagerState::new(false),
+            capture: KmsScreenCaptureManagerState::new(false, reaper_handle),
             screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
         };
         let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);
@@ -132,6 +145,8 @@ mod tests {
 
         assert!(manager.acquire(&ScreenId(2)).is_err());
         drop(source);
+        drop(deps);
+        drop(reaper);
     }
 
     fn screen(id: u8, name: &str) -> Screen {

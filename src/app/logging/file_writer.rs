@@ -87,6 +87,7 @@ impl Drop for ChannelFileWriter {
 }
 
 impl LoggerGuard {
+    #[cfg(test)]
     pub(crate) fn shutdown(mut self) -> io::Result<()> {
         self.stop()
     }

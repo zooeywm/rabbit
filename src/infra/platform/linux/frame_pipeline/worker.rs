@@ -9,6 +9,7 @@ use flume::{Receiver, RecvError, Selector, Sender, bounded, unbounded};
 use gbm::{Format, Modifier};
 
 use crate::{
+    infra::WorkerReaperHandle,
     infra::platform::{
         frame_pipeline::{GbmFramePipelineFrame, SharedFramePipelineError},
         gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
@@ -56,6 +57,7 @@ pub(super) enum GpuWorkerNotification {
 pub(super) struct GpuWorker {
     commands: Sender<GpuWorkerCommand>,
     thread: Option<JoinHandle<()>>,
+    reaper: WorkerReaperHandle,
 }
 
 #[derive(Debug)]
@@ -108,7 +110,9 @@ pub(super) struct GpuScreenRegistration {
 }
 
 impl GpuWorker {
-    pub(super) fn new() -> io::Result<(Self, Receiver<GpuWorkerNotification>)> {
+    pub(super) fn new(
+        reaper: WorkerReaperHandle,
+    ) -> io::Result<(Self, Receiver<GpuWorkerNotification>)> {
         let (commands, command_receiver) = unbounded();
         let (notification_sender, notifications) = bounded(1);
         let thread = thread::Builder::new()
@@ -119,6 +123,7 @@ impl GpuWorker {
             Self {
                 commands,
                 thread: Some(thread),
+                reaper,
             },
             notifications,
         ))
@@ -186,7 +191,7 @@ impl Drop for GpuWorker {
         };
 
         let _ = self.commands.send(GpuWorkerCommand::Shutdown);
-        let _ = thread.join();
+        self.reaper.reap(thread);
     }
 }
 
@@ -416,7 +421,7 @@ fn prepare_pipeline_source<'context>(
         })?;
     }
 
-    Ok(context
+    context
         .egl()
         .import_dma_buf_frame(&frame.buffer)
         .with_context(|| {
@@ -424,7 +429,7 @@ fn prepare_pipeline_source<'context>(
                 "Failed to import screen {} {:?} source frame",
                 screen_id.0, frame.buffer.format
             )
-        })?)
+        })
 }
 
 fn route_screen_frame(
@@ -636,7 +641,10 @@ mod tests {
 
     #[test]
     fn worker_registers_pipelines_without_opening_a_gpu() {
-        let (worker, _notifications) = GpuWorker::new().expect("Empty GPU worker should start");
+        let (_reaper, reaper_handle) =
+            crate::infra::WorkerReaper::new().expect("Test worker reaper should start");
+        let (worker, _notifications) =
+            GpuWorker::new(reaper_handle).expect("Empty GPU worker should start");
         let screen = worker
             .register_screen(ScreenId(0), KmsFrameReceiver::empty())
             .expect("Captured screen should register");
@@ -697,7 +705,10 @@ mod tests {
 
     #[test]
     fn worker_reports_a_capture_failure_for_its_screen() {
-        let (worker, notifications) = GpuWorker::new().expect("GPU worker should start");
+        let (_reaper, reaper_handle) =
+            crate::infra::WorkerReaper::new().expect("Test worker reaper should start");
+        let (worker, notifications) =
+            GpuWorker::new(reaper_handle).expect("GPU worker should start");
         let (frame_sender, frame_receiver) = KmsFrameReceiver::channel();
         let screen = worker
             .register_screen(ScreenId(4), frame_receiver)

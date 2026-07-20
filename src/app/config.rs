@@ -11,8 +11,8 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    #[serde(skip, default = "default_project_dirs")]
-    pub project_dirs: ProjectDirs,
+    #[serde(skip)]
+    pub project_dirs: Option<ProjectDirs>,
 
     #[serde(skip, default = "default_app_name")]
     pub app_name: &'static str,
@@ -59,7 +59,7 @@ impl Default for Config {
         Self {
             logging: LoggingConfig::default(),
             video: VideoConfig::default(),
-            project_dirs: default_project_dirs(),
+            project_dirs: None,
             app_name: APP_NAME,
         }
     }
@@ -73,7 +73,7 @@ impl Config {
         let config_dir = project_dirs.config_local_dir();
         let mut config = Self::load_or_create(config_dir)?;
 
-        config.project_dirs = project_dirs;
+        config.project_dirs = Some(project_dirs);
         config.app_name = APP_NAME;
 
         Ok(config)
@@ -83,23 +83,39 @@ impl Config {
         let config_file_path = config_dir.join(CONFIG_FILE_NAME);
 
         if config_file_path.exists() {
-            let content = fs::read_to_string(&config_file_path)?;
-            return Ok(toml::from_str(&content)?);
+            let content = fs::read_to_string(&config_file_path).with_context(|| {
+                format!(
+                    "Failed to read configuration from {}",
+                    config_file_path.display()
+                )
+            })?;
+            return Ok(toml::from_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse configuration from {}",
+                    config_file_path.display()
+                )
+            })?);
         }
 
         let config = Self::default();
 
-        fs::create_dir_all(config_dir)?;
-        let content = toml::to_string_pretty(&config)?;
-        fs::write(&config_file_path, content)?;
+        fs::create_dir_all(config_dir).with_context(|| {
+            format!(
+                "Failed to create configuration directory {}",
+                config_dir.display()
+            )
+        })?;
+        let content = toml::to_string_pretty(&config)
+            .with_context(|| "Failed to encode the default configuration")?;
+        fs::write(&config_file_path, content).with_context(|| {
+            format!(
+                "Failed to write default configuration to {}",
+                config_file_path.display()
+            )
+        })?;
 
         Ok(config)
     }
-}
-
-fn default_project_dirs() -> ProjectDirs {
-    ProjectDirs::from("", "", APP_NAME)
-        .expect("the current platform does not provide a valid configuration directory")
 }
 
 const fn default_app_name() -> &'static str {

@@ -101,8 +101,11 @@ mod tests {
     fn captures_one_composed_frame() {
         let screen_name = std::env::var("RABBIT_KMS_SCREEN")
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
+        let (_reaper, reaper_handle) =
+            crate::infra::WorkerReaper::new().expect("Test worker reaper should start");
         let ScreenCaptureSource { lease, receiver } =
-            KmsCaptureLease::new(screen_name, false).expect("KMS capture source should start");
+            KmsCaptureLease::new(screen_name, false, reaper_handle)
+                .expect("KMS capture source should start");
         let (device, frames) = receiver.into_parts();
         let device = device
             .recv()

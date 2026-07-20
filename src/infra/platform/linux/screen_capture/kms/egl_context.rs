@@ -18,9 +18,8 @@ use crate::infra::platform::{
         egl_ext::{
             DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
             DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, DupNativeFenceFdAndroid,
-            ExportDmaBufImageMesa, ExportDmaBufImageQueryMesa, GL_TEXTURE_2D_KHR,
-            GL_TEXTURE_LEVEL_KHR, ITU_REC601_EXT, ITU_REC709_EXT, ITU_REC2020_EXT,
-            LINUX_DMA_BUF_EXT, LINUX_DRM_FOURCC_EXT, NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR,
+            ITU_REC601_EXT, ITU_REC709_EXT, ITU_REC2020_EXT, LINUX_DMA_BUF_EXT,
+            LINUX_DRM_FOURCC_EXT, NO_NATIVE_FENCE_FD_ANDROID, PLATFORM_GBM_KHR,
             SAMPLE_RANGE_HINT_EXT, SYNC_NATIVE_FENCE_ANDROID, SYNC_NATIVE_FENCE_FD_ANDROID,
             YUV_COLOR_SPACE_HINT_EXT, YUV_FULL_RANGE_EXT, YUV_NARROW_RANGE_EXT,
         },
@@ -33,7 +32,12 @@ use crate::infra::platform::{
 };
 
 #[cfg(test)]
-use crate::infra::platform::screen_capture::kms::gl_context::GlExportTexture;
+use crate::infra::platform::screen_capture::kms::{
+    egl_ext::{
+        ExportDmaBufImageMesa, ExportDmaBufImageQueryMesa, GL_TEXTURE_2D_KHR, GL_TEXTURE_LEVEL_KHR,
+    },
+    gl_context::GlExportTexture,
+};
 
 pub(crate) struct EglContext {
     instance: egl::DynamicInstance<egl::EGL1_5>,
@@ -608,7 +612,7 @@ impl EglContext {
 
         if let Err(error) = self.gl.flush() {
             let _ = unsafe { self.instance.destroy_sync(self.display, sync) };
-            return Ok(Err(error).with_context(|| format!("Failed to flush {operation}"))?);
+            return Err(error).with_context(|| format!("Failed to flush {operation}"));
         }
 
         let raw_fd = unsafe { (self.dup_native_fence_fd)(self.display.as_ptr(), sync.as_ptr()) };

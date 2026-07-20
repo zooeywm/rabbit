@@ -10,6 +10,11 @@ const TLV_HEADER_SIZE: usize = size_of::<u8>() + size_of::<u16>();
 
 type ReceiveResult = eros::Result<Option<TransportMessage>>;
 
+struct ReceiveItem {
+    result: ReceiveResult,
+    consumed: UnsyncQueue<()>,
+}
+
 pub(crate) struct QuicTransport {
     connection: compio::quic::Connection,
     control_send: compio::quic::SendStream,
@@ -19,13 +24,12 @@ pub(crate) struct QuicTransport {
 pub(crate) struct QuicTransportSend {
     connection: compio::quic::Connection,
     control_commands: UnsyncQueue<ControlWriteCommand>,
-    control_sending: ThinCell<bool>,
     control_writer_closed: ThinCell<bool>,
     _control_writer: compio::runtime::JoinHandle<()>,
 }
 
 pub(crate) struct QuicTransportRecv {
-    messages: UnsyncQueue<ReceiveResult>,
+    messages: UnsyncQueue<ReceiveItem>,
     _tasks: [compio::runtime::JoinHandle<()>; 3],
 }
 
@@ -39,17 +43,6 @@ struct ControlWriteCommand {
     channel: TransportChannel,
     payload: Bytes,
     completion: UnsyncQueue<eros::Result<()>>,
-    _guard: ControlSendGuard,
-}
-
-struct ControlSendGuard {
-    control_sending: ThinCell<bool>,
-}
-
-impl Drop for ControlSendGuard {
-    fn drop(&mut self) {
-        *self.control_sending.borrow() = false;
-    }
 }
 
 impl QuicTransport {
@@ -125,7 +118,6 @@ impl Transport for QuicTransport {
         let send = QuicTransportSend {
             connection: self.connection.clone(),
             control_commands: control_commands.clone(),
-            control_sending: ThinCell::new(false),
             control_writer_closed: control_writer_closed.clone(),
             _control_writer: compio::runtime::spawn(run_control_writer(
                 self.control_send,
@@ -154,7 +146,11 @@ impl Transport for QuicTransport {
 
 impl TransportRecv for QuicTransportRecv {
     fn recv(&mut self) -> impl Future<Output = eros::Result<Option<TransportMessage>>> {
-        self.messages.pop()
+        async {
+            let item = self.messages.pop().await;
+            item.consumed.push(());
+            item.result
+        }
     }
 }
 
@@ -206,31 +202,15 @@ impl QuicTransportSend {
             eros::bail!("Reliable ordered QUIC Control writer is unavailable");
         }
 
-        let guard = self.acquire_control_send()?;
         let completion = UnsyncQueue::default();
 
         self.control_commands.push(ControlWriteCommand {
             channel,
             payload,
             completion: completion.clone(),
-            _guard: guard,
         });
 
         completion.pop().await
-    }
-
-    fn acquire_control_send(&self) -> eros::Result<ControlSendGuard> {
-        let mut control_sending = self.control_sending.borrow();
-
-        if *control_sending {
-            eros::bail!("A reliable ordered QUIC Control message is already being sent");
-        }
-
-        *control_sending = true;
-
-        Ok(ControlSendGuard {
-            control_sending: self.control_sending.clone(),
-        })
     }
 
     async fn send_reliable_unordered(
@@ -269,12 +249,20 @@ async fn run_control_writer(
         let result = write_control_message(&mut stream, command.channel, command.payload).await;
         let failed = result.is_err();
 
-        command.completion.push(result);
-
         if failed {
             *writer_closed.borrow() = true;
+            command.completion.push(result);
+
+            while let Some(command) = commands.try_pop() {
+                command.completion.push(Err(eros::error!(
+                    "Reliable ordered QUIC Control writer stopped after an earlier write failure"
+                )));
+            }
+
             return;
         }
+
+        command.completion.push(result);
     }
 }
 
@@ -297,13 +285,13 @@ async fn write_control_message(
 
 async fn receive_reliable_ordered(
     mut reader: ReliableStreamReader,
-    messages: UnsyncQueue<ReceiveResult>,
+    messages: UnsyncQueue<ReceiveItem>,
 ) {
     loop {
         let message = recv_reliable_ordered(&mut reader).await;
         let finished = !matches!(&message, Ok(Some(_)));
 
-        messages.push(message);
+        publish_received(&messages, message).await;
 
         if finished {
             return;
@@ -322,13 +310,13 @@ async fn recv_reliable_ordered(reader: &mut ReliableStreamReader) -> ReceiveResu
 
 async fn receive_reliable_unordered(
     connection: compio::quic::Connection,
-    messages: UnsyncQueue<ReceiveResult>,
+    messages: UnsyncQueue<ReceiveItem>,
 ) {
     loop {
         let message = recv_reliable_unordered(&connection).await.map(Some);
         let failed = message.is_err();
 
-        messages.push(message);
+        publish_received(&messages, message).await;
 
         if failed {
             return;
@@ -338,35 +326,27 @@ async fn receive_reliable_unordered(
 
 async fn receive_unreliable(
     connection: compio::quic::Connection,
-    messages: UnsyncQueue<ReceiveResult>,
+    messages: UnsyncQueue<ReceiveItem>,
 ) {
     loop {
         match recv_unreliable(&connection).await {
-            Ok(message) => {
-                let channel = message.channel;
-
-                match channel {
-                    TransportChannel::Video(_) => {
-                        messages.push_latest_by(Ok(Some(message)), |queued| {
-                            matches!(
-                                queued,
-                                Ok(Some(TransportMessage {
-                                    channel: queued_channel,
-                                    delivery: Delivery::Unreliable,
-                                    ..
-                                })) if *queued_channel == channel
-                            )
-                        });
-                    }
-                    TransportChannel::Control => messages.push(Ok(Some(message))),
-                }
-            }
+            Ok(message) => publish_received(&messages, Ok(Some(message))).await,
             Err(error) => {
-                messages.push(Err(error));
+                publish_received(&messages, Err(error)).await;
                 return;
             }
         }
     }
+}
+
+async fn publish_received(messages: &UnsyncQueue<ReceiveItem>, result: ReceiveResult) {
+    let consumed = UnsyncQueue::default();
+
+    messages.push(ReceiveItem {
+        result,
+        consumed: consumed.clone(),
+    });
+    consumed.pop().await;
 }
 
 async fn recv_unreliable(connection: &compio::quic::Connection) -> eros::Result<TransportMessage> {
@@ -520,7 +500,19 @@ fn max_tlv_payload_size(max_datagram_size: Option<usize>) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::transport::quic::max_tlv_payload_size;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+    use bytes::Bytes;
+
+    use crate::{
+        infra::{
+            QuicEndpoint,
+            transport::quic::{QuicTransport, max_tlv_payload_size},
+        },
+        kernel::transport::{
+            Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
+        },
+    };
 
     #[test]
     fn reserves_the_quic_tlv_header_from_unreliable_payloads() {
@@ -528,5 +520,76 @@ mod tests {
         assert_eq!(max_tlv_payload_size(Some(2)), Some(0));
         assert_eq!(max_tlv_payload_size(Some(1200)), Some(1197));
         assert_eq!(max_tlv_payload_size(Some(usize::MAX)), Some(65535));
+    }
+
+    #[test]
+    fn concurrent_control_sends_are_serialized_by_the_writer() {
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime.block_on(async {
+            let outgoing = QuicEndpoint::new()
+                .await
+                .expect("Outgoing QUIC endpoint should start");
+            let incoming = QuicEndpoint::new()
+                .await
+                .expect("Incoming QUIC endpoint should start");
+            let remote_address = SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                incoming
+                    .local_address()
+                    .expect("Incoming endpoint should report its port")
+                    .port(),
+            );
+            let (outgoing_connection, incoming_connection) = futures_util::join!(
+                outgoing.connect(remote_address),
+                incoming.accept_connection()
+            );
+            let outgoing_connection = outgoing_connection.expect("QUIC client should connect");
+            let incoming_connection = incoming_connection
+                .expect("QUIC server should accept without error")
+                .expect("QUIC server should receive one connection");
+            let (outgoing_transport, incoming_transport) = futures_util::join!(
+                QuicTransport::open(outgoing_connection),
+                QuicTransport::accept(incoming_connection)
+            );
+            let (send, _) = outgoing_transport
+                .expect("Outgoing Transport should open")
+                .split();
+            let (_, mut recv) = incoming_transport
+                .expect("Incoming Transport should open")
+                .split();
+            let first = TransportMessage {
+                channel: TransportChannel::Control,
+                delivery: Delivery::ReliableOrdered,
+                payload: Bytes::from_static(b"first"),
+            };
+            let second = TransportMessage {
+                channel: TransportChannel::Control,
+                delivery: Delivery::ReliableOrdered,
+                payload: Bytes::from_static(b"second"),
+            };
+
+            let (first_result, second_result) =
+                futures_util::join!(send.send(first), send.send(second));
+            first_result.expect("First Control send should complete");
+            second_result.expect("Second Control send should queue and complete");
+
+            assert_eq!(
+                recv.recv()
+                    .await
+                    .expect("First Control receive should succeed")
+                    .expect("First Control message should exist")
+                    .payload,
+                Bytes::from_static(b"first")
+            );
+            assert_eq!(
+                recv.recv()
+                    .await
+                    .expect("Second Control receive should succeed")
+                    .expect("Second Control message should exist")
+                    .payload,
+                Bytes::from_static(b"second")
+            );
+        });
     }
 }

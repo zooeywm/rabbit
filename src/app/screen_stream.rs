@@ -6,25 +6,28 @@ use std::{
 };
 
 use eros::Context as _;
-use futures_core::Stream as _;
 
 use crate::{
-    infra::{GStreamerVideoEncoder, GbmFramePipelineFrame, unsync_queue::UnsyncQueue},
+    infra::unsync_queue::UnsyncQueue,
     kernel::{
         screen_manager::ScreenId,
+        screen_stream::ScreenStream,
         session::{SessionSend, VideoMessage},
         transport::TransportSend,
+        video_encoder::VideoEncoder,
     },
 };
 
-pub(crate) async fn run_host_screen_stream<Frames, Send>(
+pub(crate) async fn run_host_screen_stream<Frames, Send, Encoder>(
     frames: Frames,
     screen_id: ScreenId,
     session: Rc<SessionSend<Send>>,
     cancellation: UnsyncQueue<()>,
 ) -> eros::Result<()>
 where
-    Frames: futures_core::Stream<Item = eros::Result<Rc<GbmFramePipelineFrame>>> + Unpin,
+    Encoder: VideoEncoder,
+    Encoder::Packet: Into<bytes::Bytes>,
+    Frames: futures_core::Stream<Item = eros::Result<Rc<Encoder::Input>>> + Unpin,
     Send: TransportSend,
 {
     let Some(max_packet_size) = session.max_video_packet_size() else {
@@ -34,13 +37,13 @@ where
         );
     };
 
-    Ok(GStreamerVideoEncoder::run(
+    ScreenStream::<_, Encoder, _>::new(
         CancellableFrames {
             frames,
             cancellation,
         },
         max_packet_size,
-        move |packet| {
+        move |packet: Encoder::Packet| {
             let session = Rc::clone(&session);
 
             async move {
@@ -53,8 +56,9 @@ where
             }
         },
     )
+    .run()
     .await
-    .with_context(|| format!("Failed to stream screen {}", screen_id.0))?)
+    .with_context(|| format!("Failed to stream screen {}", screen_id.0))
 }
 
 struct CancellableFrames<Frames> {
@@ -70,12 +74,13 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
-        let mut cancellation = this.cancellation.pop();
-
-        if Pin::new(&mut cancellation).poll(context).is_ready() {
+        let cancelled = {
+            let mut cancellation = this.cancellation.pop();
+            Pin::new(&mut cancellation).poll(context).is_ready()
+        };
+        if cancelled {
             return Poll::Ready(None);
         }
-        drop(cancellation);
 
         Pin::new(&mut this.frames).poll_next(context)
     }

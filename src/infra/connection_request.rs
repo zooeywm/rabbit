@@ -46,7 +46,9 @@ pub(crate) async fn connect_transport(
         }
     }
 
-    let last_error = last_error.expect("the default QUIC port range must not be empty");
+    let Some(last_error) = last_error else {
+        eros::bail!("Rabbit default QUIC port range is empty");
+    };
 
     Err(last_error).with_context(|| {
         format!("Failed to connect Rabbit at any default QUIC port on {remote_ip}")
