@@ -390,7 +390,7 @@ impl Component for RootComponent {
     }
 
     async fn update_children(&mut self) -> eros::Result<bool> {
-        update_children!(self.view)
+        self.view.update().await
     }
 
     async fn update(

@@ -145,12 +145,10 @@ impl Transport for QuicTransport {
 }
 
 impl TransportRecv for QuicTransportRecv {
-    fn recv(&mut self) -> impl Future<Output = eros::Result<Option<TransportMessage>>> {
-        async {
-            let item = self.messages.pop().await;
-            item.consumed.push(());
-            item.result
-        }
+    async fn recv(&mut self) -> eros::Result<Option<TransportMessage>> {
+        let item = self.messages.pop().await;
+        item.consumed.push(());
+        item.result
     }
 }
 

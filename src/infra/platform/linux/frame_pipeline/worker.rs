@@ -42,7 +42,10 @@ enum GpuWorkerCommand {
 enum GpuWorkerEvent {
     Command(Result<GpuWorkerCommand, RecvError>),
     ScreenReady(ScreenId, Result<eros::Result<GpuDevice>, RecvError>),
-    Frame(ScreenId, Result<eros::Result<KmsCapturedFrame>, RecvError>),
+    Frame(
+        ScreenId,
+        Result<eros::Result<Box<KmsCapturedFrame>>, RecvError>,
+    ),
 }
 
 #[derive(Debug)]
@@ -312,7 +315,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                     continue;
                 };
 
-                process_screen_frame(&gpu.context, screen_id, frame, &mut pipelines);
+                process_screen_frame(&gpu.context, screen_id, *frame, &mut pipelines);
             }
             GpuWorkerEvent::Frame(screen_id, Ok(Err(error))) => {
                 screens.remove(&screen_id);
@@ -365,7 +368,7 @@ fn wait_for_event(
             });
         } else {
             selector = selector.recv(&screen.frames, move |frame| {
-                GpuWorkerEvent::Frame(screen_id, frame)
+                GpuWorkerEvent::Frame(screen_id, frame.map(|result| result.map(Box::new)))
             });
         }
     }
