@@ -2,10 +2,18 @@
 
 set -eu
 
-exec cargo test \
+cargo test \
     --color=always \
     --lib \
     infra::platform::video_encoder::gstreamer:: \
+    -- \
+    --ignored \
+    --nocapture
+
+exec cargo test \
+    --color=always \
+    --lib \
+    infra::platform::video_decoder:: \
     -- \
     --ignored \
     --nocapture
