@@ -32,66 +32,310 @@ export struct RemoteScreenItem {
     resolution: string,
 }
 
-component SectionHeading inherits Text {
-    color: #20252d;
-    font-size: 15px;
+component Heading inherits Text {
+    color: #171b22;
+    font-size: 17px;
     font-weight: 700;
     vertical-alignment: center;
 }
 
-component MutedText inherits Text {
-    color: #747b87;
+component BodyText inherits Text {
+    color: #5e6672;
     font-size: 13px;
     vertical-alignment: center;
 }
 
-component Panel inherits Rectangle {
-    background: #ffffff;
-    border-color: #e7eaf0;
-    border-width: 1px;
-    border-radius: 10px;
-    drop-shadow-color: #16000000;
-    drop-shadow-blur: 12px;
-    drop-shadow-offset-y: 3px;
+component MutedText inherits Text {
+    color: #8a919c;
+    font-size: 12px;
+    vertical-alignment: center;
 }
 
-component DeviceGlyph inherits Rectangle {
-    width: 44px;
-    height: 44px;
-    border-radius: 22px;
-    background: #eaf3ff;
+component Card inherits Rectangle {
+    background: #ffffff;
+    border-color: #e8ebf0;
+    border-width: 1px;
+    border-radius: 10px;
+    drop-shadow-color: #140f172a;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 4px;
+}
+
+component PersonIcon inherits Rectangle {
+    width: 46px;
+    height: 46px;
+    border-radius: 23px;
+    background: #e8f2ff;
+
+    Rectangle {
+        x: 18px;
+        y: 10px;
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: #0b7df1;
+    }
+
+    Rectangle {
+        x: 12px;
+        y: 24px;
+        width: 22px;
+        height: 13px;
+        border-radius: 7px;
+        background: #0b7df1;
+    }
+}
+
+component ScreenIcon inherits Rectangle {
+    width: 48px;
+    height: 48px;
+    border-radius: 24px;
+    background: #e8f2ff;
+
+    Rectangle {
+        x: 11px;
+        y: 11px;
+        width: 26px;
+        height: 19px;
+        border-color: #0b7df1;
+        border-width: 2px;
+        border-radius: 2px;
+    }
+
+    Rectangle {
+        x: 22px;
+        y: 31px;
+        width: 4px;
+        height: 5px;
+        background: #0b7df1;
+    }
+
+    Rectangle {
+        x: 17px;
+        y: 36px;
+        width: 14px;
+        height: 2px;
+        background: #0b7df1;
+    }
+}
+
+component ErrorIcon inherits Rectangle {
+    width: 56px;
+    height: 56px;
+    border-radius: 28px;
+    background: #ffe8ea;
 
     Text {
-        text: "●";
-        color: #087bf0;
-        font-size: 18px;
+        text: "×";
+        color: #ef4753;
+        font-size: 32px;
+        font-weight: 600;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
 }
 
-component ScreenGlyph inherits Rectangle {
-    width: 52px;
-    height: 44px;
-    border-radius: 22px;
-    background: #eaf3ff;
+component OnlineStatus inherits HorizontalLayout {
+    in property <bool> online;
+    spacing: 7px;
 
     Rectangle {
-        x: 13px;
-        y: 10px;
-        width: 26px;
-        height: 18px;
-        border-color: #087bf0;
-        border-width: 2px;
-        border-radius: 2px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: root.online ? #19b768 : #e54c57;
+    }
+
+    Text {
+        text: root.online ? "Online" : "Offline";
+        color: root.online ? #16a45d : #d9434e;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+}
+
+component Sidebar inherits Rectangle {
+    in property <string> local-port;
+    in property <bool> local-server-online;
+
+    width: 188px;
+    background: #ffffff;
+    border-color: #e7e9ed;
+    border-width: 1px;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            height: 38px;
+            spacing: 10px;
+
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 8px;
+                background: #087cf0;
+
+                Text {
+                    text: "R";
+                    color: #ffffff;
+                    font-size: 16px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: "Rabbit";
+                color: #171b22;
+                font-size: 15px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
 
         Rectangle {
-            x: 9px;
-            y: 20px;
-            width: 8px;
-            height: 2px;
-            background: #087bf0;
+            height: 40px;
+            border-radius: 8px;
+            background: #eaf3ff;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+
+                Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 5px;
+                    background: #0b7df1;
+
+                    Rectangle {
+                        x: 4px;
+                        y: 7px;
+                        width: 8px;
+                        height: 2px;
+                        background: #ffffff;
+                    }
+
+                    Rectangle {
+                        x: 7px;
+                        y: 4px;
+                        width: 2px;
+                        height: 8px;
+                        background: #ffffff;
+                    }
+                }
+
+                Text {
+                    text: "Connect";
+                    color: #087cf0;
+                    font-size: 13px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
         }
+
+        Rectangle {
+            height: 40px;
+            border-radius: 8px;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+
+                Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 5px;
+                    background: #8b929c;
+
+                    Rectangle {
+                        x: 4px;
+                        y: 4px;
+                        width: 8px;
+                        height: 2px;
+                        background: #ffffff;
+                    }
+
+                    Rectangle {
+                        x: 4px;
+                        y: 8px;
+                        width: 6px;
+                        height: 2px;
+                        background: #ffffff;
+                    }
+                }
+
+                Text {
+                    text: "Connection history";
+                    color: #656d78;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        VerticalLayout {
+            spacing: 5px;
+
+            MutedText {
+                text: "LOCAL SERVER";
+                font-size: 10px;
+                font-weight: 600;
+            }
+
+            OnlineStatus {
+                online: root.local-server-online;
+                height: 20px;
+            }
+
+            HorizontalLayout {
+                height: 24px;
+                spacing: 6px;
+                MutedText {
+                    text: "UDP";
+                }
+
+                Text {
+                    text: root.local-port;
+                    color: #087cf0;
+                    font-size: 14px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component PageHeader inherits VerticalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+
+    height: 62px;
+    spacing: 5px;
+
+    Text {
+        text: root.title;
+        color: #171b22;
+        font-size: 21px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+
+    BodyText {
+        text: root.subtitle;
+        height: 22px;
     }
 }
 
@@ -123,163 +367,37 @@ export component RabbitWindow inherits Window {
     HorizontalLayout {
         spacing: 0px;
 
-        Rectangle {
-            width: 196px;
-            background: #ffffff;
-            border-color: #e9ebef;
-            border-width: 1px;
-
-            VerticalLayout {
-                padding: 18px;
-                spacing: 12px;
-
-                HorizontalLayout {
-                    height: 38px;
-                    spacing: 10px;
-
-                    Rectangle {
-                        width: 28px;
-                        height: 28px;
-                        border-radius: 8px;
-                        background: #087bf0;
-
-                        Text {
-                            text: "R";
-                            color: white;
-                            font-size: 16px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Text {
-                        text: "Rabbit";
-                        color: #20252d;
-                        font-size: 16px;
-                        font-weight: 700;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    height: 42px;
-                    border-radius: 8px;
-                    background: #eaf3ff;
-
-                    HorizontalLayout {
-                        padding: 10px;
-                        spacing: 10px;
-
-                        Text {
-                            text: "●";
-                            color: #087bf0;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            text: "Connect";
-                            color: #087bf0;
-                            font-size: 14px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                Rectangle {
-                    height: 42px;
-                    border-radius: 8px;
-
-                    HorizontalLayout {
-                        padding: 10px;
-                        spacing: 10px;
-
-                        Text {
-                            text: "●";
-                            color: #a0a6b0;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            text: "Connection history";
-                            color: #626a76;
-                            font-size: 14px;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
-                }
-
-                VerticalLayout {
-                    spacing: 3px;
-
-                    MutedText {
-                        text: "Local server";
-                    }
-
-                    HorizontalLayout {
-                        height: 24px;
-                        spacing: 7px;
-                        Text {
-                            text: "●";
-                            color: root.local-server-online ? #18b664 : #e53e49;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
-
-                        Text {
-                            text: root.local-server-online ? "Online" : "Offline";
-                            color: root.local-server-online ? #18a65e : #d43d48;
-                            font-size: 13px;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    MutedText {
-                        text: "UDP " + root.local-port;
-                    }
-                }
-            }
+        Sidebar {
+            local-port: root.local-port;
+            local-server-online: root.local-server-online;
         }
 
         Rectangle {
-            background: #f7f8fa;
             horizontal-stretch: 1;
+            background: #f7f8fa;
 
             VerticalLayout {
-                padding: 34px;
-                spacing: 8px;
+                padding-left: 34px;
+                padding-right: 34px;
+                padding-top: 30px;
+                padding-bottom: 30px;
+                spacing: 10px;
 
-                Text {
-                    text: root.page-title;
-                    color: #1e232b;
-                    font-size: 22px;
-                    font-weight: 700;
-                }
-
-                MutedText {
-                    text: root.page-subtitle;
-                    height: 24px;
-                }
-
-                Rectangle {
-                    height: 12px;
+                PageHeader {
+                    title: root.page-title;
+                    subtitle: root.page-subtitle;
                 }
 
                 if root.page == AppPage.connect: VerticalLayout {
                     spacing: 16px;
 
-                    Panel {
+                    Card {
                         height: 76px;
+
                         HorizontalLayout {
                             padding: 14px;
                             spacing: 10px;
+
                             address-input := LineEdit {
                                 text <=> root.direct-address;
                                 placeholder-text: "IP address or IP:port";
@@ -295,26 +413,29 @@ export component RabbitWindow inherits Window {
                         }
                     }
 
-                    Panel {
-                        height: 92px;
+                    Card {
+                        height: 96px;
+
                         HorizontalLayout {
-                            padding: 16px;
-                            spacing: 14px;
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
-                                background: root.local-server-online ? #18b664 : #e53e49;
+                            padding: 17px;
+                            spacing: 13px;
+
+                            OnlineStatus {
+                                online: root.local-server-online;
+                                width: 74px;
                             }
 
                             VerticalLayout {
+                                alignment: center;
                                 spacing: 4px;
-                                SectionHeading {
+                                Heading {
                                     text: "Local server";
                                 }
 
-                                MutedText {
-                                    text: root.local-server-online ? "Online · Listening for direct connections" : "Offline · Listener stopped";
+                                BodyText {
+                                    text: root.local-server-online
+                                        ? "Ready to receive direct connection requests"
+                                        : "The direct connection listener has stopped";
                                 }
                             }
 
@@ -324,14 +445,15 @@ export component RabbitWindow inherits Window {
 
                             VerticalLayout {
                                 alignment: center;
+                                spacing: 3px;
                                 MutedText {
-                                    text: "UDP port";
+                                    text: "UDP PORT";
                                     horizontal-alignment: right;
                                 }
 
                                 Text {
                                     text: root.local-port;
-                                    color: #087bf0;
+                                    color: #087cf0;
                                     font-size: 18px;
                                     font-weight: 700;
                                     horizontal-alignment: right;
@@ -340,67 +462,86 @@ export component RabbitWindow inherits Window {
                         }
                     }
 
-                    if root.status-text != "": Text {
-                        text: root.status-text;
-                        color: #d43d48;
-                        font-size: 13px;
-                        wrap: word-wrap;
+                    if root.status-text != "": Rectangle {
+                        height: 42px;
+                        background: #fff1f2;
+                        border-color: #ffd7da;
+                        border-width: 1px;
+                        border-radius: 8px;
+
+                        Text {
+                            x: 13px;
+                            width: parent.width - 26px;
+                            text: root.status-text;
+                            color: #c73c47;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
                     }
                 }
 
-                if root.page == AppPage.connecting || root.page == AppPage.stream-request: Panel {
+                if root.page == AppPage.connecting || root.page == AppPage.stream-request: Card {
                     vertical-stretch: 1;
+
                     VerticalLayout {
                         alignment: center;
-                        padding: 48px;
+                        padding: 50px;
                         spacing: 18px;
+
                         ProgressIndicator {
-                            width: 46px;
-                            height: 46px;
+                            width: 48px;
+                            height: 48px;
                             indeterminate: true;
                         }
 
-                        SectionHeading {
+                        Heading {
                             text: root.status-text;
                             horizontal-alignment: center;
                         }
 
-                        MutedText {
+                        BodyText {
                             text: root.page == AppPage.connecting
-                                ? "Waiting for the remote device to respond..."
-                                : "The remote screen will appear here after approval.";
+                                ? "The remote device must accept this connection request."
+                                : "The remote screen will open when its first frame arrives.";
                             horizontal-alignment: center;
+                            wrap: word-wrap;
                         }
                     }
                 }
 
-                if root.page == AppPage.connection-error: Panel {
+                if root.page == AppPage.connection-error: Card {
                     vertical-stretch: 1;
+
                     VerticalLayout {
                         alignment: center;
-                        padding: 44px;
-                        spacing: 16px;
-                        Rectangle {
-                            width: 52px;
-                            height: 52px;
-                            border-radius: 26px;
-                            background: #ffe9ea;
-                            Text {
-                                text: "×";
-                                color: #e53e49;
-                                font-size: 30px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
+                        padding: 48px;
+                        spacing: 15px;
+
+                        ErrorIcon { }
+
+                        Heading {
+                            text: root.page-title;
+                            horizontal-alignment: center;
                         }
 
-                        SectionHeading {
+                        BodyText {
                             text: root.status-text;
                             horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle {
+                            height: 2px;
                         }
 
                         Button {
                             text: "Try again";
+                            primary: true;
                             clicked => { root.retry-connect(); }
                         }
                     }
@@ -408,23 +549,27 @@ export component RabbitWindow inherits Window {
 
                 if root.page == AppPage.requests: ScrollView {
                     vertical-stretch: 1;
+
                     VerticalLayout {
                         spacing: 12px;
-                        for request[index] in root.connection-requests: Panel {
-                            height: 104px;
+
+                        for request[index] in root.connection-requests: Card {
+                            height: 112px;
+
                             HorizontalLayout {
-                                padding: 15px;
+                                padding: 16px;
                                 spacing: 14px;
-                                DeviceGlyph { }
+
+                                PersonIcon { }
 
                                 VerticalLayout {
                                     alignment: center;
                                     spacing: 3px;
-                                    SectionHeading {
+                                    Heading {
                                         text: request.name;
                                     }
 
-                                    MutedText {
+                                    BodyText {
                                         text: request.address;
                                     }
 
@@ -454,27 +599,32 @@ export component RabbitWindow inherits Window {
 
                 if root.page == AppPage.connected: ScrollView {
                     vertical-stretch: 1;
+
                     VerticalLayout {
                         spacing: 14px;
 
-                        if root.connected-devices.length > 0: SectionHeading {
+                        if root.connected-devices.length > 0: Heading {
                             text: "Devices accessing this device";
+                            height: 28px;
                         }
-                        for device in root.connected-devices: Panel {
-                            height: 86px;
+
+                        for device in root.connected-devices: Card {
+                            height: 92px;
+
                             HorizontalLayout {
-                                padding: 15px;
+                                padding: 16px;
                                 spacing: 14px;
-                                DeviceGlyph { }
+
+                                PersonIcon { }
 
                                 VerticalLayout {
                                     alignment: center;
                                     spacing: 4px;
-                                    SectionHeading {
+                                    Heading {
                                         text: device.name;
                                     }
 
-                                    MutedText {
+                                    BodyText {
                                         text: device.address;
                                     }
                                 }
@@ -483,46 +633,70 @@ export component RabbitWindow inherits Window {
                                     horizontal-stretch: 1;
                                 }
 
-                                Text {
-                                    text: device.status;
-                                    color: #18a65e;
-                                    font-size: 13px;
-                                    vertical-alignment: center;
+                                HorizontalLayout {
+                                    width: 92px;
+                                    spacing: 7px;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 4px;
+                                        background: #19b768;
+                                    }
+
+                                    Text {
+                                        text: device.status;
+                                        color: #16a45d;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                         }
 
-                        if root.remote-screens.length > 0: SectionHeading {
+                        if root.remote-screens.length > 0: Heading {
                             text: "Remote screens";
+                            height: 28px;
                         }
-                        for screen[index] in root.remote-screens: Panel {
-                            height: 104px;
-                            HorizontalLayout {
-                                padding: 15px;
-                                spacing: 14px;
-                                ScreenGlyph { }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+
+                            for screen[index] in root.remote-screens: Card {
+                                width: 220px;
+                                height: 194px;
 
                                 VerticalLayout {
                                     alignment: center;
-                                    spacing: 4px;
-                                    SectionHeading {
+                                    padding: 18px;
+                                    spacing: 8px;
+
+                                    ScreenIcon { }
+
+                                    Heading {
                                         text: screen.name;
+                                        horizontal-alignment: center;
                                     }
 
-                                    MutedText {
+                                    BodyText {
                                         text: screen.resolution;
+                                        horizontal-alignment: center;
+                                    }
+
+                                    Rectangle {
+                                        height: 3px;
+                                    }
+
+                                    Button {
+                                        text: "Open";
+                                        primary: true;
+                                        clicked => { root.open-screen(index); }
                                     }
                                 }
+                            }
 
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                Button {
-                                    text: "Open";
-                                    primary: true;
-                                    clicked => { root.open-screen(index); }
-                                }
+                            Rectangle {
+                                horizontal-stretch: 1;
                             }
                         }
                     }
@@ -533,19 +707,21 @@ export component RabbitWindow inherits Window {
                     spacing: 10px;
 
                     HorizontalLayout {
-                        height: 30px;
+                        height: 34px;
                         spacing: 8px;
-                        Text {
-                            text: "●";
-                            color: #18b664;
-                            font-size: 11px;
-                            vertical-alignment: center;
+
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: #19b768;
                         }
 
                         Text {
                             text: "Streaming";
-                            color: #18a65e;
-                            font-size: 13px;
+                            color: #16a45d;
+                            font-size: 12px;
+                            font-weight: 600;
                             vertical-alignment: center;
                         }
 
@@ -561,45 +737,69 @@ export component RabbitWindow inherits Window {
 
                     Rectangle {
                         vertical-stretch: 1;
-                        background: #151719;
+                        background: #17191c;
                         border-radius: 10px;
 
                         VerticalLayout {
                             alignment: center;
-                            spacing: 12px;
-                            ScreenGlyph { }
+                            spacing: 14px;
+
+                            Rectangle {
+                                width: 64px;
+                                height: 48px;
+                                border-color: #8d9299;
+                                border-width: 2px;
+                                border-radius: 3px;
+
+                                Rectangle {
+                                    x: 27px;
+                                    y: 49px;
+                                    width: 10px;
+                                    height: 7px;
+                                    background: #8d9299;
+                                }
+                            }
 
                             Text {
-                                text: "Video rendering placeholder";
-                                color: #d8dbe0;
+                                text: "Connecting video renderer...";
+                                color: #e4e6e9;
                                 font-size: 14px;
                                 horizontal-alignment: center;
                             }
 
-                            MutedText {
-                                text: root.stream-title + " · " + root.stream-resolution;
+                            Text {
+                                text: root.stream-title + "  ·  " + root.stream-resolution;
+                                color: #8f959d;
+                                font-size: 12px;
                                 horizontal-alignment: center;
                             }
                         }
                     }
                 }
 
-                if root.page == AppPage.stream-error: Panel {
+                if root.page == AppPage.stream-error: Card {
                     vertical-stretch: 1;
+
                     VerticalLayout {
                         alignment: center;
-                        padding: 44px;
-                        spacing: 16px;
-                        ScreenGlyph { }
+                        padding: 48px;
+                        spacing: 15px;
 
-                        SectionHeading {
+                        ErrorIcon { }
+
+                        Heading {
                             text: "Screen stream unavailable";
                             horizontal-alignment: center;
                         }
 
-                        MutedText {
+                        BodyText {
                             text: root.status-text;
                             horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        Rectangle {
+                            height: 2px;
                         }
 
                         Button {

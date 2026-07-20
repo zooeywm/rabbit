@@ -514,6 +514,9 @@ impl RootApplication {
                     })
             })
             .collect::<Vec<_>>();
+        let host_is_streaming = self.model.sessions.iter().any(|session| {
+            session.key.role() == SessionRole::Host && !session.screen_streams.is_empty()
+        });
 
         let (page, page_title, page_subtitle, status_text, stream_title, stream_resolution) =
             if !connection_requests.is_empty() {
@@ -534,7 +537,7 @@ impl RootApplication {
                             "Requesting {} ({} × {})",
                             target.screen_name, target.frame_size.width, target.frame_size.height
                         ),
-                        "Waiting for the remote device to allow the stream".to_string(),
+                        "Waiting for the remote device to configure the stream".to_string(),
                         target.screen_name.clone(),
                         format!("{} × {}", target.frame_size.width, target.frame_size.height),
                     ),
@@ -606,11 +609,21 @@ impl RootApplication {
                         ),
                         _ if !connected_devices.is_empty() || !remote_screens.is_empty() => (
                             ViewPage::Connected,
-                            "Connected devices".to_string(),
-                            if remote_screens.is_empty() {
-                                "Devices currently accessing this Rabbit instance".to_string()
+                            if host_is_streaming {
+                                "Streaming".to_string()
+                            } else if let DirectConnectionState::Connected { peer } =
+                                &self.direct_connection
+                            {
+                                format!("Connected to {peer}")
                             } else {
+                                "Connected devices".to_string()
+                            },
+                            if !remote_screens.is_empty() {
                                 "Select a remote screen to open".to_string()
+                            } else if host_is_streaming {
+                                "Sending a local screen to the connected device".to_string()
+                            } else {
+                                "Devices currently accessing this Rabbit instance".to_string()
                             },
                             self.status_message.clone(),
                             String::new(),
