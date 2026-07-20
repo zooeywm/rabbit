@@ -13,6 +13,12 @@ use drm::buffer::{DrmFourcc, DrmModifier};
 
 use crate::kernel::geometry::PixelSize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DmaBufProfile {
+    pub(crate) format: DrmFourcc,
+    pub(crate) modifier: DrmModifier,
+}
+
 #[derive(Debug)]
 pub(crate) struct DmaBufObject {
     pub(crate) fd: OwnedFd,

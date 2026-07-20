@@ -15,7 +15,7 @@ use gstreamer::prelude::{
 use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
 use crate::infra::platform::{
-    dma_buf::{DmaBufFrame, DmaBufLease},
+    dma_buf::{DmaBufFrame, DmaBufLease, DmaBufProfile},
     frame_pipeline::GbmFramePipelineFrame,
     video_encoder::gstreamer::probe::GStreamerVideoProbe,
     video_probe::VideoFrameProbe,
@@ -337,6 +337,13 @@ pub(crate) fn va_vpp_input_modifier(format: DrmFourcc) -> eros::Result<DrmModifi
         .into_iter()
         .next()
         .with_context(|| "VAAPI VPP modifier discovery returned an empty result")?)
+}
+
+pub(crate) fn va_vpp_input_profiles(format: DrmFourcc) -> eros::Result<Vec<DmaBufProfile>> {
+    Ok(va_vpp_input_modifiers(format)?
+        .into_iter()
+        .map(|modifier| DmaBufProfile { format, modifier })
+        .collect())
 }
 
 pub(crate) fn va_vpp_input_modifiers(format: DrmFourcc) -> eros::Result<Vec<DrmModifier>> {
@@ -1254,10 +1261,7 @@ mod tests {
                 capture: KmsScreenCaptureManagerState::new(
                     true,
                     reaper_handle.clone(),
-                    crate::infra::platform::video_encoder::va_vpp_input_modifiers(
-                        DrmFourcc::Xrgb8888,
-                    )
-                    .expect("VAAPI XRGB modifiers should be discoverable"),
+                    crate::infra::platform::video_encoder::va_vpp_input_profiles,
                 ),
                 pipeline: GbmFramePipelineManagerState::new(reaper_handle),
                 screens: vec![host_video_test_screen(screen_name, source_size)],

@@ -7,13 +7,23 @@ mod video_encoder;
 mod video_probe;
 
 pub(crate) use frame_pipeline::{GbmFramePipelineManager, GbmFramePipelineManagerState};
-pub(crate) use screen_capture::{
-    KmsScreenCaptureManager, KmsScreenCaptureManagerState, create_screen_capture_manager_state,
-};
+pub(crate) use screen_capture::{KmsScreenCaptureManager, KmsScreenCaptureManagerState};
 pub(crate) use screen_layout::{
     NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_screen_layout_manager_state,
 };
 pub(crate) use video_encoder::GStreamerVideoEncoder;
+
+/// Negotiates the Linux capture output requested by the selected encoder stack.
+pub(crate) fn create_screen_capture_manager_state(
+    enable_probing: bool,
+    worker_reaper: crate::infra::WorkerReaperHandle,
+) -> KmsScreenCaptureManagerState {
+    KmsScreenCaptureManagerState::new(
+        enable_probing,
+        worker_reaper,
+        video_encoder::va_vpp_input_profiles,
+    )
+}
 
 /// Creates the frame-pipeline manager state selected for Linux.
 pub(crate) fn create_frame_pipeline_manager_state(

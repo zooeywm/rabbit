@@ -10,7 +10,7 @@ use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 use crate::{
     infra::WorkerReaperHandle,
     infra::platform::{
-        dma_buf::DmaBufFrame,
+        dma_buf::{DmaBufFrame, DmaBufProfile},
         gpu::GpuDevice,
         screen_capture::kms::{capture::KmsCapturer, types::KmsPlaneIssue},
         video_probe::{VideoFrameProbe, VideoProbeClock},
@@ -63,7 +63,7 @@ impl KmsCaptureLease {
         screen_name: String,
         enable_probing: bool,
         reaper: WorkerReaperHandle,
-        composition_modifiers: Vec<drm::buffer::DrmModifier>,
+        encoder_profiles: Vec<DmaBufProfile>,
     ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
         let (commands, command_receiver) = bounded(1);
         let (device_sender, device) = bounded(1);
@@ -78,7 +78,7 @@ impl KmsCaptureLease {
                 frame_sender,
                 overflow_frames,
                 enable_probing,
-                composition_modifiers,
+                encoder_profiles,
             );
         })?;
 
@@ -160,9 +160,9 @@ fn run_capture_loop(
     frames: Sender<eros::Result<KmsCapturedFrame>>,
     overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
     enable_probing: bool,
-    composition_modifiers: Vec<drm::buffer::DrmModifier>,
+    encoder_profiles: Vec<DmaBufProfile>,
 ) {
-    let mut capturer = match KmsCapturer::new(&screen_name, composition_modifiers) {
+    let mut capturer = match KmsCapturer::new(&screen_name, encoder_profiles) {
         Ok(capturer) => capturer,
         Err(error) => {
             let _ = device.send(Err(error));

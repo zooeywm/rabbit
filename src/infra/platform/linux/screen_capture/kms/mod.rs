@@ -1,6 +1,6 @@
 use eros::Context;
 
-use crate::infra::WorkerReaperHandle;
+use crate::infra::{WorkerReaperHandle, platform::dma_buf::DmaBufProfile};
 use crate::kernel::{
     screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
     screen_manager::{ScreenId, ScreenLayoutManager},
@@ -30,20 +30,44 @@ pub(crate) use egl_context::{EglContext, EglDmaBufImage};
 pub(crate) struct KmsScreenCaptureManagerState {
     enable_probing: bool,
     worker_reaper: WorkerReaperHandle,
-    composition_modifiers: Vec<drm::buffer::DrmModifier>,
+    encoder_profile_provider: EncoderProfileProvider,
+    encoder_profiles: Option<Vec<DmaBufProfile>>,
 }
+
+type EncoderProfileProvider = fn(drm::buffer::DrmFourcc) -> eros::Result<Vec<DmaBufProfile>>;
 
 impl KmsScreenCaptureManagerState {
     pub(crate) fn new(
         enable_probing: bool,
         worker_reaper: WorkerReaperHandle,
-        composition_modifiers: Vec<drm::buffer::DrmModifier>,
+        encoder_profile_provider: EncoderProfileProvider,
     ) -> Self {
         Self {
             enable_probing,
             worker_reaper,
-            composition_modifiers,
+            encoder_profile_provider,
+            encoder_profiles: None,
         }
+    }
+
+    fn encoder_profiles(&mut self) -> Vec<DmaBufProfile> {
+        if let Some(profiles) = &self.encoder_profiles {
+            return profiles.clone();
+        }
+
+        let profiles = match (self.encoder_profile_provider)(drm::buffer::DrmFourcc::Xrgb8888) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                tracing::debug!(
+                    target: "rabbit::screen_capture::kms",
+                    error = ?error,
+                    "Encoder-compatible KMS capture profiles are unavailable"
+                );
+                Vec::new()
+            }
+        };
+        self.encoder_profiles = Some(profiles.clone());
+        profiles
     }
 }
 
@@ -68,20 +92,22 @@ where
             .clone();
         let context = format!("Failed to start KMS capture worker for screen {screen_name}");
 
-        let state = <Deps as AsRef<KmsScreenCaptureManagerState>>::as_ref(self.prj_ref());
+        let state = <Deps as AsMut<KmsScreenCaptureManagerState>>::as_mut(self.prj_ref_mut());
+        let enable_probing = state.enable_probing;
+        let worker_reaper = state.worker_reaper.clone();
+        let encoder_profiles = state.encoder_profiles();
 
-        Ok(KmsCaptureLease::new(
-            screen_name,
-            state.enable_probing,
-            state.worker_reaper.clone(),
-            state.composition_modifiers.clone(),
+        Ok(
+            KmsCaptureLease::new(screen_name, enable_probing, worker_reaper, encoder_profiles)
+                .with_context(|| context)?,
         )
-        .with_context(|| context)?)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::{
         infra::{
             WorkerReaper,
@@ -101,6 +127,32 @@ mod tests {
     struct TestDeps {
         capture: KmsScreenCaptureManagerState,
         screens: Vec<Screen>,
+    }
+
+    static PROFILE_QUERIES: AtomicUsize = AtomicUsize::new(0);
+
+    fn counted_empty_profiles(
+        _: drm::buffer::DrmFourcc,
+    ) -> eros::Result<Vec<crate::infra::platform::dma_buf::DmaBufProfile>> {
+        PROFILE_QUERIES.fetch_add(1, Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-kms"]
+    fn resolves_encoder_profiles_lazily_once() {
+        PROFILE_QUERIES.store(0, Ordering::Relaxed);
+        let (reaper, reaper_handle) = WorkerReaper::new().expect("Test worker reaper should start");
+        let mut state =
+            KmsScreenCaptureManagerState::new(false, reaper_handle, counted_empty_profiles);
+
+        assert_eq!(PROFILE_QUERIES.load(Ordering::Relaxed), 0);
+        assert!(state.encoder_profiles().is_empty());
+        assert!(state.encoder_profiles().is_empty());
+        assert_eq!(PROFILE_QUERIES.load(Ordering::Relaxed), 1);
+
+        drop(state);
+        drop(reaper);
     }
 
     impl AsRef<KmsScreenCaptureManagerState> for TestDeps {
@@ -141,7 +193,7 @@ mod tests {
     fn acquires_one_owned_source_for_an_existing_screen() {
         let (reaper, reaper_handle) = WorkerReaper::new().expect("Test worker reaper should start");
         let mut deps = TestDeps {
-            capture: KmsScreenCaptureManagerState::new(false, reaper_handle, Vec::new()),
+            capture: KmsScreenCaptureManagerState::new(false, reaper_handle, |_| Ok(Vec::new())),
             screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
         };
         let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);

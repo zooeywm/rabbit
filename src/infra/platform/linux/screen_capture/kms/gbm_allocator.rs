@@ -1,9 +1,9 @@
 use eros::Context;
-use gbm::{BufferObjectFlags, Format, Modifier};
+use gbm::{BufferObjectFlags, Format};
 
 use crate::{
     infra::platform::{
-        dma_buf::{DmaBufFrame, DmaBufPool},
+        dma_buf::{DmaBufFrame, DmaBufPool, DmaBufProfile},
         gpu::{GpuContext, GpuDevice},
         screen_capture::kms::{
             composition::KmsCompositionTransform,
@@ -17,8 +17,8 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct GbmFrameAllocator {
     context: GpuContext,
-    preferred_modifiers: Vec<Modifier>,
-    composition_strategy: Option<CompositionTargetStrategy>,
+    encoder_profiles: Vec<DmaBufProfile>,
+    output_contract: Option<CaptureOutputContract>,
     pool_size: Option<PixelSize>,
     pool: DmaBufPool,
 }
@@ -26,23 +26,23 @@ pub(crate) struct GbmFrameAllocator {
 const COMPOSITION_POOL_CAPACITY: usize = 3;
 
 #[derive(Debug, Clone, Copy)]
-enum CompositionTargetStrategy {
-    PreferredModifier(Modifier),
-    Generic,
+enum CaptureOutputContract {
+    EncoderCompatible(DmaBufProfile),
+    Intermediate { format: Format },
 }
 
 impl GbmFrameAllocator {
     pub(crate) fn new(
         device: &KmsDevice,
-        preferred_modifiers: Vec<Modifier>,
+        encoder_profiles: Vec<DmaBufProfile>,
     ) -> eros::Result<Self> {
         let gpu = GpuDevice::from(device.render_node_path()?);
         let context = GpuContext::new(&gpu)?;
 
         Ok(Self {
             context,
-            preferred_modifiers,
-            composition_strategy: None,
+            encoder_profiles,
+            output_contract: None,
             pool_size: None,
             pool: DmaBufPool::new(COMPOSITION_POOL_CAPACITY),
         })
@@ -52,27 +52,32 @@ impl GbmFrameAllocator {
         let format = Format::Xrgb8888;
         let usage = BufferObjectFlags::RENDERING;
 
-        if let Some(strategy) = self.composition_strategy {
-            return match strategy {
-                CompositionTargetStrategy::PreferredModifier(modifier) => self
+        if let Some(contract) = self.output_contract {
+            return match contract {
+                CaptureOutputContract::EncoderCompatible(profile) => self
                     .context
-                    .allocate_dma_buf_with_modifier(size, format, modifier, usage),
-                CompositionTargetStrategy::Generic => {
+                    .allocate_dma_buf_with_modifier(size, profile.format, profile.modifier, usage),
+                CaptureOutputContract::Intermediate { format } => {
                     self.context.allocate_dma_buf(size, format, usage)
                 }
             };
         }
 
-        for modifier in self.preferred_modifiers.iter().copied() {
-            let frame = match self
-                .context
-                .allocate_dma_buf_with_modifier(size, format, modifier, usage)
-            {
+        for profile in self.encoder_profiles.iter().copied() {
+            if profile.format != format {
+                continue;
+            }
+            let frame = match self.context.allocate_dma_buf_with_modifier(
+                size,
+                profile.format,
+                profile.modifier,
+                usage,
+            ) {
                 Ok(frame) => frame,
                 Err(error) => {
                     tracing::debug!(
                         target: "rabbit::screen_capture::kms",
-                        ?modifier,
+                        ?profile,
                         error = ?error,
                         "KMS compositor rejected preferred XRGB modifier"
                     );
@@ -87,19 +92,18 @@ impl GbmFrameAllocator {
             if let Err(error) = renderable {
                 tracing::debug!(
                     target: "rabbit::screen_capture::kms",
-                    ?modifier,
+                    ?profile,
                     error = ?error,
-                    "EGL rejected preferred KMS composition modifier"
+                    "EGL rejected an encoder-compatible KMS capture profile"
                 );
                 continue;
             }
 
-            self.composition_strategy =
-                Some(CompositionTargetStrategy::PreferredModifier(modifier));
+            self.output_contract = Some(CaptureOutputContract::EncoderCompatible(profile));
             tracing::info!(
                 target: "rabbit::screen_capture::kms",
-                ?modifier,
-                "Selected encoder-compatible KMS composition modifier"
+                ?profile,
+                "Negotiated encoder-compatible KMS capture output"
             );
             return Ok(frame);
         }
@@ -110,7 +114,7 @@ impl GbmFrameAllocator {
             .first()
             .map(|plane| plane.modifier)
             .unwrap_or(drm::buffer::DrmModifier::Invalid);
-        self.composition_strategy = Some(CompositionTargetStrategy::Generic);
+        self.output_contract = Some(CaptureOutputContract::Intermediate { format });
         tracing::info!(
             target: "rabbit::screen_capture::kms",
             ?modifier,
@@ -132,19 +136,19 @@ impl GbmFrameAllocator {
             self.pool = DmaBufPool::new(COMPOSITION_POOL_CAPACITY);
             self.pool_size = Some(output_size);
         }
-        let mut first = if self.composition_strategy.is_none() {
+        let mut first = if self.output_contract.is_none() {
             Some(self.allocate_composition_target(output_size)?)
         } else {
             None
         };
         let context = &self.context;
-        let composition_strategy = self
-            .composition_strategy
-            .with_context(|| "KMS composition-target strategy was not selected")?;
+        let output_contract = self
+            .output_contract
+            .with_context(|| "KMS capture-output contract was not negotiated")?;
         let frame = self.pool.acquire(
             || match first.take() {
                 Some(frame) => Ok(frame),
-                None => allocate_composition_target(context, output_size, composition_strategy),
+                None => allocate_composition_target(context, output_size, output_contract),
             },
             |fence| {
                 context
@@ -208,16 +212,16 @@ impl GbmFrameAllocator {
 fn allocate_composition_target(
     context: &GpuContext,
     size: PixelSize,
-    strategy: CompositionTargetStrategy,
+    contract: CaptureOutputContract,
 ) -> eros::Result<DmaBufFrame> {
     let usage = BufferObjectFlags::RENDERING;
 
-    match strategy {
-        CompositionTargetStrategy::PreferredModifier(modifier) => {
-            context.allocate_dma_buf_with_modifier(size, Format::Xrgb8888, modifier, usage)
+    match contract {
+        CaptureOutputContract::EncoderCompatible(profile) => {
+            context.allocate_dma_buf_with_modifier(size, profile.format, profile.modifier, usage)
         }
-        CompositionTargetStrategy::Generic => {
-            context.allocate_dma_buf(size, Format::Xrgb8888, usage)
+        CaptureOutputContract::Intermediate { format } => {
+            context.allocate_dma_buf(size, format, usage)
         }
     }
 }

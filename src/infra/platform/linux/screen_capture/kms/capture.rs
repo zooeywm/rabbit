@@ -4,7 +4,7 @@ use eros::Context;
 
 use crate::{
     infra::platform::{
-        dma_buf::DmaBufFrame,
+        dma_buf::{DmaBufFrame, DmaBufProfile},
         gpu::GpuDevice,
         screen_capture::kms::{
             gbm_allocator::GbmFrameAllocator, output::KmsOutput, types::KmsPlaneIssue,
@@ -24,12 +24,12 @@ pub(crate) struct KmsCapturer {
 impl KmsCapturer {
     pub(crate) fn new(
         screen_name: &str,
-        composition_modifiers: Vec<drm::buffer::DrmModifier>,
+        encoder_profiles: Vec<DmaBufProfile>,
     ) -> eros::Result<Self> {
         let output = KmsOutput::open(screen_name)
             .with_context(|| format!("Failed to open KMS output {screen_name}"))?;
         let gpu_device = GpuDevice::from(output.device.render_node_path()?);
-        let allocator = GbmFrameAllocator::new(&output.device, composition_modifiers)
+        let allocator = GbmFrameAllocator::new(&output.device, encoder_profiles)
             .with_context(|| format!("Failed to create KMS compositor for {screen_name}"))?;
 
         Ok(Self {
