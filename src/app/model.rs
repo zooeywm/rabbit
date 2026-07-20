@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    rc::Rc,
+};
 
 use eros::Context as _;
 
@@ -11,7 +16,7 @@ use crate::{
     kernel::{
         screen_configuration::{ScreenStreamRequestId, ScreenStreamsConfigured},
         screen_manager::ScreenId,
-        session::{ReceivedVideoFrame, SessionId, SessionSend},
+        session::{ReceivedVideoFrame, SessionId, SessionRole, SessionSend},
         session_control::ScreenInfo,
     },
 };
@@ -20,10 +25,29 @@ pub(crate) type RabbitApp =
     App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState, GbmFramePipelineManagerState>;
 
 pub(crate) struct RunningSession {
+    pub(crate) key: SessionKey,
     pub(crate) send: Rc<SessionSend<QuicTransportSend>>,
     pub(crate) screen_streams: HashMap<ScreenId, RunningScreenStream>,
     pub(crate) received_video_frames: LatestVideoFrames,
     pub(crate) _receiver: compio::runtime::JoinHandle<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SessionKey {
+    peer_address: SocketAddr,
+    role: SessionRole,
+}
+
+impl SessionKey {
+    pub(crate) fn new(peer_address: SocketAddr, role: SessionRole) -> Self {
+        Self { peer_address, role }
+    }
+
+    fn matches_controller_target(&self, remote_ip: IpAddr, remote_port: Option<u16>) -> bool {
+        self.role == SessionRole::Controller
+            && self.peer_address.ip() == remote_ip
+            && remote_port.is_none_or(|port| self.peer_address.port() == port)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -136,6 +160,22 @@ impl ApplicationModel {
         self.screen_stream_results.remove(&id);
     }
 
+    pub(crate) fn has_session(&self, key: &SessionKey) -> bool {
+        self.sessions.iter().any(|session| session.key == *key)
+    }
+
+    pub(crate) fn has_controller_session(
+        &self,
+        remote_ip: IpAddr,
+        remote_port: Option<u16>,
+    ) -> bool {
+        self.sessions.iter().any(|session| {
+            session
+                .key
+                .matches_controller_target(remote_ip, remote_port)
+        })
+    }
+
     pub(crate) fn begin_screen_stream_shutdown(&mut self) -> Vec<compio::runtime::JoinHandle<()>> {
         let mut tasks = Vec::new();
 
@@ -158,9 +198,12 @@ mod tests {
     use bytes::Bytes;
 
     use crate::{
-        app::model::{LatestVideoFrames, RunningScreenStream},
+        app::model::{LatestVideoFrames, RunningScreenStream, SessionKey},
         infra::unsync_queue::UnsyncQueue,
-        kernel::{screen_manager::ScreenId, session::ReceivedVideoFrame},
+        kernel::{
+            screen_manager::ScreenId,
+            session::{ReceivedVideoFrame, SessionRole},
+        },
     };
 
     #[test]
@@ -212,5 +255,36 @@ mod tests {
 
             assert!(stopped.get());
         });
+    }
+
+    #[test]
+    fn session_key_distinguishes_direction_and_matches_direct_target() {
+        let peer_address = "127.0.0.1:52731"
+            .parse()
+            .expect("Test peer address should be valid");
+        let controller = SessionKey::new(peer_address, SessionRole::Controller);
+        let host = SessionKey::new(peer_address, SessionRole::Host);
+
+        assert_eq!(
+            controller,
+            SessionKey::new(peer_address, SessionRole::Controller)
+        );
+        assert_ne!(controller, host);
+        assert!(controller.matches_controller_target(
+            "127.0.0.1".parse().expect("Test IP should be valid"),
+            None,
+        ));
+        assert!(controller.matches_controller_target(
+            "127.0.0.1".parse().expect("Test IP should be valid"),
+            Some(52731),
+        ));
+        assert!(!controller.matches_controller_target(
+            "127.0.0.1".parse().expect("Test IP should be valid"),
+            Some(52732),
+        ));
+        assert!(!host.matches_controller_target(
+            "127.0.0.1".parse().expect("Test IP should be valid"),
+            None,
+        ));
     }
 }

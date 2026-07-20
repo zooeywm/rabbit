@@ -46,6 +46,10 @@ struct ControlWriteCommand {
 }
 
 impl QuicTransport {
+    pub(crate) fn remote_address(&self) -> std::net::SocketAddr {
+        self.connection.remote_address()
+    }
+
     pub(crate) async fn open(connection: compio::quic::Connection) -> eros::Result<Self> {
         let (mut control_send, mut control_recv) = connection
             .open_bi_wait()

@@ -9,7 +9,7 @@ use winio::prelude::*;
 
 use crate::app::{
     gui::view::{RootView, RootViewEvent, RootViewInit, RootViewMessage},
-    model::{ApplicationModel, LatestVideoFrames, RunningScreenStream, RunningSession},
+    model::{ApplicationModel, LatestVideoFrames, RunningScreenStream, RunningSession, SessionKey},
 };
 
 use crate::{
@@ -38,6 +38,7 @@ use crate::{
 mod view;
 
 pub(crate) struct PendingHostSession {
+    peer_address: SocketAddr,
     send: SessionSend<QuicTransportSend>,
     recv: SessionRecv<QuicTransportRecv>,
 }
@@ -46,6 +47,7 @@ pub(crate) struct RootComponent {
     model: ApplicationModel,
     view: Child<RootView>,
     closing: bool,
+    connecting: bool,
     _connection_listener: compio::runtime::JoinHandle<()>,
     _logger_guard: LoggerGuard,
 }
@@ -142,12 +144,30 @@ impl RootComponent {
 
     fn start_session<R>(
         &mut self,
+        peer_address: SocketAddr,
         send: SessionSend<QuicTransportSend>,
         recv: SessionRecv<R>,
         sender: &ComponentSender<Self>,
-    ) where
+    ) -> bool
+    where
         R: TransportRecv + 'static,
     {
+        let key = SessionKey::new(peer_address, send.role());
+        if self.model.has_session(&key) {
+            warn!(
+                event = "duplicate_session_rejected",
+                %peer_address,
+                role = ?send.role(),
+                "Duplicate Session rejected"
+            );
+            compio::runtime::spawn(async move {
+                send.close().await;
+            })
+            .detach();
+
+            return false;
+        }
+
         let received_video_frames = LatestVideoFrames::default();
         info!(
             event = "session_started",
@@ -156,6 +176,7 @@ impl RootComponent {
             "Session started"
         );
         self.model.sessions.push(RunningSession {
+            key,
             send: Rc::new(send),
             screen_streams: Default::default(),
             received_video_frames: received_video_frames.clone(),
@@ -165,6 +186,8 @@ impl RootComponent {
                 sender.clone(),
             )),
         });
+
+        true
     }
 
     fn replace_screen_stream(
@@ -366,6 +389,7 @@ impl Component for RootComponent {
             model: ApplicationModel::new(app, requester_name),
             view,
             closing: false,
+            connecting: false,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -452,6 +476,11 @@ impl Component for RootComponent {
                 Ok(false)
             }
             RootMessage::ConnectDirect(input) => {
+                if self.connecting {
+                    self.set_connection_status("Connection already in progress");
+                    return Ok(true);
+                }
+
                 let (remote_ip, remote_port) = match Self::parse_direct_target(&input) {
                     Ok(target) => target,
                     Err(error) => {
@@ -459,6 +488,10 @@ impl Component for RootComponent {
                         return Ok(true);
                     }
                 };
+                if self.model.has_controller_session(remote_ip, remote_port) {
+                    self.set_connection_status("Session already connected");
+                    return Ok(true);
+                }
                 let endpoint: &QuicEndpoint = self.model.app.as_ref();
                 let endpoint = endpoint.clone();
                 let request = ConnectionRequest {
@@ -473,6 +506,7 @@ impl Component for RootComponent {
                     "Direct connection started"
                 );
                 self.view.post(RootViewMessage::SetConnecting(true));
+                self.connecting = true;
                 self.set_connection_status("Connecting...");
 
                 compio::runtime::spawn(async move {
@@ -485,16 +519,21 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::DirectConnectionFinished(result) => {
+                self.connecting = false;
                 self.view.post(RootViewMessage::SetConnecting(false));
 
                 match result {
                     Ok(Some(transport)) => {
+                        let peer_address = transport.remote_address();
                         let id = self.model.next_session_id()?;
                         let session = Session::new(id, SessionRole::Controller, transport);
                         let (send, recv) = session.split();
 
-                        self.start_session(send, recv, sender);
-                        self.set_connection_status("Connection accepted");
+                        if self.start_session(peer_address, send, recv, sender) {
+                            self.set_connection_status("Connection accepted");
+                        } else {
+                            self.set_connection_status("Session already connected");
+                        }
                     }
                     Ok(None) => self.set_connection_status("Connection rejected"),
                     Err(error) => self.set_connection_status(format!("Connection failed: {error}")),
@@ -558,11 +597,16 @@ impl Component for RootComponent {
             RootMessage::ConnectionAccepted(result) => {
                 match result {
                     Ok(transport) => {
+                        let peer_address = transport.remote_address();
                         let id = self.model.next_session_id()?;
                         let session = Session::new(id, SessionRole::Host, transport);
                         let (send, recv) = session.split();
                         let screen_list = OutgoingScreenList::try_from(self.model.app.screens())?;
-                        let session = PendingHostSession { send, recv };
+                        let session = PendingHostSession {
+                            peer_address,
+                            send,
+                            recv,
+                        };
                         let screen_list_sender = sender.clone();
 
                         compio::runtime::spawn(async move {
@@ -581,7 +625,14 @@ impl Component for RootComponent {
             }
             RootMessage::InitialScreenListFinished { session, result } => {
                 match result {
-                    Ok(()) => self.start_session(session.send, session.recv, sender),
+                    Ok(()) => {
+                        self.start_session(
+                            session.peer_address,
+                            session.send,
+                            session.recv,
+                            sender,
+                        );
+                    }
                     Err(error) => {
                         error!(error = ?error, "Failed to send the initial screen list")
                     }
