@@ -45,6 +45,7 @@ pub(crate) struct PendingHostSession {
 pub(crate) struct RootComponent {
     model: ApplicationModel,
     view: Child<RootView>,
+    closing: bool,
     _connection_listener: compio::runtime::JoinHandle<()>,
     _logger_guard: LoggerGuard,
 }
@@ -52,6 +53,7 @@ pub(crate) struct RootComponent {
 pub(crate) enum RootMessage {
     Noop,
     Close,
+    ShutdownFinished,
     ConnectDirect(String),
     DirectConnectionFinished(eros::Result<Option<QuicTransport>>),
     ConnectionRequest(PendingQuicConnectionRequest),
@@ -363,6 +365,7 @@ impl Component for RootComponent {
         Ok(Self {
             model: ApplicationModel::new(app, requester_name),
             view,
+            closing: false,
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -398,9 +401,43 @@ impl Component for RootComponent {
         message: Self::Message,
         sender: &ComponentSender<Self>,
     ) -> eros::Result<bool> {
+        if self.closing && !matches!(&message, RootMessage::ShutdownFinished) {
+            return Ok(false);
+        }
+
         match message {
             RootMessage::Noop => Ok(false),
             RootMessage::Close => {
+                self.closing = true;
+                let tasks = self.model.begin_screen_stream_shutdown();
+                let shutdown_sender = sender.clone();
+
+                info!(
+                    event = "application_shutdown_started",
+                    screen_stream_count = tasks.len(),
+                    "Application shutdown started"
+                );
+                compio::runtime::spawn(async move {
+                    for task in tasks {
+                        if let Err(error) = task.await {
+                            error!(
+                                error = ?error,
+                                "Screen stream task failed during application shutdown"
+                            );
+                        }
+                    }
+
+                    shutdown_sender.post(RootMessage::ShutdownFinished);
+                })
+                .detach();
+
+                Ok(false)
+            }
+            RootMessage::ShutdownFinished => {
+                info!(
+                    event = "application_shutdown_finished",
+                    "Application shutdown finished"
+                );
                 sender.output(());
                 Ok(false)
             }

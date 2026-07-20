@@ -60,6 +60,13 @@ impl Drop for RunningScreenStream {
     }
 }
 
+impl RunningScreenStream {
+    pub(crate) fn begin_shutdown(&mut self) -> Option<compio::runtime::JoinHandle<()>> {
+        self.cancellation.push(());
+        self.task.take()
+    }
+}
+
 pub(crate) struct ApplicationModel {
     pub(crate) requester_name: String,
     pub(crate) pending_connection_requests: Vec<PendingQuicConnectionRequest>,
@@ -128,14 +135,31 @@ impl ApplicationModel {
         self.remote_screens.remove(&id);
         self.screen_stream_results.remove(&id);
     }
+
+    pub(crate) fn begin_screen_stream_shutdown(&mut self) -> Vec<compio::runtime::JoinHandle<()>> {
+        let mut tasks = Vec::new();
+
+        for session in &mut self.sessions {
+            for stream in session.screen_streams.values_mut() {
+                if let Some(task) = stream.begin_shutdown() {
+                    tasks.push(task);
+                }
+            }
+        }
+
+        tasks
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use bytes::Bytes;
 
     use crate::{
-        app::model::LatestVideoFrames,
+        app::model::{LatestVideoFrames, RunningScreenStream},
+        infra::unsync_queue::UnsyncQueue,
         kernel::{screen_manager::ScreenId, session::ReceivedVideoFrame},
     };
 
@@ -160,5 +184,33 @@ mod tests {
                 .packets,
             vec![Bytes::from_static(b"new")]
         );
+    }
+
+    #[test]
+    fn screen_stream_shutdown_is_polled_before_the_stream_is_dropped() {
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime.block_on(async {
+            let cancellation = UnsyncQueue::default();
+            let task_cancellation = cancellation.clone();
+            let stopped = Rc::new(Cell::new(false));
+            let task_stopped = Rc::clone(&stopped);
+            let mut stream = RunningScreenStream {
+                id: 0,
+                cancellation,
+                task: Some(compio::runtime::spawn(async move {
+                    task_cancellation.pop().await;
+                    task_stopped.set(true);
+                })),
+            };
+
+            let task = stream
+                .begin_shutdown()
+                .expect("Running stream should return its task during shutdown");
+            task.await
+                .expect("Screen stream task should finish after cancellation");
+
+            assert!(stopped.get());
+        });
     }
 }
