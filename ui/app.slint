@@ -1,0 +1,614 @@
+import {
+    Button,
+    LineEdit,
+    ProgressIndicator,
+    ScrollView,
+} from "std-widgets.slint";
+
+export enum AppPage {
+    connect,
+    connecting,
+    connection-error,
+    requests,
+    connected,
+    stream-request,
+    streaming,
+    stream-error,
+}
+
+export struct ConnectionRequestItem {
+    name: string,
+    address: string,
+}
+
+export struct ConnectedDeviceItem {
+    name: string,
+    address: string,
+    status: string,
+}
+
+export struct RemoteScreenItem {
+    name: string,
+    resolution: string,
+}
+
+component SectionHeading inherits Text {
+    color: #20252d;
+    font-size: 15px;
+    font-weight: 700;
+    vertical-alignment: center;
+}
+
+component MutedText inherits Text {
+    color: #747b87;
+    font-size: 13px;
+    vertical-alignment: center;
+}
+
+component Panel inherits Rectangle {
+    background: #ffffff;
+    border-color: #e7eaf0;
+    border-width: 1px;
+    border-radius: 10px;
+    drop-shadow-color: #16000000;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 3px;
+}
+
+component DeviceGlyph inherits Rectangle {
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
+    background: #eaf3ff;
+
+    Text {
+        text: "●";
+        color: #087bf0;
+        font-size: 18px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component ScreenGlyph inherits Rectangle {
+    width: 52px;
+    height: 44px;
+    border-radius: 22px;
+    background: #eaf3ff;
+
+    Rectangle {
+        x: 13px;
+        y: 10px;
+        width: 26px;
+        height: 18px;
+        border-color: #087bf0;
+        border-width: 2px;
+        border-radius: 2px;
+
+        Rectangle {
+            x: 9px;
+            y: 20px;
+            width: 8px;
+            height: 2px;
+            background: #087bf0;
+        }
+    }
+}
+
+export component RabbitWindow inherits Window {
+    title: "Rabbit";
+    width: 1000px;
+    height: 680px;
+    background: #f7f8fa;
+
+    in property <AppPage> page: AppPage.connect;
+    in-out property <string> direct-address: "127.0.0.1";
+    in property <string> page-title: "Connect to a device";
+    in property <string> page-subtitle: "Enter the server IP address or IP:port";
+    in property <string> status-text;
+    in property <string> local-port;
+    in property <bool> local-server-online;
+    in property <string> stream-title;
+    in property <string> stream-resolution;
+    in property <[ConnectionRequestItem]> connection-requests;
+    in property <[ConnectedDeviceItem]> connected-devices;
+    in property <[RemoteScreenItem]> remote-screens;
+
+    callback connect(string);
+    callback decide-request(int, bool);
+    callback open-screen(int);
+    callback retry-connect();
+    callback leave-stream();
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            width: 196px;
+            background: #ffffff;
+            border-color: #e9ebef;
+            border-width: 1px;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+
+                HorizontalLayout {
+                    height: 38px;
+                    spacing: 10px;
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 8px;
+                        background: #087bf0;
+
+                        Text {
+                            text: "R";
+                            color: white;
+                            font-size: 16px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Text {
+                        text: "Rabbit";
+                        color: #20252d;
+                        font-size: 16px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+                    background: #eaf3ff;
+
+                    HorizontalLayout {
+                        padding: 10px;
+                        spacing: 10px;
+
+                        Text {
+                            text: "●";
+                            color: #087bf0;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Connect";
+                            color: #087bf0;
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 42px;
+                    border-radius: 8px;
+
+                    HorizontalLayout {
+                        padding: 10px;
+                        spacing: 10px;
+
+                        Text {
+                            text: "●";
+                            color: #a0a6b0;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Connection history";
+                            color: #626a76;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                VerticalLayout {
+                    spacing: 3px;
+
+                    MutedText {
+                        text: "Local server";
+                    }
+
+                    HorizontalLayout {
+                        height: 24px;
+                        spacing: 7px;
+                        Text {
+                            text: "●";
+                            color: root.local-server-online ? #18b664 : #e53e49;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.local-server-online ? "Online" : "Offline";
+                            color: root.local-server-online ? #18a65e : #d43d48;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    MutedText {
+                        text: "UDP " + root.local-port;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            background: #f7f8fa;
+            horizontal-stretch: 1;
+
+            VerticalLayout {
+                padding: 34px;
+                spacing: 8px;
+
+                Text {
+                    text: root.page-title;
+                    color: #1e232b;
+                    font-size: 22px;
+                    font-weight: 700;
+                }
+
+                MutedText {
+                    text: root.page-subtitle;
+                    height: 24px;
+                }
+
+                Rectangle {
+                    height: 12px;
+                }
+
+                if root.page == AppPage.connect: VerticalLayout {
+                    spacing: 16px;
+
+                    Panel {
+                        height: 76px;
+                        HorizontalLayout {
+                            padding: 14px;
+                            spacing: 10px;
+                            address-input := LineEdit {
+                                text <=> root.direct-address;
+                                placeholder-text: "IP address or IP:port";
+                                horizontal-stretch: 1;
+                                accepted => { root.connect(address-input.text); }
+                            }
+
+                            Button {
+                                text: "Connect";
+                                primary: true;
+                                clicked => { root.connect(address-input.text); }
+                            }
+                        }
+                    }
+
+                    Panel {
+                        height: 92px;
+                        HorizontalLayout {
+                            padding: 16px;
+                            spacing: 14px;
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                border-radius: 5px;
+                                background: root.local-server-online ? #18b664 : #e53e49;
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                SectionHeading {
+                                    text: "Local server";
+                                }
+
+                                MutedText {
+                                    text: root.local-server-online ? "Online · Listening for direct connections" : "Offline · Listener stopped";
+                                }
+                            }
+
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                MutedText {
+                                    text: "UDP port";
+                                    horizontal-alignment: right;
+                                }
+
+                                Text {
+                                    text: root.local-port;
+                                    color: #087bf0;
+                                    font-size: 18px;
+                                    font-weight: 700;
+                                    horizontal-alignment: right;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.status-text != "": Text {
+                        text: root.status-text;
+                        color: #d43d48;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if root.page == AppPage.connecting || root.page == AppPage.stream-request: Panel {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 48px;
+                        spacing: 18px;
+                        ProgressIndicator {
+                            width: 46px;
+                            height: 46px;
+                            indeterminate: true;
+                        }
+
+                        SectionHeading {
+                            text: root.status-text;
+                            horizontal-alignment: center;
+                        }
+
+                        MutedText {
+                            text: root.page == AppPage.connecting
+                                ? "Waiting for the remote device to respond..."
+                                : "The remote screen will appear here after approval.";
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                if root.page == AppPage.connection-error: Panel {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 44px;
+                        spacing: 16px;
+                        Rectangle {
+                            width: 52px;
+                            height: 52px;
+                            border-radius: 26px;
+                            background: #ffe9ea;
+                            Text {
+                                text: "×";
+                                color: #e53e49;
+                                font-size: 30px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        SectionHeading {
+                            text: root.status-text;
+                            horizontal-alignment: center;
+                        }
+
+                        Button {
+                            text: "Try again";
+                            clicked => { root.retry-connect(); }
+                        }
+                    }
+                }
+
+                if root.page == AppPage.requests: ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 12px;
+                        for request[index] in root.connection-requests: Panel {
+                            height: 104px;
+                            HorizontalLayout {
+                                padding: 15px;
+                                spacing: 14px;
+                                DeviceGlyph { }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 3px;
+                                    SectionHeading {
+                                        text: request.name;
+                                    }
+
+                                    MutedText {
+                                        text: request.address;
+                                    }
+
+                                    MutedText {
+                                        text: "Requests access to this device";
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                Button {
+                                    text: "Reject";
+                                    clicked => { root.decide-request(index, false); }
+                                }
+
+                                Button {
+                                    text: "Accept";
+                                    primary: true;
+                                    clicked => { root.decide-request(index, true); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == AppPage.connected: ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 14px;
+
+                        if root.connected-devices.length > 0: SectionHeading {
+                            text: "Devices accessing this device";
+                        }
+                        for device in root.connected-devices: Panel {
+                            height: 86px;
+                            HorizontalLayout {
+                                padding: 15px;
+                                spacing: 14px;
+                                DeviceGlyph { }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    SectionHeading {
+                                        text: device.name;
+                                    }
+
+                                    MutedText {
+                                        text: device.address;
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                Text {
+                                    text: device.status;
+                                    color: #18a65e;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        if root.remote-screens.length > 0: SectionHeading {
+                            text: "Remote screens";
+                        }
+                        for screen[index] in root.remote-screens: Panel {
+                            height: 104px;
+                            HorizontalLayout {
+                                padding: 15px;
+                                spacing: 14px;
+                                ScreenGlyph { }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    SectionHeading {
+                                        text: screen.name;
+                                    }
+
+                                    MutedText {
+                                        text: screen.resolution;
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                Button {
+                                    text: "Open";
+                                    primary: true;
+                                    clicked => { root.open-screen(index); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == AppPage.streaming: VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        height: 30px;
+                        spacing: 8px;
+                        Text {
+                            text: "●";
+                            color: #18b664;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Streaming";
+                            color: #18a65e;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: "Disconnect";
+                            clicked => { root.leave-stream(); }
+                        }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #151719;
+                        border-radius: 10px;
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 12px;
+                            ScreenGlyph { }
+
+                            Text {
+                                text: "Video rendering placeholder";
+                                color: #d8dbe0;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+
+                            MutedText {
+                                text: root.stream-title + " · " + root.stream-resolution;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                if root.page == AppPage.stream-error: Panel {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        padding: 44px;
+                        spacing: 16px;
+                        ScreenGlyph { }
+
+                        SectionHeading {
+                            text: "Screen stream unavailable";
+                            horizontal-alignment: center;
+                        }
+
+                        MutedText {
+                            text: root.status-text;
+                            horizontal-alignment: center;
+                        }
+
+                        Button {
+                            text: "Back to screens";
+                            clicked => { root.leave-stream(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

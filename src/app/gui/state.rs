@@ -3,6 +3,15 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
+use crate::kernel::{
+    geometry::PixelSize,
+    screen_configuration::{
+        ScreenResolutionStatus, ScreenStreamRequestId, ScreenStreamsConfigured,
+    },
+    screen_manager::ScreenId,
+    session::SessionId,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DirectTarget {
     ip: IpAddr,
@@ -32,7 +41,7 @@ pub(crate) enum DirectConnectionCompletion {
     Failed(String),
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DirectConnectionState {
     #[default]
     Idle,
@@ -79,24 +88,174 @@ impl DirectConnectionState {
         true
     }
 
+    pub(crate) fn reset(&mut self) {
+        *self = Self::Idle;
+    }
+
     pub(crate) fn is_connecting(&self) -> bool {
         matches!(self, Self::Connecting { .. })
     }
+}
 
-    pub(crate) fn status(&self) -> Option<String> {
-        match self {
-            Self::Idle => None,
-            Self::Connecting { target } => Some(format!("Connecting to {target}...")),
-            Self::Connected { peer } => Some(format!("Connected to {peer}")),
-            Self::Rejected { target } => Some(format!("Connection to {target} was rejected")),
-            Self::SelfRejected { target } => Some(format!(
-                "Cannot connect to this Rabbit instance at {target}"
-            )),
-            Self::Failed { target, message } => {
-                Some(format!("Failed to connect to {target}: {message}"))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScreenStreamTarget {
+    pub(crate) request_id: ScreenStreamRequestId,
+    pub(crate) session_id: SessionId,
+    pub(crate) screen_id: ScreenId,
+    pub(crate) screen_name: String,
+    pub(crate) frame_size: PixelSize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ScreenStreamState {
+    #[default]
+    Idle,
+    Requesting(ScreenStreamTarget),
+    WaitingForVideo(ScreenStreamTarget),
+    Streaming(ScreenStreamTarget),
+    Failed {
+        target: ScreenStreamTarget,
+        message: String,
+    },
+}
+
+impl ScreenStreamState {
+    pub(crate) fn begin(&mut self, target: ScreenStreamTarget) {
+        *self = Self::Requesting(target);
+    }
+
+    pub(crate) fn apply_configuration(&mut self, configured: &ScreenStreamsConfigured) -> bool {
+        let Self::Requesting(target) = self else {
+            return false;
+        };
+        if target.request_id != configured.request_id {
+            return false;
+        }
+
+        let target = target.clone();
+        let outcome = configured
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.screen_id == target.screen_id);
+        *self = match outcome.map(|outcome| &outcome.status) {
+            Some(ScreenResolutionStatus::Configured(_)) => Self::WaitingForVideo(target),
+            Some(ScreenResolutionStatus::Failed { .. }) => Self::Failed {
+                target,
+                message: "The remote device could not configure this screen".to_string(),
+            },
+            None => Self::Failed {
+                target,
+                message: "The remote device did not report a result for this screen".to_string(),
+            },
+        };
+        true
+    }
+
+    pub(crate) fn receive_video(&mut self, session_id: SessionId, screen_id: ScreenId) -> bool {
+        let target = match self {
+            Self::Requesting(target) | Self::WaitingForVideo(target)
+                if target.session_id == session_id && target.screen_id == screen_id =>
+            {
+                target.clone()
             }
+            _ => return false,
+        };
+        *self = Self::Streaming(target);
+        true
+    }
+
+    pub(crate) fn fail(
+        &mut self,
+        session_id: SessionId,
+        screen_id: ScreenId,
+        message: String,
+    ) -> bool {
+        let target = match self {
+            Self::Requesting(target) | Self::WaitingForVideo(target) | Self::Streaming(target)
+                if target.session_id == session_id && target.screen_id == screen_id =>
+            {
+                target.clone()
+            }
+            _ => return false,
+        };
+        *self = Self::Failed { target, message };
+        true
+    }
+
+    pub(crate) fn fail_session(&mut self, session_id: SessionId, message: String) -> bool {
+        let (target_session_id, screen_id) = match self {
+            Self::Requesting(target) | Self::WaitingForVideo(target) | Self::Streaming(target) => {
+                (target.session_id, target.screen_id)
+            }
+            Self::Idle | Self::Failed { .. } => return false,
+        };
+        if target_session_id != session_id {
+            return false;
+        }
+
+        self.fail(session_id, screen_id, message)
+    }
+
+    pub(crate) fn active_session_id(&self) -> Option<SessionId> {
+        match self {
+            Self::Requesting(target)
+            | Self::WaitingForVideo(target)
+            | Self::Streaming(target)
+            | Self::Failed { target, .. } => Some(target.session_id),
+            Self::Idle => None,
         }
     }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::Idle;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ViewPage {
+    #[default]
+    Connect,
+    Connecting,
+    ConnectionError,
+    Requests,
+    Connected,
+    StreamRequest,
+    Streaming,
+    StreamError,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConnectionRequestView {
+    pub(crate) name: String,
+    pub(crate) address: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConnectedDeviceView {
+    pub(crate) name: String,
+    pub(crate) address: String,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteScreenView {
+    pub(crate) name: String,
+    pub(crate) resolution: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ViewState {
+    pub(crate) page: ViewPage,
+    pub(crate) page_title: String,
+    pub(crate) page_subtitle: String,
+    pub(crate) status_text: String,
+    pub(crate) local_port: String,
+    pub(crate) local_server_online: bool,
+    pub(crate) stream_title: String,
+    pub(crate) stream_resolution: String,
+    pub(crate) connection_requests: Vec<ConnectionRequestView>,
+    pub(crate) connected_devices: Vec<ConnectedDeviceView>,
+    pub(crate) remote_screens: Vec<RemoteScreenView>,
 }
 
 // Focused test: cargo test app::gui::state::tests
@@ -104,7 +263,19 @@ impl DirectConnectionState {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use crate::app::gui::state::{DirectConnectionCompletion, DirectConnectionState, DirectTarget};
+    use crate::app::gui::state::{
+        DirectConnectionCompletion, DirectConnectionState, DirectTarget, ScreenStreamState,
+        ScreenStreamTarget,
+    };
+    use crate::kernel::{
+        geometry::PixelSize,
+        screen_configuration::{
+            ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
+            ScreenStreamRequestId, ScreenStreamsConfigured,
+        },
+        screen_manager::ScreenId,
+        session::SessionId,
+    };
 
     #[test]
     fn direct_connection_flow_preserves_the_target_until_completion() {
@@ -117,16 +288,10 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             Some(52733)
         )));
-        assert_eq!(
-            state.status().as_deref(),
-            Some("Connecting to 127.0.0.1...")
-        );
+        assert_eq!(state, DirectConnectionState::Connecting { target });
 
         assert!(state.complete(DirectConnectionCompletion::Connected(peer)));
-        assert_eq!(
-            state.status().as_deref(),
-            Some("Connected to 127.0.0.1:52732")
-        );
+        assert_eq!(state, DirectConnectionState::Connected { peer });
     }
 
     #[test]
@@ -136,29 +301,41 @@ mod tests {
 
         assert!(state.begin(target));
         assert!(state.complete(DirectConnectionCompletion::Rejected));
-        assert_eq!(
-            state.status().as_deref(),
-            Some("Connection to 127.0.0.1:52731 was rejected")
-        );
+        assert_eq!(state, DirectConnectionState::Rejected { target });
 
         assert!(state.begin(target));
         assert!(state.complete(DirectConnectionCompletion::SelfRejected));
-        assert_eq!(
-            state.status().as_deref(),
-            Some("Cannot connect to this Rabbit instance at 127.0.0.1:52731")
-        );
+        assert_eq!(state, DirectConnectionState::SelfRejected { target });
     }
 
     #[test]
-    fn direct_connection_flow_keeps_failure_context() {
-        let target = DirectTarget::new(IpAddr::V4(Ipv4Addr::LOCALHOST), Some(52731));
-        let mut state = DirectConnectionState::default();
+    fn screen_stream_progresses_from_request_to_first_video_frame() {
+        let target = ScreenStreamTarget {
+            request_id: ScreenStreamRequestId(7),
+            session_id: SessionId(2),
+            screen_id: ScreenId(1),
+            screen_name: "eDP-1".to_string(),
+            frame_size: PixelSize {
+                width: 1920,
+                height: 1200,
+            },
+        };
+        let mut state = ScreenStreamState::default();
+        state.begin(target.clone());
 
-        assert!(state.begin(target));
-        assert!(state.complete(DirectConnectionCompletion::Failed("timed out".into())));
-        assert_eq!(
-            state.status().as_deref(),
-            Some("Failed to connect to 127.0.0.1:52731: timed out")
-        );
+        assert!(state.apply_configuration(&ScreenStreamsConfigured {
+            request_id: target.request_id,
+            outcomes: vec![ScreenResolutionOutcome {
+                screen_id: target.screen_id,
+                status: ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
+                    requested: target.frame_size,
+                    actual: target.frame_size,
+                }),
+            }],
+        }));
+        assert_eq!(state, ScreenStreamState::WaitingForVideo(target.clone()));
+
+        assert!(state.receive_video(target.session_id, target.screen_id));
+        assert_eq!(state, ScreenStreamState::Streaming(target));
     }
 }

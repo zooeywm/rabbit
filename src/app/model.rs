@@ -26,6 +26,7 @@ pub(crate) type RabbitApp =
 
 pub(crate) struct RunningSession {
     pub(crate) key: SessionKey,
+    pub(crate) peer_name: Option<String>,
     pub(crate) send: Rc<SessionSend<QuicTransportSend>>,
     pub(crate) screen_streams: HashMap<ScreenId, RunningScreenStream>,
     pub(crate) received_video_frames: LatestVideoFrames,
@@ -41,6 +42,14 @@ pub(crate) struct SessionKey {
 impl SessionKey {
     pub(crate) fn new(peer_address: SocketAddr, role: SessionRole) -> Self {
         Self { peer_address, role }
+    }
+
+    pub(crate) fn peer_address(&self) -> SocketAddr {
+        self.peer_address
+    }
+
+    pub(crate) fn role(&self) -> SessionRole {
+        self.role
     }
 
     fn matches_controller_target(&self, remote_ip: IpAddr, remote_port: Option<u16>) -> bool {
@@ -94,7 +103,6 @@ impl RunningScreenStream {
 pub(crate) struct ApplicationModel {
     pub(crate) requester_name: String,
     pub(crate) pending_connection_requests: Vec<PendingQuicConnectionRequest>,
-    pub(crate) selected_connection_request: Option<usize>,
     pub(crate) sessions: Vec<RunningSession>,
     pub(crate) remote_screens: HashMap<SessionId, Vec<ScreenInfo>>,
     pub(crate) remote_screen_entries: Vec<(SessionId, ScreenId)>,
@@ -112,7 +120,6 @@ impl ApplicationModel {
             app,
             requester_name,
             pending_connection_requests: Vec::new(),
-            selected_connection_request: None,
             sessions: Vec::new(),
             remote_screens: HashMap::new(),
             remote_screen_entries: Vec::new(),

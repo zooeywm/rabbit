@@ -14,7 +14,7 @@ use crate::{
     kernel::screen_manager::ScreenLayoutManager,
 };
 
-pub(crate) use gui::RootComponent;
+pub(crate) use gui::run as run_gui;
 pub(crate) use logging::{LoggerGuard, init_logging};
 
 /// Root application state and dependency container.

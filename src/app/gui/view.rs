@@ -1,263 +1,195 @@
-use winio::prelude::*;
+use eros::Context as _;
+use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
 
-pub(crate) struct RootView {
-    window: Child<Window>,
-    direct_address_input: Child<Edit>,
-    connect_button: Child<Button>,
-    connection_status: Child<Label>,
-    remote_screen_title: Child<Label>,
-    remote_screen_list: Child<ListBox>,
-    connection_request_title: Child<Label>,
-    connection_request_list: Child<ListBox>,
-    accept_connection_button: Child<Button>,
-    reject_connection_button: Child<Button>,
-}
+use crate::app::gui::state::{
+    ConnectedDeviceView, ConnectionRequestView, RemoteScreenView, ViewPage, ViewState,
+};
 
-pub(crate) struct RootViewInit {
-    pub(crate) local_port: u16,
-}
+slint::include_modules!();
 
-pub(crate) enum RootViewEvent {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GuiIntent {
+    Connect(String),
+    DecideConnectionRequest { index: usize, accept: bool },
+    OpenRemoteScreen(usize),
+    RetryConnection,
+    LeaveScreenStream,
     Close,
-    ConnectDirect(String),
-    ConnectionRequestSelected(Option<usize>),
-    AcceptConnection(Option<usize>),
-    RejectConnection(Option<usize>),
-    RemoteScreenSelected(Option<usize>),
 }
 
-pub(crate) enum RootViewMessage {
-    Noop,
-    Close,
-    ConnectDirect,
-    ConnectionRequestSelectionChanged,
-    AcceptConnection,
-    RejectConnection,
-    RemoteScreenSelectionChanged,
-    SetConnecting(bool),
-    SetConnectionStatus(String),
-    SetConnectionRequests {
-        entries: Vec<String>,
-        selected: Option<usize>,
-    },
-    SetRemoteScreens(Vec<String>),
+pub(crate) struct Gui {
+    window: RabbitWindow,
+    intent_sender: flume::Sender<GuiIntent>,
 }
 
-impl RootView {
-    fn selected_index(list: &Child<ListBox>) -> eros::Result<Option<usize>> {
-        for index in 0..list.len()? {
-            if list.is_selected(index)? {
-                return Ok(Some(index));
-            }
+#[derive(Clone)]
+pub(crate) struct ViewPublisher {
+    window: slint::Weak<RabbitWindow>,
+}
+
+impl Gui {
+    pub(crate) fn new() -> eros::Result<(Self, ViewPublisher, flume::Receiver<GuiIntent>)> {
+        let window = RabbitWindow::new().context("Failed to create the Slint Rabbit window")?;
+        let (sender, intents) = flume::unbounded();
+
+        {
+            let sender = sender.clone();
+            window.on_connect(move |address| {
+                send_intent(&sender, GuiIntent::Connect(address.to_string()));
+            });
         }
+        {
+            let sender = sender.clone();
+            window.on_decide_request(move |index, accept| {
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                send_intent(
+                    &sender,
+                    GuiIntent::DecideConnectionRequest { index, accept },
+                );
+            });
+        }
+        {
+            let sender = sender.clone();
+            window.on_open_screen(move |index| {
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                send_intent(&sender, GuiIntent::OpenRemoteScreen(index));
+            });
+        }
+        {
+            let sender = sender.clone();
+            window.on_retry_connect(move || {
+                send_intent(&sender, GuiIntent::RetryConnection);
+            });
+        }
+        {
+            let sender = sender.clone();
+            window.on_leave_stream(move || {
+                send_intent(&sender, GuiIntent::LeaveScreenStream);
+            });
+        }
+        let close_sender = sender.clone();
+        window.window().on_close_requested(move || {
+            if close_sender.send(GuiIntent::Close).is_ok() {
+                CloseRequestResponse::KeepWindowShown
+            } else {
+                CloseRequestResponse::HideWindow
+            }
+        });
 
-        Ok(None)
+        let publisher = ViewPublisher {
+            window: window.as_weak(),
+        };
+        Ok((
+            Self {
+                window,
+                intent_sender: sender,
+            },
+            publisher,
+            intents,
+        ))
     }
 
-    fn set_connection_request_panel_visible(&mut self, visible: bool) -> eros::Result<()> {
-        self.connection_request_title.set_visible(visible)?;
-        self.connection_request_list.set_visible(visible)?;
-        self.accept_connection_button.set_visible(visible)?;
-        self.reject_connection_button.set_visible(visible)?;
+    pub(crate) fn run(&self) -> eros::Result<()> {
+        self.window
+            .run()
+            .context("Failed to run the Slint event loop")?;
         Ok(())
     }
+
+    pub(crate) fn request_close(&self) {
+        if self.intent_sender.send(GuiIntent::Close).is_err() {
+            // The App thread has already completed, so there is nothing left to close.
+        }
+    }
 }
 
-impl Component for RootView {
-    type Error = eros::ErrorUnion;
-    type Event = RootViewEvent;
-    type Init<'a> = RootViewInit;
-    type Message = RootViewMessage;
-
-    async fn init(init: Self::Init<'_>, _sender: &ComponentSender<Self>) -> eros::Result<Self> {
-        init! {
-            window: Window = (()) => {
-                text: format!("Rabbit - UDP {}", init.local_port),
-                size: Size::new(800.0, 600.0),
-            },
-            direct_address_input: Edit = (&window) => {
-                text: "127.0.0.1",
-            },
-            connect_button: Button = (&window) => {
-                text: "Connect",
-            },
-            connection_status: Label = (&window) => {
-                text: format!("Listening on UDP {}", init.local_port),
-            },
-            remote_screen_title: Label = (&window) => {
-                text: "Remote screens",
-                visible: false,
-            },
-            remote_screen_list: ListBox = (&window) => {
-                multiple: false,
-                visible: false,
-            },
-            connection_request_title: Label = (&window) => {
-                text: "Pending connection requests",
-                visible: false,
-            },
-            connection_request_list: ListBox = (&window) => {
-                multiple: false,
-                visible: false,
-            },
-            accept_connection_button: Button = (&window) => {
-                text: "Accept",
-                visible: false,
-            },
-            reject_connection_button: Button = (&window) => {
-                text: "Reject",
-                visible: false,
-            },
-        }
-        window.show()?;
-
-        Ok(Self {
-            window,
-            direct_address_input,
-            connect_button,
-            connection_status,
-            remote_screen_title,
-            remote_screen_list,
-            connection_request_title,
-            connection_request_list,
-            accept_connection_button,
-            reject_connection_button,
+impl ViewPublisher {
+    pub(crate) fn publish(&self, state: ViewState) -> eros::Result<()> {
+        let window = self.window.clone();
+        slint::invoke_from_event_loop(move || {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            apply_view_state(&window, state);
         })
-    }
-
-    async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {
-        start! {
-            sender, default: RootViewMessage::Noop,
-            self.window => {
-                WindowEvent::Close => RootViewMessage::Close,
-            },
-            self.connect_button => {
-                ButtonEvent::Click => RootViewMessage::ConnectDirect,
-            },
-            self.connection_request_list => {
-                ListBoxEvent::Select => RootViewMessage::ConnectionRequestSelectionChanged,
-            },
-            self.remote_screen_list => {
-                ListBoxEvent::Select => RootViewMessage::RemoteScreenSelectionChanged,
-            },
-            self.accept_connection_button => {
-                ButtonEvent::Click => RootViewMessage::AcceptConnection,
-            },
-            self.reject_connection_button => {
-                ButtonEvent::Click => RootViewMessage::RejectConnection,
-            },
-        }
-    }
-
-    async fn update_children(&mut self) -> eros::Result<bool> {
-        update_children!(
-            self.window,
-            self.direct_address_input,
-            self.connect_button,
-            self.connection_status,
-            self.remote_screen_title,
-            self.remote_screen_list,
-            self.connection_request_title,
-            self.connection_request_list,
-            self.accept_connection_button,
-            self.reject_connection_button,
-        )
-    }
-
-    async fn update(
-        &mut self,
-        message: Self::Message,
-        sender: &ComponentSender<Self>,
-    ) -> eros::Result<bool> {
-        match message {
-            RootViewMessage::Noop => Ok(false),
-            RootViewMessage::Close => {
-                sender.output(RootViewEvent::Close);
-                Ok(false)
-            }
-            RootViewMessage::ConnectDirect => {
-                sender.output(RootViewEvent::ConnectDirect(
-                    self.direct_address_input.text()?,
-                ));
-                Ok(false)
-            }
-            RootViewMessage::ConnectionRequestSelectionChanged => {
-                sender.output(RootViewEvent::ConnectionRequestSelected(
-                    Self::selected_index(&self.connection_request_list)?,
-                ));
-                Ok(false)
-            }
-            RootViewMessage::AcceptConnection => {
-                sender.output(RootViewEvent::AcceptConnection(Self::selected_index(
-                    &self.connection_request_list,
-                )?));
-                Ok(false)
-            }
-            RootViewMessage::RejectConnection => {
-                sender.output(RootViewEvent::RejectConnection(Self::selected_index(
-                    &self.connection_request_list,
-                )?));
-                Ok(false)
-            }
-            RootViewMessage::RemoteScreenSelectionChanged => {
-                sender.output(RootViewEvent::RemoteScreenSelected(Self::selected_index(
-                    &self.remote_screen_list,
-                )?));
-                Ok(false)
-            }
-            RootViewMessage::SetConnecting(connecting) => {
-                self.connect_button.set_enabled(!connecting)?;
-                Ok(false)
-            }
-            RootViewMessage::SetConnectionStatus(status) => {
-                self.connection_status.set_text(status)?;
-                Ok(true)
-            }
-            RootViewMessage::SetConnectionRequests { entries, selected } => {
-                let visible = !entries.is_empty();
-                self.connection_request_list.set_items(entries)?;
-                self.set_connection_request_panel_visible(visible)?;
-
-                if let Some(selected) = selected {
-                    self.connection_request_list.set_selected(selected, true)?;
-                }
-
-                Ok(true)
-            }
-            RootViewMessage::SetRemoteScreens(entries) => {
-                let visible = !entries.is_empty();
-                self.remote_screen_list.set_items(entries)?;
-                self.remote_screen_title.set_visible(visible)?;
-                self.remote_screen_list.set_visible(visible)?;
-                Ok(true)
-            }
-        }
-    }
-
-    fn render(&mut self, _sender: &ComponentSender<Self>) -> eros::Result<()> {
-        let size = self.window.size()?;
-        let mut direct_connection = layout! {
-            StackPanel::new(Orient::Horizontal),
-            self.direct_address_input => { grow: true },
-            self.connect_button,
-        };
-        let mut actions = layout! {
-            StackPanel::new(Orient::Horizontal),
-            self.reject_connection_button => { grow: true },
-            self.accept_connection_button => { grow: true },
-        };
-        let mut panel = layout! {
-            StackPanel::new(Orient::Vertical),
-            direct_connection,
-            self.connection_status,
-            self.remote_screen_title,
-            self.remote_screen_list => { grow: true },
-            self.connection_request_title,
-            self.connection_request_list => { grow: true },
-            actions,
-        };
-
-        panel.set_size(size)?;
+        .context("Failed to publish Rabbit state to the Slint event loop")?;
         Ok(())
     }
+
+    pub(crate) fn quit(&self) -> eros::Result<()> {
+        slint::quit_event_loop().context("Failed to stop the Slint event loop")?;
+        Ok(())
+    }
+}
+
+fn send_intent(sender: &flume::Sender<GuiIntent>, intent: GuiIntent) {
+    if sender.send(intent).is_err()
+        && let Err(error) = slint::quit_event_loop()
+    {
+        eprintln!("Failed to stop the Slint event loop after the App thread exited: {error}");
+    }
+}
+
+fn apply_view_state(window: &RabbitWindow, state: ViewState) {
+    window.set_page(match state.page {
+        ViewPage::Connect => AppPage::Connect,
+        ViewPage::Connecting => AppPage::Connecting,
+        ViewPage::ConnectionError => AppPage::ConnectionError,
+        ViewPage::Requests => AppPage::Requests,
+        ViewPage::Connected => AppPage::Connected,
+        ViewPage::StreamRequest => AppPage::StreamRequest,
+        ViewPage::Streaming => AppPage::Streaming,
+        ViewPage::StreamError => AppPage::StreamError,
+    });
+    window.set_page_title(state.page_title.into());
+    window.set_page_subtitle(state.page_subtitle.into());
+    window.set_status_text(state.status_text.into());
+    window.set_local_port(state.local_port.into());
+    window.set_local_server_online(state.local_server_online);
+    window.set_stream_title(state.stream_title.into());
+    window.set_stream_resolution(state.stream_resolution.into());
+    window.set_connection_requests(connection_request_model(state.connection_requests));
+    window.set_connected_devices(connected_device_model(state.connected_devices));
+    window.set_remote_screens(remote_screen_model(state.remote_screens));
+}
+
+fn connection_request_model(entries: Vec<ConnectionRequestView>) -> ModelRc<ConnectionRequestItem> {
+    ModelRc::new(VecModel::from(
+        entries
+            .into_iter()
+            .map(|entry| ConnectionRequestItem {
+                name: SharedString::from(entry.name),
+                address: SharedString::from(entry.address),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn connected_device_model(entries: Vec<ConnectedDeviceView>) -> ModelRc<ConnectedDeviceItem> {
+    ModelRc::new(VecModel::from(
+        entries
+            .into_iter()
+            .map(|entry| ConnectedDeviceItem {
+                name: SharedString::from(entry.name),
+                address: SharedString::from(entry.address),
+                status: SharedString::from(entry.status),
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+fn remote_screen_model(entries: Vec<RemoteScreenView>) -> ModelRc<RemoteScreenItem> {
+    ModelRc::new(VecModel::from(
+        entries
+            .into_iter()
+            .map(|entry| RemoteScreenItem {
+                name: SharedString::from(entry.name),
+                resolution: SharedString::from(entry.resolution),
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
