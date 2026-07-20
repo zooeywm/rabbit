@@ -11,6 +11,7 @@ use gbm::{Format, Modifier};
 use crate::{
     infra::WorkerReaperHandle,
     infra::platform::{
+        dma_buf::DmaBufPool,
         frame_pipeline::{GbmFramePipelineFrame, SharedFramePipelineError},
         gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
         screen_capture::{EglDmaBufImage, KmsCapturedFrame, KmsFrameReceiver},
@@ -81,7 +82,10 @@ struct GpuPipeline {
     parameters: FramePipelineParameters,
     outputs: LatestSender<eros::Result<GbmFramePipelineFrame>>,
     output_strategy: Option<FrameOutputStrategy>,
+    output_pool: DmaBufPool,
 }
+
+const OUTPUT_POOL_CAPACITY: usize = 3;
 
 #[derive(Debug, Clone, Copy)]
 enum FrameOutputStrategy {
@@ -248,6 +252,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                         parameters,
                         outputs,
                         output_strategy: None,
+                        output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
                     },
                 );
             }
@@ -523,7 +528,10 @@ fn route_screen_frame(
     screen_id: ScreenId,
     frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
-    mut process: impl FnMut(&mut GpuPipeline, &KmsCapturedFrame) -> eros::Result<GbmFramePipelineFrame>,
+    mut process: impl FnMut(
+        &mut GpuPipeline,
+        &KmsCapturedFrame,
+    ) -> eros::Result<Option<GbmFramePipelineFrame>>,
 ) {
     pipelines.retain(|_, pipeline| {
         if pipeline.screen_id != screen_id {
@@ -531,8 +539,13 @@ fn route_screen_frame(
         }
 
         let output = process(pipeline, &frame);
+        if output.is_err() {
+            frame.buffer.invalidate_lease();
+        }
         let succeeded = output.is_ok();
-        pipeline.outputs.publish(output);
+        if let Some(output) = output.transpose() {
+            pipeline.outputs.publish(output);
+        }
         succeeded
     });
 }
@@ -542,16 +555,19 @@ fn process_pipeline_frame(
     source: &EglDmaBufImage<'_>,
     pipeline: &mut GpuPipeline,
     frame: &KmsCapturedFrame,
-) -> eros::Result<GbmFramePipelineFrame> {
+) -> eros::Result<Option<GbmFramePipelineFrame>> {
     let parameters = pipeline.parameters;
     validate_nv12_size(parameters.frame_size)?;
     let source_texture = context
         .egl()
         .create_dma_buf_texture(source)
         .with_context(|| "Failed to bind the frame-pipeline source texture")?;
-    let mut buffer = match pipeline.output_strategy {
-        Some(strategy) => allocate_output(context, parameters.frame_size, strategy),
-        None => select_output(context, parameters.frame_size).map(|(buffer, strategy)| {
+    let mut first = None;
+    let strategy = match pipeline.output_strategy {
+        Some(strategy) => strategy,
+        None => {
+            let (buffer, strategy) = select_output(context, parameters.frame_size)?;
+            first = Some(buffer);
             pipeline.output_strategy = Some(strategy);
             tracing::info!(
                 target: "rabbit::frame_pipeline",
@@ -561,19 +577,25 @@ fn process_pipeline_frame(
                 strategy = strategy.name(),
                 "Selected frame-pipeline output strategy"
             );
-            buffer
-        }),
-    }
-    .with_context(|| {
-        format!(
-            "Failed to allocate frame-pipeline output {}x{}",
-            parameters.frame_size.width, parameters.frame_size.height
-        )
-    })?;
-    match pipeline
-        .output_strategy
-        .with_context(|| "Frame-pipeline output strategy was not selected")?
-    {
+            strategy
+        }
+    };
+    let buffer = pipeline.output_pool.acquire(
+        || match first.take() {
+            Some(buffer) => Ok(buffer),
+            None => allocate_output(context, parameters.frame_size, strategy),
+        },
+        |fence| {
+            context
+                .egl()
+                .wait_on_native_fence(fence)
+                .with_context(|| "Failed to enqueue frame-pipeline output reuse fence")
+        },
+    )?;
+    let Some(mut buffer) = buffer else {
+        return Ok(None);
+    };
+    match strategy {
         FrameOutputStrategy::PassthroughXrgb(_) => {
             eros::bail!("XRGB pass-through reached the GPU processing path")
         }
@@ -606,20 +628,24 @@ fn process_pipeline_frame(
                 .with_context(|| "Failed to copy the source frame to the VAAPI XRGB output")?;
         }
     }
-    buffer.readiness_fence = Some(
-        context
-            .egl()
-            .finish_frame_pipeline()
-            .with_context(|| "Failed to export frame-pipeline output readiness")?,
+    let readiness_fence = context
+        .egl()
+        .finish_frame_pipeline()
+        .with_context(|| "Failed to export frame-pipeline output readiness")?;
+    frame.buffer.set_release_fence(
+        readiness_fence
+            .try_clone()
+            .with_context(|| "Failed to duplicate the source-frame release fence")?,
     );
+    buffer.readiness_fence = Some(readiness_fence);
 
-    Ok(GbmFramePipelineFrame {
+    Ok(Some(GbmFramePipelineFrame {
         buffer,
         probe: frame.probe.clone().map(|mut probe| {
             probe.mark_gpu_submitted();
             probe
         }),
-    })
+    }))
 }
 
 impl FrameOutputStrategy {
@@ -791,10 +817,11 @@ mod tests {
 
     use crate::{
         infra::platform::{
+            dma_buf::DmaBufPool,
             frame_pipeline::worker::{
                 FramePipelineId, GpuPipeline, GpuScreen, GpuWorker, GpuWorkerEvent,
-                GpuWorkerNotification, LatestSender, gpu_mismatch, route_screen_frame,
-                validate_nv12_size, wait_for_event,
+                GpuWorkerNotification, LatestSender, OUTPUT_POOL_CAPACITY, gpu_mismatch,
+                route_screen_frame, validate_nv12_size, wait_for_event,
             },
             gpu::GpuDevice,
             screen_capture::{KmsFrameReceiver, empty_kms_frame},
@@ -912,6 +939,7 @@ mod tests {
                         overflow_receiver: matching_frames.clone(),
                     },
                     output_strategy: None,
+                    output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
                 },
             ),
             (
@@ -924,6 +952,7 @@ mod tests {
                         overflow_receiver: other_frames.clone(),
                     },
                     output_strategy: None,
+                    output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
                 },
             ),
         ]);

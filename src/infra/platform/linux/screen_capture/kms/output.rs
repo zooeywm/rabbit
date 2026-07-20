@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use drm::{
     Device as _, VblankWaitFlags, VblankWaitTarget,
@@ -29,6 +29,12 @@ pub(crate) struct KmsOutput {
     pub crtc: crtc::Handle,
     vblank_crtc_index: u32,
     planes: Vec<KmsPlane>,
+    pub(super) framebuffer_cache: HashMap<
+        drm::control::framebuffer::Handle,
+        crate::infra::platform::screen_capture::kms::framebuffer::KmsFramebufferCacheEntry,
+    >,
+    pub(super) framebuffer_handle_refs: HashMap<drm::buffer::Handle, usize>,
+    pub(super) next_framebuffer_generation: u64,
 }
 
 #[derive(Debug)]
@@ -94,6 +100,9 @@ impl KmsOutput {
                 crtc,
                 vblank_crtc_index,
                 planes,
+                framebuffer_cache: HashMap::new(),
+                framebuffer_handle_refs: HashMap::new(),
+                next_framebuffer_generation: 0,
             });
         }
 
@@ -197,6 +206,14 @@ impl KmsOutput {
             planes,
             issues,
         })
+    }
+}
+
+impl Drop for KmsOutput {
+    fn drop(&mut self) {
+        for handle in self.framebuffer_handle_refs.keys().copied() {
+            let _ = self.device.close_buffer(handle);
+        }
     }
 }
 

@@ -188,6 +188,7 @@ impl GpuContext {
             objects,
             planes,
             readiness_fence: None,
+            lease: None,
         })
     }
 
@@ -286,6 +287,7 @@ impl GpuContext {
             objects: luma.objects,
             planes: vec![luma.planes[0], chroma_plane],
             readiness_fence: None,
+            lease: None,
         })
     }
 }
@@ -411,6 +413,7 @@ mod tests {
                 },
             ],
             readiness_fence: None,
+            lease: None,
         };
         println!(
             "EGL export probe: luma={:?}, chroma={:?}, modifier={:?}",

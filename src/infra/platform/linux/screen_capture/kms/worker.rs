@@ -34,6 +34,7 @@ pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCa
             objects: Vec::new(),
             planes: Vec::new(),
             readiness_fence: None,
+            lease: None,
         },
         issues: Vec::new(),
         probe: None,
@@ -62,6 +63,7 @@ impl KmsCaptureLease {
         screen_name: String,
         enable_probing: bool,
         reaper: WorkerReaperHandle,
+        composition_modifiers: Vec<drm::buffer::DrmModifier>,
     ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
         let (commands, command_receiver) = bounded(1);
         let (device_sender, device) = bounded(1);
@@ -76,6 +78,7 @@ impl KmsCaptureLease {
                 frame_sender,
                 overflow_frames,
                 enable_probing,
+                composition_modifiers,
             );
         })?;
 
@@ -157,8 +160,9 @@ fn run_capture_loop(
     frames: Sender<eros::Result<KmsCapturedFrame>>,
     overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
     enable_probing: bool,
+    composition_modifiers: Vec<drm::buffer::DrmModifier>,
 ) {
-    let capturer = match KmsCapturer::new(&screen_name) {
+    let mut capturer = match KmsCapturer::new(&screen_name, composition_modifiers) {
         Ok(capturer) => capturer,
         Err(error) => {
             let _ = device.send(Err(error));
@@ -179,36 +183,55 @@ fn run_capture_loop(
         }
 
         let frame = if let Some(clock) = &mut probe_clock {
-            capturer
-                .capture_with_timing()
-                .map(|(frame, timing)| KmsCapturedFrame {
+            match capturer.capture_with_timing() {
+                Ok((Some(frame), timing)) => Ok(Some(KmsCapturedFrame {
                     buffer: frame.buffer,
                     issues: frame.issues,
                     probe: Some(clock.frame(timing)),
-                })
+                })),
+                Ok((None, _)) => Ok(None),
+                Err(error) => Err(error),
+            }
         } else {
-            capturer.capture().map(|frame| KmsCapturedFrame {
-                buffer: frame.buffer,
-                issues: frame.issues,
-                probe: None,
+            capturer.capture().map(|frame| {
+                frame.map(|frame| KmsCapturedFrame {
+                    buffer: frame.buffer,
+                    issues: frame.issues,
+                    probe: None,
+                })
             })
         };
         let capture_failed = frame.is_err();
 
-        if !publish_latest(&frames, &overflow_frames, frame) || capture_failed {
+        let frame = match frame {
+            Ok(Some(frame)) => Ok(frame),
+            Ok(None) => continue,
+            Err(error) => Err(error),
+        };
+
+        if !publish_latest_frame(&frames, &overflow_frames, frame) || capture_failed {
             return;
         }
     }
 }
 
-fn publish_latest<T>(sender: &Sender<T>, receiver: &Receiver<T>, mut item: T) -> bool {
+fn publish_latest_frame(
+    sender: &Sender<eros::Result<KmsCapturedFrame>>,
+    receiver: &Receiver<eros::Result<KmsCapturedFrame>>,
+    mut item: eros::Result<KmsCapturedFrame>,
+) -> bool {
     loop {
         match sender.try_send(item) {
             Ok(()) => return true,
             Err(TrySendError::Full(returned_item)) => {
                 item = returned_item;
                 match receiver.try_recv() {
-                    Ok(_) | Err(TryRecvError::Empty) => {}
+                    Ok(Ok(mut frame)) => {
+                        if let Some(fence) = frame.buffer.readiness_fence.take() {
+                            frame.buffer.set_release_fence(fence);
+                        }
+                    }
+                    Ok(Err(_)) | Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => return false,
                 }
             }
@@ -221,15 +244,25 @@ fn publish_latest<T>(sender: &Sender<T>, receiver: &Receiver<T>, mut item: T) ->
 mod tests {
     use flume::bounded;
 
-    use crate::infra::platform::screen_capture::kms::worker::{KmsCaptureLease, publish_latest};
+    use crate::{
+        infra::platform::screen_capture::kms::worker::{
+            KmsCaptureLease, empty_kms_frame, publish_latest_frame,
+        },
+        kernel::geometry::PixelSize,
+    };
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
     fn lease_starts_without_opening_the_kms_output_on_the_main_thread() {
         let (_reaper, reaper_handle) =
             crate::infra::WorkerReaper::new().expect("Test worker reaper should start");
-        let source = KmsCaptureLease::new("not-a-real-output".to_owned(), false, reaper_handle)
-            .expect("KMS capture source should start asynchronously");
+        let source = KmsCaptureLease::new(
+            "not-a-real-output".to_owned(),
+            false,
+            reaper_handle,
+            Vec::new(),
+        )
+        .expect("KMS capture source should start asynchronously");
 
         drop(source);
     }
@@ -239,9 +272,29 @@ mod tests {
     fn worker_keeps_only_the_latest_unconsumed_frame() {
         let (sender, receiver) = bounded(1);
         let overflow_receiver = receiver.clone();
+        let first_size = PixelSize {
+            width: 1280,
+            height: 720,
+        };
+        let latest_size = PixelSize {
+            width: 1920,
+            height: 1080,
+        };
 
-        assert!(publish_latest(&sender, &overflow_receiver, 1));
-        assert!(publish_latest(&sender, &overflow_receiver, 2));
-        assert_eq!(receiver.try_recv(), Ok(2));
+        assert!(publish_latest_frame(
+            &sender,
+            &overflow_receiver,
+            Ok(empty_kms_frame(first_size)),
+        ));
+        assert!(publish_latest_frame(
+            &sender,
+            &overflow_receiver,
+            Ok(empty_kms_frame(latest_size)),
+        ));
+        let frame = receiver
+            .try_recv()
+            .expect("Latest KMS frame should remain queued")
+            .expect("Latest KMS frame should be successful");
+        assert_eq!(frame.buffer.size, latest_size);
     }
 }

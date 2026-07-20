@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use drm::{
     buffer::{DrmModifier, Handle},
     control::Device as _,
@@ -9,26 +11,48 @@ use crate::{
         screen_capture::kms::{
             output::KmsOutput,
             types::{
-                KmsActivePlane, KmsFramebufferPlane, KmsFramebufferSnapshot, KmsPlaneCaptureError,
-                KmsPlaneIssue, KmsPlaneSnapshot,
+                KmsActivePlane, KmsFramebufferCacheKey, KmsFramebufferPlane,
+                KmsFramebufferSnapshot, KmsPlaneCaptureError, KmsPlaneIssue, KmsPlaneSnapshot,
             },
         },
     },
     kernel::geometry::PixelSize,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KmsFramebufferDescriptor {
+    size: (u32, u32),
+    format: drm::buffer::DrmFourcc,
+    buffers: [Option<Handle>; 4],
+    pitches: [u32; 4],
+    offsets: [u32; 4],
+    modifier: DrmModifier,
+}
+
+#[derive(Debug)]
+pub(super) struct KmsFramebufferCacheEntry {
+    descriptor: KmsFramebufferDescriptor,
+    handles: Vec<Handle>,
+    buffer: DmaBufFrame,
+    key: KmsFramebufferCacheKey,
+}
+
 impl KmsOutput {
-    pub(crate) fn snapshot_framebuffers(&self) -> eros::Result<KmsFramebufferSnapshot> {
+    pub(crate) fn snapshot_framebuffers(&mut self) -> eros::Result<KmsFramebufferSnapshot> {
         let KmsPlaneSnapshot {
             output_size,
             planes: active_planes,
             mut issues,
         } = self.snapshot_planes()?;
         let mut planes = Vec::with_capacity(active_planes.len());
+        let active_framebuffers = active_planes
+            .iter()
+            .map(|plane| plane.framebuffer)
+            .collect::<HashSet<_>>();
 
         for active_plane in active_planes {
             match self.export_framebuffer(&active_plane) {
-                Ok(buffer) => match self.validate_plane_snapshot(&active_plane) {
+                Ok((buffer, cache_key)) => match self.validate_plane_snapshot(&active_plane) {
                     Ok(()) => planes.push(KmsFramebufferPlane {
                         id: active_plane.id,
                         plane_type: active_plane.plane_type,
@@ -37,6 +61,7 @@ impl KmsOutput {
                         blend: active_plane.blend,
                         color: active_plane.color,
                         cursor_hotspot: active_plane.cursor_hotspot,
+                        cache_key,
                     }),
                     Err(error) => issues.push(KmsPlaneIssue {
                         plane_id: active_plane.id,
@@ -51,6 +76,7 @@ impl KmsOutput {
                 })),
             }
         }
+        self.retain_active_framebuffers(&active_framebuffers);
 
         Ok(KmsFramebufferSnapshot {
             output_size,
@@ -60,17 +86,39 @@ impl KmsOutput {
     }
 
     fn export_framebuffer(
-        &self,
+        &mut self,
         active_plane: &KmsActivePlane,
-    ) -> Result<DmaBufFrame, Vec<KmsPlaneCaptureError>> {
+    ) -> Result<(DmaBufFrame, KmsFramebufferCacheKey), Vec<KmsPlaneCaptureError>> {
         let framebuffer = self
             .device
             .get_planar_framebuffer(active_plane.framebuffer)
             .map_err(|error| vec![KmsPlaneCaptureError::QueryFramebuffer(error)])?;
-        let handles = framebuffer.buffers();
-        let pitches = framebuffer.pitches();
-        let offsets = framebuffer.offsets();
-        let modifier = framebuffer.modifier().unwrap_or(DrmModifier::Invalid);
+        let descriptor = KmsFramebufferDescriptor {
+            size: framebuffer.size(),
+            format: framebuffer.pixel_format(),
+            buffers: framebuffer.buffers(),
+            pitches: framebuffer.pitches(),
+            offsets: framebuffer.offsets(),
+            modifier: framebuffer.modifier().unwrap_or(DrmModifier::Invalid),
+        };
+        if let Some(entry) = self.framebuffer_cache.get(&active_plane.framebuffer)
+            && entry.descriptor == descriptor
+        {
+            return entry
+                .buffer
+                .try_clone()
+                .map(|buffer| (buffer, entry.key))
+                .map_err(|error| {
+                    vec![KmsPlaneCaptureError::CloneCachedBuffer {
+                        reason: format!("{error:?}"),
+                    }]
+                });
+        }
+
+        let handles = descriptor.buffers;
+        let pitches = descriptor.pitches;
+        let offsets = descriptor.offsets;
+        let modifier = descriptor.modifier;
         let mut unique_handles = Vec::new();
         let mut planes = Vec::new();
         let mut errors = Vec::new();
@@ -104,19 +152,48 @@ impl KmsOutput {
         let objects = self.export_objects(&unique_handles, &mut errors);
 
         if !errors.is_empty() {
+            self.close_unreferenced_handles(&unique_handles, &mut errors);
             return Err(errors);
         }
 
-        Ok(DmaBufFrame {
+        let cached = DmaBufFrame {
             size: PixelSize {
-                width: framebuffer.size().0,
-                height: framebuffer.size().1,
+                width: descriptor.size.0,
+                height: descriptor.size.1,
             },
-            format: framebuffer.pixel_format(),
+            format: descriptor.format,
             objects,
             planes,
             readiness_fence: None,
-        })
+            lease: None,
+        };
+        let buffer = match cached.try_clone() {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                errors.push(KmsPlaneCaptureError::CloneCachedBuffer {
+                    reason: format!("{error:?}"),
+                });
+                self.close_unreferenced_handles(&unique_handles, &mut errors);
+                return Err(errors);
+            }
+        };
+        let key = KmsFramebufferCacheKey(self.next_framebuffer_generation);
+        self.next_framebuffer_generation = self.next_framebuffer_generation.wrapping_add(1);
+        self.retain_handles(&unique_handles);
+        let replaced = self.framebuffer_cache.insert(
+            active_plane.framebuffer,
+            KmsFramebufferCacheEntry {
+                descriptor,
+                handles: unique_handles,
+                buffer: cached,
+                key,
+            },
+        );
+        if let Some(replaced) = replaced {
+            self.release_handles(&replaced.handles, active_plane.framebuffer);
+        }
+
+        Ok((buffer, key))
     }
 
     fn export_objects(
@@ -143,7 +220,26 @@ impl KmsOutput {
                     source,
                 }),
             }
+        }
 
+        objects
+    }
+
+    fn retain_handles(&mut self, handles: &[Handle]) {
+        for handle in handles {
+            *self.framebuffer_handle_refs.entry(*handle).or_default() += 1;
+        }
+    }
+
+    fn close_unreferenced_handles(
+        &self,
+        handles: &[Handle],
+        errors: &mut Vec<KmsPlaneCaptureError>,
+    ) {
+        for (object_index, handle) in handles.iter().copied().enumerate() {
+            if self.framebuffer_handle_refs.contains_key(&handle) {
+                continue;
+            }
             if let Err(source) = self.device.close_buffer(handle) {
                 errors.push(KmsPlaneCaptureError::CloseBuffer {
                     object_index,
@@ -151,8 +247,46 @@ impl KmsOutput {
                 });
             }
         }
+    }
 
-        objects
+    fn release_handles(
+        &mut self,
+        handles: &[Handle],
+        framebuffer: drm::control::framebuffer::Handle,
+    ) {
+        for handle in handles {
+            let Some(references) = self.framebuffer_handle_refs.get_mut(handle) else {
+                continue;
+            };
+            *references -= 1;
+            if *references != 0 {
+                continue;
+            }
+            self.framebuffer_handle_refs.remove(handle);
+            if let Err(error) = self.device.close_buffer(*handle) {
+                tracing::warn!(
+                    target: "rabbit::screen_capture::kms",
+                    ?framebuffer,
+                    ?handle,
+                    ?error,
+                    "Failed to close an evicted KMS framebuffer handle"
+                );
+            }
+        }
+    }
+
+    fn retain_active_framebuffers(&mut self, active: &HashSet<drm::control::framebuffer::Handle>) {
+        let stale = self
+            .framebuffer_cache
+            .keys()
+            .filter(|framebuffer| !active.contains(framebuffer))
+            .copied()
+            .collect::<Vec<_>>();
+        for framebuffer in stale {
+            if let Some(entry) = self.framebuffer_cache.remove(&framebuffer) {
+                self.release_handles(&entry.handles, framebuffer);
+            }
+        }
     }
 
     fn validate_plane_snapshot(

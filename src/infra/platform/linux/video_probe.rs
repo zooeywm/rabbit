@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-const REPORT_WINDOW: Duration = Duration::from_secs(5);
+const REPORT_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VideoCaptureTiming {

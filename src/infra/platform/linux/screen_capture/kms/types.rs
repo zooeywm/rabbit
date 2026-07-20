@@ -27,6 +27,8 @@ pub(crate) enum KmsPlaneCaptureError {
         #[source]
         source: io::Error,
     },
+    #[error("failed to duplicate cached framebuffer DMA-BUF objects: {reason}")]
+    CloneCachedBuffer { reason: String },
     #[error("failed to close temporary GEM handle for framebuffer object {object_index}")]
     CloseBuffer {
         object_index: usize,
@@ -51,6 +53,8 @@ pub(crate) enum KmsPlaneCaptureError {
         #[source]
         source: khronos_egl::Error,
     },
+    #[error("failed to bind a cached framebuffer EGLImage as an OpenGL texture: {reason}")]
+    BindCachedImage { reason: String },
     #[error("plane is missing required property {property}")]
     MissingProperty { property: &'static str },
     #[error("plane has invalid {property} value {value}")]
@@ -110,7 +114,11 @@ pub(crate) struct KmsFramebufferPlane {
     pub blend: KmsPlaneBlend,
     pub color: KmsPlaneColor,
     pub cursor_hotspot: Option<KmsCursorHotspot>,
+    pub cache_key: KmsFramebufferCacheKey,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct KmsFramebufferCacheKey(pub(crate) u64);
 
 #[derive(Debug)]
 pub(crate) struct KmsFramebufferSnapshot {
@@ -183,13 +191,13 @@ pub(crate) enum KmsPixelBlendMode {
     Coverage,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct KmsPlaneColor {
     pub encoding: KmsColorEncoding,
     pub range: KmsColorRange,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum KmsColorEncoding {
     #[default]
     Bt601,
@@ -197,7 +205,7 @@ pub(crate) enum KmsColorEncoding {
     Bt2020,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum KmsColorRange {
     #[default]
     Limited,

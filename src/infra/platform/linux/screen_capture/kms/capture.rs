@@ -22,11 +22,14 @@ pub(crate) struct KmsCapturer {
 }
 
 impl KmsCapturer {
-    pub(crate) fn new(screen_name: &str) -> eros::Result<Self> {
+    pub(crate) fn new(
+        screen_name: &str,
+        composition_modifiers: Vec<drm::buffer::DrmModifier>,
+    ) -> eros::Result<Self> {
         let output = KmsOutput::open(screen_name)
             .with_context(|| format!("Failed to open KMS output {screen_name}"))?;
         let gpu_device = GpuDevice::from(output.device.render_node_path()?);
-        let allocator = GbmFrameAllocator::new(&output.device)
+        let allocator = GbmFrameAllocator::new(&output.device, composition_modifiers)
             .with_context(|| format!("Failed to create KMS compositor for {screen_name}"))?;
 
         Ok(Self {
@@ -40,7 +43,9 @@ impl KmsCapturer {
         &self.gpu_device
     }
 
-    pub(crate) fn capture(&self) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
+    pub(crate) fn capture(
+        &mut self,
+    ) -> eros::Result<Option<CapturedFrame<DmaBufFrame, KmsPlaneIssue>>> {
         self.wait_for_vblank()?;
         self.capture_current_frame()
     }
@@ -53,7 +58,9 @@ impl KmsCapturer {
         Ok(())
     }
 
-    fn capture_current_frame(&self) -> eros::Result<CapturedFrame<DmaBufFrame, KmsPlaneIssue>> {
+    fn capture_current_frame(
+        &mut self,
+    ) -> eros::Result<Option<CapturedFrame<DmaBufFrame, KmsPlaneIssue>>> {
         let snapshot = self
             .output
             .snapshot_framebuffers()
@@ -65,9 +72,9 @@ impl KmsCapturer {
     }
 
     pub(crate) fn capture_with_timing(
-        &self,
+        &mut self,
     ) -> eros::Result<(
-        CapturedFrame<DmaBufFrame, KmsPlaneIssue>,
+        Option<CapturedFrame<DmaBufFrame, KmsPlaneIssue>>,
         VideoCaptureTiming,
     )> {
         let vblank_wait_started = Instant::now();
@@ -103,7 +110,7 @@ mod tests {
         let (_reaper, reaper_handle) =
             crate::infra::WorkerReaper::new().expect("Test worker reaper should start");
         let ScreenCaptureSource { lease, receiver } =
-            KmsCaptureLease::new(screen_name, false, reaper_handle)
+            KmsCaptureLease::new(screen_name, false, reaper_handle, Vec::new())
                 .expect("KMS capture source should start");
         let (device, frames) = receiver.into_parts();
         let device = device

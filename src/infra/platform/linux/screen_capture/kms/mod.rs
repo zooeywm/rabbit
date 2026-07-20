@@ -30,13 +30,19 @@ pub(crate) use egl_context::{EglContext, EglDmaBufImage};
 pub(crate) struct KmsScreenCaptureManagerState {
     enable_probing: bool,
     worker_reaper: WorkerReaperHandle,
+    composition_modifiers: Vec<drm::buffer::DrmModifier>,
 }
 
 impl KmsScreenCaptureManagerState {
-    pub(crate) fn new(enable_probing: bool, worker_reaper: WorkerReaperHandle) -> Self {
+    pub(crate) fn new(
+        enable_probing: bool,
+        worker_reaper: WorkerReaperHandle,
+        composition_modifiers: Vec<drm::buffer::DrmModifier>,
+    ) -> Self {
         Self {
             enable_probing,
             worker_reaper,
+            composition_modifiers,
         }
     }
 }
@@ -68,6 +74,7 @@ where
             screen_name,
             state.enable_probing,
             state.worker_reaper.clone(),
+            state.composition_modifiers.clone(),
         )
         .with_context(|| context)?)
     }
@@ -134,7 +141,7 @@ mod tests {
     fn acquires_one_owned_source_for_an_existing_screen() {
         let (reaper, reaper_handle) = WorkerReaper::new().expect("Test worker reaper should start");
         let mut deps = TestDeps {
-            capture: KmsScreenCaptureManagerState::new(false, reaper_handle),
+            capture: KmsScreenCaptureManagerState::new(false, reaper_handle, Vec::new()),
             screens: vec![screen(0, "eDP-1"), screen(1, "HDMI-A-1")],
         };
         let manager = KmsScreenCaptureManager::inj_ref_mut(&mut deps);

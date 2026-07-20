@@ -15,9 +15,22 @@ use gstreamer::prelude::{
 use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
 use crate::infra::platform::{
-    dma_buf::DmaBufFrame, frame_pipeline::GbmFramePipelineFrame,
-    video_encoder::gstreamer::probe::GStreamerVideoProbe, video_probe::VideoFrameProbe,
+    dma_buf::{DmaBufFrame, DmaBufLease},
+    frame_pipeline::GbmFramePipelineFrame,
+    video_encoder::gstreamer::probe::GStreamerVideoProbe,
+    video_probe::VideoFrameProbe,
 };
+
+struct DmaBufLeaseOwner {
+    _lease: DmaBufLease,
+    storage: [u8; 0],
+}
+
+impl AsMut<[u8]> for DmaBufLeaseOwner {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.storage
+    }
+}
 
 mod probe;
 
@@ -210,6 +223,13 @@ impl GStreamerVideoFrame {
             &strides[..frame.planes.len()],
         )
         .with_context(|| "Failed to attach NV12 DMA-BUF layout to GStreamer input frame")?;
+        if let Some(lease) = &frame.lease {
+            let owner = gstreamer::Buffer::from_mut_slice(DmaBufLeaseOwner {
+                _lease: lease.clone(),
+                storage: [],
+            });
+            gstreamer::meta::ParentBufferMeta::add(buffer_mut, &owner);
+        }
 
         validate_dmabuf_buffer(&buffer)?;
 
@@ -1061,7 +1081,7 @@ mod tests {
             platform::{
                 GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
                 KmsScreenCaptureManagerState,
-                dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+                dma_buf::{DmaBufFrame, DmaBufLease, DmaBufObject, DmaBufPlane},
                 frame_pipeline::GbmFramePipelineFrame,
                 gpu::{GpuContext, GpuDevice},
                 screen_capture::{KmsCaptureLease, KmsFrameReceiver},
@@ -1231,7 +1251,14 @@ mod tests {
             let (_reaper, reaper_handle) =
                 WorkerReaper::new().expect("Test worker reaper should start");
             let mut deps = HostVideoTestDeps {
-                capture: KmsScreenCaptureManagerState::new(true, reaper_handle.clone()),
+                capture: KmsScreenCaptureManagerState::new(
+                    true,
+                    reaper_handle.clone(),
+                    crate::infra::platform::video_encoder::va_vpp_input_modifiers(
+                        DrmFourcc::Xrgb8888,
+                    )
+                    .expect("VAAPI XRGB modifiers should be discoverable"),
+                ),
                 pipeline: GbmFramePipelineManagerState::new(reaper_handle),
                 screens: vec![host_video_test_screen(screen_name, source_size)],
             };
@@ -1493,6 +1520,26 @@ mod tests {
         encoder
             .stop()
             .expect("The hardware H.264 pipeline should stop");
+    }
+
+    #[test]
+    fn gstreamer_buffer_retains_the_dma_buf_pool_lease() {
+        gstreamer::init().expect("GStreamer should initialize before constructing a frame");
+        let (release, released) = flume::unbounded();
+        let frame = GStreamerVideoFrame::try_from(dmabuf_pipeline_frame(Some(DmaBufLease::new(
+            7, release,
+        ))))
+        .expect("GStreamer should wrap the leased DMA-BUF frame");
+
+        assert!(matches!(
+            released.try_recv(),
+            Err(flume::TryRecvError::Empty)
+        ));
+        drop(frame);
+        let release = released
+            .try_recv()
+            .expect("Dropping the GStreamer buffer should release its DMA-BUF lease");
+        assert_eq!(release.slot, 7);
     }
 
     #[test]
@@ -1914,7 +1961,7 @@ mod tests {
         let (_reaper, reaper_handle) =
             WorkerReaper::new().expect("Test worker reaper should start");
         let ScreenCaptureSource { lease, receiver } =
-            KmsCaptureLease::new(screen_name.to_owned(), false, reaper_handle)
+            KmsCaptureLease::new(screen_name.to_owned(), false, reaper_handle, Vec::new())
                 .expect("KMS capture source should start");
         let (device, frames) = receiver.into_parts();
         device
@@ -1973,13 +2020,18 @@ mod tests {
     }
 
     fn dmabuf_video_frame() -> GStreamerVideoFrame {
+        GStreamerVideoFrame::try_from(dmabuf_pipeline_frame(None))
+            .expect("The test buffer should satisfy the encoder input boundary")
+    }
+
+    fn dmabuf_pipeline_frame(lease: Option<DmaBufLease>) -> Rc<GbmFramePipelineFrame> {
         const WIDTH: u32 = 16;
         const HEIGHT: u32 = 16;
         const Y_SIZE: usize = WIDTH as usize * HEIGHT as usize;
         const BUFFER_SIZE: usize = Y_SIZE + Y_SIZE / 2;
 
         let file = File::open("/dev/zero").expect("The test DMA-BUF fd should open");
-        let frame = Rc::new(GbmFramePipelineFrame {
+        Rc::new(GbmFramePipelineFrame {
             buffer: DmaBufFrame {
                 size: PixelSize {
                     width: WIDTH,
@@ -2006,11 +2058,9 @@ mod tests {
                     },
                 ],
                 readiness_fence: None,
+                lease,
             },
             probe: None,
-        });
-
-        GStreamerVideoFrame::try_from(frame)
-            .expect("The test buffer should satisfy the encoder input boundary")
+        })
     }
 }

@@ -1,4 +1,6 @@
 use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
     ffi::{CStr, c_void},
     marker::PhantomData,
     os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
@@ -25,8 +27,8 @@ use crate::infra::platform::{
         },
         gl_context::{GlCompositionTarget, GlContext, GlExternalTexture, GlNv12Target},
         types::{
-            KmsColorEncoding, KmsColorRange, KmsFramebufferPlane, KmsPixelBlendMode, KmsPlaneBlend,
-            KmsPlaneCaptureError, KmsPlaneColor,
+            KmsColorEncoding, KmsColorRange, KmsFramebufferCacheKey, KmsFramebufferPlane,
+            KmsPixelBlendMode, KmsPlaneBlend, KmsPlaneCaptureError, KmsPlaneColor,
         },
     },
 };
@@ -46,6 +48,7 @@ pub(crate) struct EglContext {
     gl: GlContext,
     dup_native_fence_fd: DupNativeFenceFdAndroid,
     supports_modifiers: bool,
+    cached_plane_images: RefCell<HashMap<KmsPlaneImageCacheKey, egl::Image>>,
     thread_affinity: PhantomData<Rc<()>>,
 }
 
@@ -56,8 +59,11 @@ struct EglImage<'context> {
     size: crate::kernel::geometry::PixelSize,
 }
 
-#[derive(Debug)]
-pub(crate) struct EglPlaneImage<'context>(EglImage<'context>);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct KmsPlaneImageCacheKey {
+    framebuffer: KmsFramebufferCacheKey,
+    color: KmsPlaneColor,
+}
 
 #[derive(Debug)]
 pub(crate) struct EglCompositionImage<'context>(EglImage<'context>);
@@ -130,17 +136,59 @@ impl EglContext {
             gl,
             dup_native_fence_fd,
             supports_modifiers,
+            cached_plane_images: RefCell::new(HashMap::new()),
             thread_affinity: PhantomData,
         })
     }
 
-    pub(crate) fn import_plane<'context>(
+    pub(crate) fn create_cached_plane_texture<'context>(
         &'context self,
         plane: &KmsFramebufferPlane,
-    ) -> Result<EglPlaneImage<'context>, KmsPlaneCaptureError> {
-        Ok(EglPlaneImage(
-            self.import_dma_buf(&plane.buffer, Some(plane.color))?,
-        ))
+    ) -> Result<GlExternalTexture<'context>, KmsPlaneCaptureError> {
+        let key = KmsPlaneImageCacheKey {
+            framebuffer: plane.cache_key,
+            color: plane.color,
+        };
+        let cached = self.cached_plane_images.borrow().get(&key).copied();
+        let image = match cached {
+            Some(image) => image,
+            None => {
+                let imported = self.import_dma_buf(&plane.buffer, Some(plane.color))?;
+                let image = imported.into_raw();
+                self.cached_plane_images.borrow_mut().insert(key, image);
+                image
+            }
+        };
+
+        self.gl.create_external_texture(image).map_err(|error| {
+            KmsPlaneCaptureError::BindCachedImage {
+                reason: format!("{error:?}"),
+            }
+        })
+    }
+
+    pub(crate) fn retain_cached_plane_images(&self, planes: &[KmsFramebufferPlane]) {
+        let active = planes
+            .iter()
+            .map(|plane| KmsPlaneImageCacheKey {
+                framebuffer: plane.cache_key,
+                color: plane.color,
+            })
+            .collect::<HashSet<_>>();
+        self.cached_plane_images.borrow_mut().retain(|key, image| {
+            if active.contains(key) {
+                return true;
+            }
+            if let Err(error) = self.instance.destroy_image(self.display, *image) {
+                tracing::warn!(
+                    target: "rabbit::screen_capture::kms",
+                    ?key,
+                    ?error,
+                    "Failed to destroy an evicted KMS framebuffer EGLImage"
+                );
+            }
+            false
+        });
     }
 
     pub(crate) fn import_composition_target<'context>(
@@ -379,17 +427,6 @@ impl EglContext {
             image,
             size,
         })
-    }
-
-    pub(crate) fn create_external_texture<'context>(
-        &'context self,
-        image: &EglPlaneImage<'_>,
-    ) -> eros::Result<GlExternalTexture<'context>> {
-        if !ptr::eq(self, image.0.owner) {
-            eros::bail!("Cannot bind an EGLImage created by another EGL context");
-        }
-
-        self.gl.create_external_texture(image.0.image)
     }
 
     pub(crate) fn create_dma_buf_texture<'context>(
@@ -636,8 +673,19 @@ impl EglContext {
     }
 }
 
+impl EglImage<'_> {
+    fn into_raw(self) -> egl::Image {
+        let image = self.image;
+        std::mem::forget(self);
+        image
+    }
+}
+
 impl Drop for EglContext {
     fn drop(&mut self) {
+        for (_, image) in self.cached_plane_images.get_mut().drain() {
+            let _ = self.instance.destroy_image(self.display, image);
+        }
         if self
             .instance
             .make_current(self.display, None, None, Some(self.context))

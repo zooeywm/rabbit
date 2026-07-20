@@ -102,6 +102,14 @@ pub(crate) struct GbmFramePipelineFrame {
     pub(crate) probe: Option<crate::infra::platform::video_probe::VideoFrameProbe>,
 }
 
+impl Drop for GbmFramePipelineFrame {
+    fn drop(&mut self) {
+        if let Some(fence) = self.buffer.readiness_fence.take() {
+            self.buffer.set_release_fence(fence);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct GbmFramePipelineSubscription {
     key: FramePipelineSourceKey,
