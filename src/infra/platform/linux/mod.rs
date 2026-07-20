@@ -3,6 +3,7 @@ mod frame_pipeline;
 mod gpu;
 mod screen_capture;
 mod screen_layout;
+mod video_decoder;
 mod video_encoder;
 mod video_probe;
 
