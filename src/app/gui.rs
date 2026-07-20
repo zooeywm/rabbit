@@ -8,7 +8,10 @@ use tracing::{error, info, trace, warn};
 use winio::prelude::*;
 
 use crate::app::{
-    gui::view::{RootView, RootViewEvent, RootViewInit, RootViewMessage},
+    gui::{
+        state::{DirectConnectionCompletion, DirectConnectionState, DirectTarget},
+        view::{RootView, RootViewEvent, RootViewInit, RootViewMessage},
+    },
     model::{ApplicationModel, LatestVideoFrames, RunningScreenStream, RunningSession, SessionKey},
 };
 
@@ -35,6 +38,7 @@ use crate::{
     },
 };
 
+mod state;
 mod view;
 
 pub(crate) struct PendingHostSession {
@@ -47,7 +51,7 @@ pub(crate) struct RootComponent {
     model: ApplicationModel,
     view: Child<RootView>,
     closing: bool,
-    connecting: bool,
+    direct_connection: DirectConnectionState,
     _connection_listener: compio::runtime::JoinHandle<()>,
     _logger_guard: LoggerGuard,
 }
@@ -286,6 +290,16 @@ impl RootComponent {
             .post(RootViewMessage::SetConnectionStatus(status.into()));
     }
 
+    fn refresh_direct_connection(&mut self) {
+        self.view.post(RootViewMessage::SetConnecting(
+            self.direct_connection.is_connecting(),
+        ));
+
+        if let Some(status) = self.direct_connection.status() {
+            self.set_connection_status(status);
+        }
+    }
+
     fn parse_direct_target(input: &str) -> eros::Result<(IpAddr, Option<u16>)> {
         let input = input.trim();
 
@@ -389,7 +403,7 @@ impl Component for RootComponent {
             model: ApplicationModel::new(app, requester_name),
             view,
             closing: false,
-            connecting: false,
+            direct_connection: DirectConnectionState::default(),
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
                 quic_endpoint,
                 sender.clone(),
@@ -476,7 +490,7 @@ impl Component for RootComponent {
                 Ok(false)
             }
             RootMessage::ConnectDirect(input) => {
-                if self.connecting {
+                if self.direct_connection.is_connecting() {
                     self.set_connection_status("Connection already in progress");
                     return Ok(true);
                 }
@@ -492,6 +506,11 @@ impl Component for RootComponent {
                     self.set_connection_status("Session already connected");
                     return Ok(true);
                 }
+                let target = DirectTarget::new(remote_ip, remote_port);
+                if !self.direct_connection.begin(target) {
+                    self.set_connection_status("Connection already in progress");
+                    return Ok(true);
+                }
                 let endpoint: &QuicEndpoint = self.model.app.as_ref();
                 let endpoint = endpoint.clone();
                 let request = ConnectionRequest {
@@ -505,9 +524,7 @@ impl Component for RootComponent {
                     ?remote_port,
                     "Direct connection started"
                 );
-                self.view.post(RootViewMessage::SetConnecting(true));
-                self.connecting = true;
-                self.set_connection_status("Connecting...");
+                self.refresh_direct_connection();
 
                 compio::runtime::spawn(async move {
                     let result =
@@ -519,30 +536,31 @@ impl Component for RootComponent {
                 Ok(true)
             }
             RootMessage::DirectConnectionFinished(result) => {
-                self.connecting = false;
-                self.view.post(RootViewMessage::SetConnecting(false));
-
                 match result {
                     Ok(DirectConnectionOutcome::Connected(transport)) => {
                         let peer_address = transport.remote_address();
+                        self.direct_connection
+                            .complete(DirectConnectionCompletion::Connected(peer_address));
                         let id = self.model.next_session_id()?;
                         let session = Session::new(id, SessionRole::Controller, transport);
                         let (send, recv) = session.split();
 
-                        if self.start_session(peer_address, send, recv, sender) {
-                            self.set_connection_status("Connection accepted");
-                        } else {
-                            self.set_connection_status("Session already connected");
-                        }
+                        self.start_session(peer_address, send, recv, sender);
                     }
                     Ok(DirectConnectionOutcome::Rejected) => {
-                        self.set_connection_status("Connection rejected")
+                        self.direct_connection
+                            .complete(DirectConnectionCompletion::Rejected);
                     }
                     Ok(DirectConnectionOutcome::SelfConnection) => {
-                        self.set_connection_status("Cannot connect to this Rabbit instance")
+                        self.direct_connection
+                            .complete(DirectConnectionCompletion::SelfRejected);
                     }
-                    Err(error) => self.set_connection_status(format!("Connection failed: {error}")),
+                    Err(error) => {
+                        self.direct_connection
+                            .complete(DirectConnectionCompletion::Failed(error.to_string()));
+                    }
                 }
+                self.refresh_direct_connection();
 
                 Ok(true)
             }
