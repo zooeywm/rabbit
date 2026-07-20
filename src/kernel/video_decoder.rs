@@ -15,6 +15,7 @@ pub trait VideoDecoder {
         PresentFuture: Future<Output = eros::Result<()>>;
 }
 
+// Focused test: cargo test kernel::video_decoder::tests --lib
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, future::Future};
@@ -35,23 +36,33 @@ mod tests {
         type Frame = NonCloneDecodedFrame;
 
         fn run<Inputs, PresentFrame, PresentFuture>(
-            mut inputs: Inputs,
-            mut present_frame: PresentFrame,
+            inputs: Inputs,
+            present_frame: PresentFrame,
         ) -> impl Future<Output = eros::Result<()>>
         where
             Inputs: futures_core::Stream<Item = eros::Result<Self::Input>> + Unpin,
             PresentFrame: FnMut(Self::Frame) -> PresentFuture,
             PresentFuture: Future<Output = eros::Result<()>>,
         {
-            async move {
-                while let Some(input) = inputs.next().await {
-                    let input = input.expect("Decoder input should contain an encoded frame");
-                    present_frame(NonCloneDecodedFrame(input.0)).await?;
-                }
-
-                Ok(())
-            }
+            drive_empty_decoder(inputs, present_frame)
         }
+    }
+
+    async fn drive_empty_decoder<Inputs, PresentFrame, PresentFuture>(
+        mut inputs: Inputs,
+        mut present_frame: PresentFrame,
+    ) -> eros::Result<()>
+    where
+        Inputs: futures_core::Stream<Item = eros::Result<NonCloneEncodedFrame>> + Unpin,
+        PresentFrame: FnMut(NonCloneDecodedFrame) -> PresentFuture,
+        PresentFuture: Future<Output = eros::Result<()>>,
+    {
+        while let Some(input) = inputs.next().await {
+            let input = input.expect("Decoder input should contain an encoded frame");
+            present_frame(NonCloneDecodedFrame(input.0)).await?;
+        }
+
+        Ok(())
     }
 
     #[test]

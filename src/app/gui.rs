@@ -5,7 +5,7 @@ use std::{
 };
 
 use eros::Context;
-use futures_util::{future::Either, pin_mut};
+use futures_util::{StreamExt as _, future::Either, pin_mut};
 use tracing::{error, info, trace, warn};
 
 use crate::app::{
@@ -23,8 +23,8 @@ use crate::app::{
 use crate::{
     app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
     infra::{
-        DirectConnectionOutcome, PendingQuicConnectionRequest, QuicEndpoint, QuicTransport,
-        QuicTransportRecv, QuicTransportSend, WorkerReaper, connect_transport,
+        DirectConnectionOutcome, GStreamerVideoDecoder, PendingQuicConnectionRequest, QuicEndpoint,
+        QuicTransport, QuicTransportRecv, QuicTransportSend, WorkerReaper, connect_transport,
         create_frame_pipeline_manager_state, create_screen_capture_manager_state,
         create_screen_layout_manager_state, receive_request, unsync_queue::UnsyncQueue,
     },
@@ -40,10 +40,12 @@ use crate::{
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole, SessionSend},
         session_control::{ControlMessage, OutgoingScreenList},
         transport::TransportRecv,
+        video_decoder::VideoDecoder,
     },
 };
 
 mod state;
+mod video_view;
 mod view;
 
 pub(crate) fn run() -> eros::Result<()> {
@@ -97,6 +99,7 @@ pub(crate) struct RootApplication {
     status_message: String,
     direct_connection: DirectConnectionState,
     screen_stream: ScreenStreamState,
+    video_decoder: Option<RunningVideoDecoder>,
     pending_screen_stream_starts: HashSet<(SessionId, ScreenId)>,
     pending_host_screen_stream_stops: HashSet<(SessionId, ScreenId)>,
     _connection_listener: compio::runtime::JoinHandle<()>,
@@ -125,6 +128,9 @@ pub(crate) enum RootMessage {
     ConnectionListenerFailed(eros::ErrorUnion),
     SessionMessageReceived(SessionId, SessionMessage),
     VideoFrameAvailable(SessionId, ScreenId),
+    VideoFramePresented(SessionId, ScreenId),
+    VideoDecoderFinished(SessionId, ScreenId, eros::Result<()>),
+    VideoRendererFailed(String),
     ScreenStreamConfigurationFinished {
         session_id: SessionId,
         streams: Vec<(ScreenId, FramePipelineParameters)>,
@@ -158,6 +164,48 @@ pub(crate) enum RootMessage {
     StopCurrentScreenStream,
 }
 
+struct RunningVideoDecoder {
+    session_id: SessionId,
+    screen_id: ScreenId,
+    input: flume::Sender<crate::kernel::session::ReceivedVideoFrame>,
+    stale: flume::Receiver<crate::kernel::session::ReceivedVideoFrame>,
+    task: Option<compio::runtime::JoinHandle<()>>,
+}
+
+impl RunningVideoDecoder {
+    fn publish(&self, mut frame: crate::kernel::session::ReceivedVideoFrame) -> eros::Result<()> {
+        loop {
+            match self.input.try_send(frame) {
+                Ok(()) => return Ok(()),
+                Err(flume::TrySendError::Full(returned)) => {
+                    frame = returned;
+                    match self.stale.try_recv() {
+                        Ok(_) | Err(flume::TryRecvError::Empty) => {}
+                        Err(flume::TryRecvError::Disconnected) => {
+                            eros::bail!("Video decoder input disconnected")
+                        }
+                    }
+                }
+                Err(flume::TrySendError::Disconnected(_)) => {
+                    eros::bail!("Video decoder input disconnected")
+                }
+            }
+        }
+    }
+
+    fn matches(&self, session_id: SessionId, screen_id: ScreenId) -> bool {
+        self.session_id == session_id && self.screen_id == screen_id
+    }
+}
+
+impl Drop for RunningVideoDecoder {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.detach();
+        }
+    }
+}
+
 #[derive(Clone)]
 struct MessageSender {
     messages: UnsyncQueue<RootMessage>,
@@ -170,6 +218,61 @@ impl MessageSender {
 }
 
 impl RootApplication {
+    fn start_video_decoder(
+        &mut self,
+        session_id: SessionId,
+        screen_id: ScreenId,
+        sender: &MessageSender,
+    ) -> eros::Result<()> {
+        if self
+            .video_decoder
+            .as_ref()
+            .is_some_and(|decoder| decoder.matches(session_id, screen_id))
+        {
+            return Ok(());
+        }
+
+        self.stop_video_decoder()?;
+        let (input, receiver) = flume::bounded(1);
+        let stale = receiver.clone();
+        let view = self.view.clone();
+        let finished = sender.clone();
+        let inputs = receiver.into_stream().map(Ok);
+        let task = compio::runtime::spawn(async move {
+            let result = GStreamerVideoDecoder::run(inputs, move |frame| {
+                std::future::ready(view.present_video(session_id, screen_id, frame))
+            })
+            .await;
+            finished.post(RootMessage::VideoDecoderFinished(
+                session_id, screen_id, result,
+            ));
+        });
+        self.video_decoder = Some(RunningVideoDecoder {
+            session_id,
+            screen_id,
+            input,
+            stale,
+            task: Some(task),
+        });
+        Ok(())
+    }
+
+    fn stop_video_decoder(&mut self) -> eros::Result<()> {
+        self.video_decoder = None;
+        self.view.clear_video()
+    }
+
+    fn stop_session_video_decoder(&mut self, session_id: SessionId) -> eros::Result<()> {
+        if self
+            .video_decoder
+            .as_ref()
+            .is_some_and(|decoder| decoder.session_id == session_id)
+        {
+            self.stop_video_decoder()?;
+        }
+        Ok(())
+    }
+
     fn configure_preserved_screens(
         &self,
         request: SetScreenStreams,
@@ -426,14 +529,14 @@ impl RootApplication {
             .map(|session| session.send.id())
     }
 
-    fn disconnect_session(&mut self, session_id: SessionId) -> bool {
+    fn disconnect_session(&mut self, session_id: SessionId) -> eros::Result<bool> {
         let Some(session) = self
             .model
             .sessions
             .iter_mut()
             .find(|session| session.send.id() == session_id)
         else {
-            return false;
+            return Ok(false);
         };
 
         let send = Rc::clone(&session.send);
@@ -449,6 +552,7 @@ impl RootApplication {
         {
             self.screen_stream.reset();
         }
+        self.stop_session_video_decoder(session_id)?;
 
         self.remove_session(session_id);
         compio::runtime::spawn(async move {
@@ -471,7 +575,7 @@ impl RootApplication {
             "Session disconnect requested"
         );
         self.set_connection_status(format!("Disconnected Session {}", session_id.0));
-        true
+        Ok(true)
     }
 }
 
@@ -527,6 +631,7 @@ impl RootApplication {
             status_message: String::new(),
             direct_connection: DirectConnectionState::default(),
             screen_stream: ScreenStreamState::default(),
+            video_decoder: None,
             pending_screen_stream_starts: HashSet::new(),
             pending_host_screen_stream_stops: HashSet::new(),
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
@@ -582,6 +687,11 @@ impl RootApplication {
                 GuiIntent::DisconnectDevice(index) => RootMessage::DisconnectDevice(index),
                 GuiIntent::RetryConnection => RootMessage::ResetDirectConnection,
                 GuiIntent::StopScreenStream => RootMessage::StopCurrentScreenStream,
+                GuiIntent::VideoFramePresented {
+                    session_id,
+                    screen_id,
+                } => RootMessage::VideoFramePresented(session_id, screen_id),
+                GuiIntent::VideoRendererFailed(error) => RootMessage::VideoRendererFailed(error),
                 GuiIntent::Close => RootMessage::Close,
             },
             Either::Right((Err(_), _)) => RootMessage::Close,
@@ -853,6 +963,7 @@ impl RootApplication {
                 let Some((session_id, screen_id)) = self.screen_stream.active_screen() else {
                     return Ok(false);
                 };
+                self.stop_video_decoder()?;
                 let Some(session) = self
                     .model
                     .sessions
@@ -882,13 +993,13 @@ impl RootApplication {
                 let Some(session_id) = self.controller_session_id() else {
                     return Ok(false);
                 };
-                Ok(self.disconnect_session(session_id))
+                self.disconnect_session(session_id)
             }
             RootMessage::DisconnectDevice(index) => {
                 let Some(session_id) = self.host_session_ids().get(index).copied() else {
                     return Ok(false);
                 };
-                Ok(self.disconnect_session(session_id))
+                self.disconnect_session(session_id)
             }
             RootMessage::StopHostedScreenStream(index) => {
                 let Some((session_id, screen_id)) =
@@ -932,6 +1043,7 @@ impl RootApplication {
             }
             RootMessage::Close => {
                 self.closing = true;
+                self.stop_video_decoder()?;
                 let tasks = self.model.begin_screen_stream_shutdown();
                 let sessions = self
                     .model
@@ -1243,6 +1355,7 @@ impl RootApplication {
                             Some(SessionRole::Controller) => {
                                 if self.screen_stream.active_screen() == Some((id, stop.screen_id))
                                 {
+                                    self.stop_video_decoder()?;
                                     self.screen_stream.reset();
                                     self.model.selected_remote_screen = None;
                                     self.set_connection_status(format!(
@@ -1289,11 +1402,93 @@ impl RootApplication {
                     "Received latest complete video RTP frame"
                 );
 
-                if self.screen_stream.receive_video(id, screen_id) {
-                    return Ok(true);
+                if self.screen_stream.active_screen() != Some((id, screen_id)) {
+                    return Ok(false);
                 }
-
+                self.start_video_decoder(id, screen_id, sender)?;
+                let decoder = self
+                    .video_decoder
+                    .as_ref()
+                    .context("Video decoder was not retained after startup")?;
+                decoder.publish(video).with_context(|| {
+                    format!("Failed to queue screen {} for decoding", screen_id.0)
+                })?;
                 Ok(false)
+            }
+            RootMessage::VideoFramePresented(id, screen_id) => {
+                Ok(self.screen_stream.receive_video(id, screen_id))
+            }
+            RootMessage::VideoDecoderFinished(id, screen_id, result) => {
+                if !self
+                    .video_decoder
+                    .as_ref()
+                    .is_some_and(|decoder| decoder.matches(id, screen_id))
+                {
+                    return Ok(false);
+                }
+                self.video_decoder = None;
+                self.view.clear_video()?;
+                match result {
+                    Ok(()) => {
+                        if self.screen_stream.fail(
+                            id,
+                            screen_id,
+                            "The hardware video decoder ended unexpectedly".to_string(),
+                        ) {
+                            self.set_connection_status(format!(
+                                "Screen {} decoder ended unexpectedly",
+                                screen_id.0
+                            ));
+                            return Ok(true);
+                        }
+                    }
+                    Err(error) => {
+                        error!(
+                            event = "video_decoder_failed",
+                            session_id = id.0,
+                            screen_id = screen_id.0,
+                            error = ?error,
+                            "Hardware video decoder failed"
+                        );
+                        if self.screen_stream.fail(
+                            id,
+                            screen_id,
+                            format!("Hardware video decoding failed: {error}"),
+                        ) {
+                            self.set_connection_status(format!(
+                                "Screen {} decoder failed: {error}",
+                                screen_id.0
+                            ));
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            RootMessage::VideoRendererFailed(message) => {
+                let active = self.screen_stream.active_screen();
+                self.video_decoder = None;
+                if let Some((session_id, screen_id)) = active {
+                    error!(
+                        event = "video_renderer_failed",
+                        session_id = session_id.0,
+                        screen_id = screen_id.0,
+                        error = %message,
+                        "DMA-BUF video renderer failed"
+                    );
+                    if self.screen_stream.fail(
+                        session_id,
+                        screen_id,
+                        format!("GPU video rendering failed: {message}"),
+                    ) {
+                        self.set_connection_status(format!(
+                            "Screen {} renderer failed: {message}",
+                            screen_id.0
+                        ));
+                        return Ok(true);
+                    }
+                }
+                eros::bail!("Slint DMA-BUF video renderer failed: {}", message)
             }
             RootMessage::ScreenStreamConfigurationFinished {
                 session_id,
@@ -1344,6 +1539,7 @@ impl RootApplication {
                 Ok(changed)
             }
             RootMessage::SessionClosed(id) => {
+                self.stop_session_video_decoder(id)?;
                 self.screen_stream
                     .fail_session(id, "The remote session closed".to_string());
                 self.remove_session(id);
@@ -1356,6 +1552,7 @@ impl RootApplication {
                 Ok(true)
             }
             RootMessage::SessionFailed(id, error) => {
+                self.stop_session_video_decoder(id)?;
                 self.screen_stream
                     .fail_session(id, format!("The remote session failed: {error}"));
                 self.remove_session(id);
@@ -1422,11 +1619,11 @@ impl RootApplication {
                     .get(selected_index)
                     .copied();
 
-                self.model.selected_remote_screen = selected;
-
                 if selected == previous {
                     return Ok(false);
                 }
+                self.stop_video_decoder()?;
+                self.model.selected_remote_screen = selected;
 
                 if let Some((session_id, screen_id)) = selected {
                     let Some((screen_name, frame_size)) = self
@@ -1558,6 +1755,7 @@ impl RootApplication {
                 }
 
                 self.screen_stream.reset();
+                self.stop_video_decoder()?;
                 self.model.selected_remote_screen = None;
                 self.set_connection_status(format!(
                     "Stopped screen {} stream; Session {} remains connected",

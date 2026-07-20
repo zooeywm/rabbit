@@ -36,24 +36,34 @@ mod tests {
         type Packet = NonClonePacket;
 
         fn run<Frames, SendPacket, SendFuture>(
-            mut frames: Frames,
+            frames: Frames,
             _max_packet_size: usize,
-            mut send_packet: SendPacket,
+            send_packet: SendPacket,
         ) -> impl Future<Output = eros::Result<()>>
         where
             Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
             SendPacket: FnMut(Self::Packet) -> SendFuture,
             SendFuture: Future<Output = eros::Result<()>>,
         {
-            async move {
-                while let Some(frame) = frames.next().await {
-                    let frame = frame.expect("Encoder input should contain a frame");
-                    send_packet(NonClonePacket(frame.0)).await?;
-                }
-
-                Ok(())
-            }
+            drive_empty_encoder(frames, send_packet)
         }
+    }
+
+    async fn drive_empty_encoder<Frames, SendPacket, SendFuture>(
+        mut frames: Frames,
+        mut send_packet: SendPacket,
+    ) -> eros::Result<()>
+    where
+        Frames: futures_core::Stream<Item = eros::Result<Rc<NonCloneFrame>>> + Unpin,
+        SendPacket: FnMut(NonClonePacket) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
+        while let Some(frame) = frames.next().await {
+            let frame = frame.expect("Encoder input should contain a frame");
+            send_packet(NonClonePacket(frame.0)).await?;
+        }
+
+        Ok(())
     }
 
     #[test]

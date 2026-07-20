@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -eu
+
+run_seconds=${1:-10}
+case "$run_seconds" in
+    ''|*[!0-9]*|0)
+        echo "usage: $0 [positive-seconds]" >&2
+        exit 2
+        ;;
+esac
+
+export RABBIT_CLIENT_VIDEO_TEST_SECONDS=$run_seconds
+export RUST_LOG=${RUST_LOG:-info}
+
+exec cargo test \
+    --color=always \
+    --lib \
+    app::gui::video_view::tests::renders_hardware_decoded_dma_bufs_through_the_slint_bridge \
+    -- \
+    --exact \
+    --ignored \
+    --nocapture \
+    --test-threads=1

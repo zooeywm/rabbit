@@ -388,13 +388,24 @@ fn process_screen_frame(
     mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
 ) {
+    for issue in &frame.issues {
+        tracing::warn!(
+            target: "rabbit::screen_capture::kms",
+            screen_id = screen_id.0,
+            plane_id = ?issue.plane_id,
+            plane_type = ?issue.plane_type,
+            error = ?issue.error,
+            "Skipped a KMS plane while capturing the screen"
+        );
+    }
+
     if let Some(probe) = &mut frame.probe {
         probe.mark_gpu_received();
     }
 
     let frame = match publish_single_pipeline_passthrough(screen_id, frame, pipelines) {
-        Ok(()) => return,
-        Err(frame) => frame,
+        None => return,
+        Some(frame) => frame,
     };
 
     let mut frame = frame;
@@ -418,26 +429,26 @@ fn publish_single_pipeline_passthrough(
     screen_id: ScreenId,
     mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
-) -> Result<(), KmsCapturedFrame> {
+) -> Option<KmsCapturedFrame> {
     let mut matching = pipelines
         .iter()
         .filter(|(_, pipeline)| pipeline.screen_id == screen_id)
         .map(|(id, _)| *id);
     let Some(pipeline_id) = matching.next() else {
-        return Err(frame);
+        return Some(frame);
     };
     if matching.next().is_some() {
-        return Err(frame);
+        return Some(frame);
     }
 
     let Some(pipeline) = pipelines.get_mut(&pipeline_id) else {
-        return Err(frame);
+        return Some(frame);
     };
     if pipeline.parameters.frame_size != frame.buffer.size
         || frame.buffer.format != Format::Xrgb8888
         || frame.buffer.planes.len() != 1
     {
-        return Err(frame);
+        return Some(frame);
     }
     let modifier = frame.buffer.planes[0].modifier;
 
@@ -451,7 +462,7 @@ fn publish_single_pipeline_passthrough(
                     error = ?error,
                     "Hardware H.264 pipeline rejected KMS XRGB pass-through"
                 );
-                return Err(frame);
+                return Some(frame);
             }
             pipeline.output_strategy = Some(FrameOutputStrategy::PassthroughXrgb(modifier));
             tracing::info!(
@@ -472,10 +483,10 @@ fn publish_single_pipeline_passthrough(
                 modifier
             )));
             pipelines.remove(&pipeline_id);
-            return Ok(());
+            return None;
         }
         Some(FrameOutputStrategy::DirectNv12(_) | FrameOutputStrategy::VaapiXrgb(_)) => {
-            return Err(frame);
+            return Some(frame);
         }
     }
 
@@ -488,7 +499,7 @@ fn publish_single_pipeline_passthrough(
         probe,
     }));
 
-    Ok(())
+    None
 }
 
 fn prepare_pipeline_source<'context>(

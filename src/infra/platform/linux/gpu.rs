@@ -192,6 +192,7 @@ impl GpuContext {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn select_nv12_output(
         &self,
         size: PixelSize,

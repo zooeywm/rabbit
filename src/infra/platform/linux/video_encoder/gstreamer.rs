@@ -332,6 +332,7 @@ pub(crate) fn hardware_h264_encoder_for(
     Ok(GStreamerVideoEncoder::select_hardware_h264_encoder(&encoder_caps)?.name())
 }
 
+#[cfg(test)]
 pub(crate) fn va_vpp_input_modifier(format: DrmFourcc) -> eros::Result<DrmModifier> {
     Ok(va_vpp_input_modifiers(format)?
         .into_iter()
@@ -473,7 +474,6 @@ impl From<GStreamerRtpPacket> for bytes::Bytes {
 pub(crate) struct GStreamerVideoEncoder {
     pipeline: gstreamer::Pipeline,
     source: gstreamer_app::AppSrc,
-    element: gstreamer::Element,
     sink: gstreamer_app::AppSink,
     output: gstreamer_app::app_sink::AppSinkStream,
     terminal_messages: flume::Receiver<gstreamer::Message>,
@@ -643,7 +643,6 @@ impl GStreamerVideoEncoder {
         Ok(Self {
             pipeline,
             source,
-            element,
             sink,
             output,
             terminal_messages,
@@ -769,6 +768,7 @@ impl GStreamerVideoEncoder {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn wait_terminal(&self) -> eros::Result<()> {
         let message = self
             .terminal_messages
@@ -1334,7 +1334,9 @@ mod tests {
         let encoder = GStreamerVideoEncoder::create(&input_caps, MAX_RTP_PACKET_SIZE, false)
             .expect("A hardware H.264 encoder element should be created for NV12 DMA-BUF input");
         let factory = encoder
-            .element
+            .pipeline
+            .by_name("h264-encoder")
+            .expect("The pipeline should retain its encoder element")
             .factory()
             .expect("The created encoder element should retain its factory");
 

@@ -7,7 +7,7 @@ set -eu
 exec cargo test \
     --color=always \
     --lib \
-    infra::platform::linux::gpu::tests::allocates_nv12_dma_buf_output \
+    infra::platform::gpu::tests::allocates_nv12_dma_buf_output \
     -- \
     --ignored \
     --nocapture

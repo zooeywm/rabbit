@@ -186,8 +186,12 @@ impl GbmFrameAllocator {
                     continue;
                 }
             };
-            let transform =
-                KmsCompositionTransform::new(output_size, plane.buffer.size, plane.placement);
+            let transform = KmsCompositionTransform::new(
+                output_size,
+                plane.buffer.size,
+                plane.placement,
+                plane.cursor_hotspot,
+            );
 
             self.context
                 .egl()

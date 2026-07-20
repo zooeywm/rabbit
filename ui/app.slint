@@ -395,6 +395,11 @@ export component RabbitWindow inherits Window {
     in property <bool> local-server-online;
     in property <string> stream-title;
     in property <string> stream-resolution;
+    out property <length> video-viewport-x: streaming-page.absolute-position.x;
+    out property <length> video-viewport-y: streaming-page.absolute-position.y + 44px;
+    out property <length> video-viewport-width: streaming-page.width;
+    out property <length> video-viewport-height: max(0px, streaming-page.height - 44px);
+    out property <bool> video-viewport-visible: root.page == AppPage.streaming;
     in property <[ConnectionRequestItem]> connection-requests;
     in property <[ConnectedDeviceItem]> connected-devices;
     in property <[HostedScreenStreamItem]> hosted-screen-streams;
@@ -853,7 +858,8 @@ export component RabbitWindow inherits Window {
                     }
                 }
 
-                if root.page == AppPage.streaming: VerticalLayout {
+                streaming-page := VerticalLayout {
+                    visible: root.page == AppPage.streaming;
                     width: content-area.width;
                     height: content-area.height;
                     spacing: 10px;
@@ -887,58 +893,11 @@ export component RabbitWindow inherits Window {
                         }
                     }
 
-                    Rectangle {
+                    video-surface := Rectangle {
                         width: 100%;
                         vertical-stretch: 1;
                         background: #17191c;
                         border-radius: 10px;
-
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 14px;
-
-                            HorizontalLayout {
-                                height: 56px;
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                Rectangle {
-                                    width: 64px;
-                                    height: 48px;
-                                    border-color: #8d9299;
-                                    border-width: 2px;
-                                    border-radius: 3px;
-
-                                    Rectangle {
-                                        x: 27px;
-                                        y: 49px;
-                                        width: 10px;
-                                        height: 7px;
-                                        background: #8d9299;
-                                    }
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-                            }
-
-                            Text {
-                                text: "Connecting video renderer...";
-                                color: #e4e6e9;
-                                font-size: 14px;
-                                horizontal-alignment: center;
-                            }
-
-                            Text {
-                                text: root.stream-title + "  ·  " + root.stream-resolution;
-                                color: #8f959d;
-                                font-size: 12px;
-                                horizontal-alignment: center;
-                            }
-                        }
                     }
                 }
 

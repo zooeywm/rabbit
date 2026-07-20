@@ -1,6 +1,6 @@
 use crate::{
     infra::platform::screen_capture::kms::types::{
-        KmsPlanePlacement, KmsPlaneTransform, KmsRotation,
+        KmsCursorHotspot, KmsPlanePlacement, KmsPlaneTransform, KmsRotation,
     },
     kernel::geometry::PixelSize,
 };
@@ -17,13 +17,24 @@ impl KmsCompositionTransform {
     pub(crate) fn new(
         output_size: PixelSize,
         framebuffer_size: PixelSize,
-        placement: KmsPlanePlacement,
+        mut placement: KmsPlanePlacement,
+        cursor_hotspot: Option<KmsCursorHotspot>,
     ) -> Self {
+        if let Some(hotspot) = cursor_hotspot {
+            placement.destination.x = subtract_hotspot(placement.destination.x, hotspot.x);
+            placement.destination.y = subtract_hotspot(placement.destination.y, hotspot.y);
+        }
+
         Self {
             position: position_matrix(output_size, placement),
             texture: texture_matrix(framebuffer_size, placement),
         }
     }
+}
+
+fn subtract_hotspot(position: i32, hotspot: u32) -> i32 {
+    (i64::from(position) - i64::from(hotspot)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+        as i32
 }
 
 fn position_matrix(output_size: PixelSize, placement: KmsPlanePlacement) -> [f32; 9] {
@@ -105,4 +116,15 @@ fn source_coordinate(
     }
 
     (source_x, source_y)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::infra::platform::screen_capture::kms::composition::subtract_hotspot;
+
+    #[test]
+    fn cursor_hotspot_offsets_and_saturates_the_plane_position() {
+        assert_eq!(subtract_hotspot(100, 8), 92);
+        assert_eq!(subtract_hotspot(i32::MIN, 1), i32::MIN);
+    }
 }

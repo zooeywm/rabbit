@@ -14,9 +14,10 @@ pub trait VideoRenderer {
     fn set_viewport(&mut self, viewport: VideoViewport);
     fn present(&mut self, frame: Self::Frame);
     fn render(&mut self) -> eros::Result<()>;
-    fn clear(&mut self);
+    fn clear(&mut self) -> eros::Result<()>;
 }
 
+// Focused test: cargo test kernel::video_renderer::tests --lib
 #[cfg(test)]
 mod tests {
     use crate::kernel::video_renderer::{VideoRenderer, VideoViewport};
@@ -47,8 +48,9 @@ mod tests {
             Ok(())
         }
 
-        fn clear(&mut self) {
+        fn clear(&mut self) -> eros::Result<()> {
             self.frame = None;
+            Ok(())
         }
     }
 
@@ -68,7 +70,7 @@ mod tests {
             .expect("Renderer should render a configured owned frame");
 
         assert!(renderer.rendered);
-        renderer.clear();
+        renderer.clear().expect("Renderer should clear its frame");
         assert!(renderer.frame.is_none());
     }
 }

@@ -74,8 +74,6 @@ pub(crate) enum KmsPlaneCaptureError {
         format: DrmFourcc,
         modifier: DrmModifier,
     },
-    #[error("plane contains protected content")]
-    ProtectedContent,
 }
 
 #[derive(Debug, thiserror::Error)]

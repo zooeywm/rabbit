@@ -149,10 +149,8 @@ impl Transport for QuicTransport {
 }
 
 impl TransportRecv for QuicTransportRecv {
-    async fn recv(&mut self) -> eros::Result<Option<TransportMessage>> {
-        let item = self.messages.pop().await;
-        item.consumed.push(());
-        item.result
+    fn recv(&mut self) -> impl Future<Output = eros::Result<Option<TransportMessage>>> {
+        receive_next_message(&self.messages)
     }
 }
 
@@ -174,14 +172,24 @@ impl TransportSend for QuicTransportSend {
     }
 
     fn close(&self) -> impl Future<Output = ()> {
-        async {
-            self.connection.close(
-                compio::quic::VarInt::from_u32(0),
-                b"Session closed normally",
-            );
-            self.connection.closed().await;
-        }
+        close_connection(&self.connection)
     }
+}
+
+async fn receive_next_message(
+    messages: &UnsyncQueue<ReceiveItem>,
+) -> eros::Result<Option<TransportMessage>> {
+    let item = messages.pop().await;
+    item.consumed.push(());
+    item.result
+}
+
+async fn close_connection(connection: &compio::quic::Connection) {
+    connection.close(
+        compio::quic::VarInt::from_u32(0),
+        b"Session closed normally",
+    );
+    connection.closed().await;
 }
 
 fn is_normal_close_reason(reason: Option<compio::quic::ConnectionError>) -> bool {

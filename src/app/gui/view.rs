@@ -1,6 +1,7 @@
 use eros::Context as _;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
 
+use crate::app::gui::video_view::{self, VideoViewPublisher};
 use crate::app::{
     config::APP_ID,
     gui::state::{
@@ -9,19 +10,37 @@ use crate::app::{
     },
 };
 
-slint::include_modules!();
+slint::slint! {
+    export {
+        AppPage,
+        ConnectedDeviceItem,
+        ConnectionRequestItem,
+        HostedScreenStreamItem,
+        NavigationSection,
+        RabbitWindow,
+        RemoteScreenItem,
+    } from "../../../ui/app.slint";
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GuiIntent {
     SelectSection(WorkspaceSection),
     Connect(String),
-    DecideConnectionRequest { index: usize, accept: bool },
+    DecideConnectionRequest {
+        index: usize,
+        accept: bool,
+    },
     OpenRemoteScreen(usize),
     DisconnectRemoteSession,
     StopHostedScreenStream(usize),
     DisconnectDevice(usize),
     RetryConnection,
     StopScreenStream,
+    VideoFramePresented {
+        session_id: crate::kernel::session::SessionId,
+        screen_id: crate::kernel::screen_manager::ScreenId,
+    },
+    VideoRendererFailed(String),
     Close,
 }
 
@@ -33,10 +52,15 @@ pub(crate) struct Gui {
 #[derive(Clone)]
 pub(crate) struct ViewPublisher {
     window: slint::Weak<RabbitWindow>,
+    video: VideoViewPublisher,
 }
 
 impl Gui {
     pub(crate) fn new() -> eros::Result<(Self, ViewPublisher, flume::Receiver<GuiIntent>)> {
+        slint::BackendSelector::new()
+            .require_opengl_es_with_version(3, 0)
+            .select()
+            .context("Failed to select the Slint OpenGL ES 3 renderer")?;
         let window = RabbitWindow::new().context("Failed to create the Slint Rabbit window")?;
         slint::set_xdg_app_id(APP_ID).context("Failed to set the Rabbit XDG application ID")?;
         let (sender, intents) = flume::unbounded();
@@ -123,8 +147,10 @@ impl Gui {
             }
         });
 
+        let video = video_view::install(&window, sender.clone())?;
         let publisher = ViewPublisher {
             window: window.as_weak(),
+            video,
         };
         Ok((
             Self {
@@ -166,6 +192,19 @@ impl ViewPublisher {
     pub(crate) fn quit(&self) -> eros::Result<()> {
         slint::quit_event_loop().context("Failed to stop the Slint event loop")?;
         Ok(())
+    }
+
+    pub(crate) fn present_video(
+        &self,
+        session_id: crate::kernel::session::SessionId,
+        screen_id: crate::kernel::screen_manager::ScreenId,
+        frame: crate::infra::GStreamerDecodedFrame,
+    ) -> eros::Result<()> {
+        self.video.present(session_id, screen_id, frame)
+    }
+
+    pub(crate) fn clear_video(&self) -> eros::Result<()> {
+        self.video.clear()
     }
 }
 

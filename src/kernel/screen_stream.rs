@@ -53,24 +53,34 @@ mod tests {
         type Packet = EncodedPacket;
 
         fn run<Frames, SendPacket, SendFuture>(
-            mut frames: Frames,
+            frames: Frames,
             _max_packet_size: usize,
-            mut send_packet: SendPacket,
+            send_packet: SendPacket,
         ) -> impl Future<Output = eros::Result<()>>
         where
             Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
             SendPacket: FnMut(Self::Packet) -> SendFuture,
             SendFuture: Future<Output = eros::Result<()>>,
         {
-            async move {
-                while let Some(frame) = frames.next().await {
-                    let frame = frame.expect("Screen stream should contain a processed frame");
-                    send_packet(EncodedPacket(frame.0)).await?;
-                }
-
-                Ok(())
-            }
+            drive_empty_encoder(frames, send_packet)
         }
+    }
+
+    async fn drive_empty_encoder<Frames, SendPacket, SendFuture>(
+        mut frames: Frames,
+        mut send_packet: SendPacket,
+    ) -> eros::Result<()>
+    where
+        Frames: futures_core::Stream<Item = eros::Result<Rc<ProcessedFrame>>> + Unpin,
+        SendPacket: FnMut(EncodedPacket) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
+        while let Some(frame) = frames.next().await {
+            let frame = frame.expect("Screen stream should contain a processed frame");
+            send_packet(EncodedPacket(frame.0)).await?;
+        }
+
+        Ok(())
     }
 
     #[test]
