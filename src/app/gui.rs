@@ -128,7 +128,7 @@ pub(crate) enum RootMessage {
     ConnectionListenerFailed(eros::ErrorUnion),
     SessionMessageReceived(SessionId, SessionMessage),
     VideoFrameAvailable(SessionId, ScreenId),
-    VideoFramePresented(SessionId, ScreenId),
+    VideoFrameReady(SessionId, ScreenId),
     VideoDecoderFinished(SessionId, ScreenId, eros::Result<()>),
     VideoRendererFailed(String),
     ScreenStreamConfigurationFinished {
@@ -687,10 +687,10 @@ impl RootApplication {
                 GuiIntent::DisconnectDevice(index) => RootMessage::DisconnectDevice(index),
                 GuiIntent::RetryConnection => RootMessage::ResetDirectConnection,
                 GuiIntent::StopScreenStream => RootMessage::StopCurrentScreenStream,
-                GuiIntent::VideoFramePresented {
+                GuiIntent::VideoFrameReady {
                     session_id,
                     screen_id,
-                } => RootMessage::VideoFramePresented(session_id, screen_id),
+                } => RootMessage::VideoFrameReady(session_id, screen_id),
                 GuiIntent::VideoRendererFailed(error) => RootMessage::VideoRendererFailed(error),
                 GuiIntent::Close => RootMessage::Close,
             },
@@ -1415,7 +1415,7 @@ impl RootApplication {
                 })?;
                 Ok(false)
             }
-            RootMessage::VideoFramePresented(id, screen_id) => {
+            RootMessage::VideoFrameReady(id, screen_id) => {
                 Ok(self.screen_stream.receive_video(id, screen_id))
             }
             RootMessage::VideoDecoderFinished(id, screen_id, result) => {

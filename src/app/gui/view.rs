@@ -36,7 +36,7 @@ pub(crate) enum GuiIntent {
     DisconnectDevice(usize),
     RetryConnection,
     StopScreenStream,
-    VideoFramePresented {
+    VideoFrameReady {
         session_id: crate::kernel::session::SessionId,
         screen_id: crate::kernel::screen_manager::ScreenId,
     },

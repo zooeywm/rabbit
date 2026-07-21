@@ -1,3 +1,8 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use eros::Context as _;
 use slint::{ComponentHandle as _, GraphicsAPI, RenderingState};
 
@@ -25,6 +30,7 @@ pub(crate) struct VideoViewPublisher {
     sender: flume::Sender<VideoViewCommand>,
     stale: flume::Receiver<VideoViewCommand>,
     window: slint::Weak<RabbitWindow>,
+    redraw_scheduled: Arc<AtomicBool>,
 }
 
 pub(crate) fn install(
@@ -36,6 +42,7 @@ pub(crate) fn install(
         sender,
         stale: receiver.clone(),
         window: window.as_weak(),
+        redraw_scheduled: Arc::new(AtomicBool::new(false)),
     };
     let weak_window = window.as_weak();
     let mut renderer = None;
@@ -76,7 +83,7 @@ pub(crate) fn install(
                     match result {
                         Ok(Some((session_id, screen_id))) => {
                             if errors
-                                .send(GuiIntent::VideoFramePresented {
+                                .send(GuiIntent::VideoFrameReady {
                                     session_id,
                                     screen_id,
                                 })
@@ -145,15 +152,13 @@ impl VideoViewPublisher {
     }
 
     fn publish(&self, mut command: VideoViewCommand) -> eros::Result<()> {
-        let mut request_redraw = true;
-        let request_redraw = loop {
+        loop {
             match self.sender.try_send(command) {
-                Ok(()) => break request_redraw,
+                Ok(()) => break,
                 Err(flume::TrySendError::Full(returned)) => {
                     command = returned;
                     match self.stale.try_recv() {
-                        Ok(_) => request_redraw = false,
-                        Err(flume::TryRecvError::Empty) => request_redraw = true,
+                        Ok(_) | Err(flume::TryRecvError::Empty) => {}
                         Err(flume::TryRecvError::Disconnected) => {
                             eros::bail!("Slint video rendering bridge disconnected")
                         }
@@ -163,16 +168,23 @@ impl VideoViewPublisher {
                     eros::bail!("Slint video rendering bridge disconnected")
                 }
             }
-        };
+        }
 
-        if request_redraw {
-            let window = self.window.clone();
-            slint::invoke_from_event_loop(move || {
-                if let Some(window) = window.upgrade() {
-                    window.window().request_redraw();
-                }
-            })
-            .context("Failed to request a Slint redraw for a decoded video frame")?;
+        if self.redraw_scheduled.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let window = self.window.clone();
+        let redraw_scheduled = Arc::clone(&self.redraw_scheduled);
+        if let Err(error) = slint::invoke_from_event_loop(move || {
+            redraw_scheduled.store(false, Ordering::Relaxed);
+            if let Some(window) = window.upgrade() {
+                window.window().request_redraw();
+            }
+        }) {
+            self.redraw_scheduled.store(false, Ordering::Relaxed);
+            Err::<(), _>(error)
+                .context("Failed to request a Slint redraw for a decoded video frame")?;
         }
         Ok(())
     }
@@ -215,7 +227,7 @@ fn render_video_frame(
         return Ok(None);
     };
     if !window.get_video_viewport_visible() || active_stream.is_none() {
-        return Ok(None);
+        return Ok(presented);
     }
     let scale = window.window().scale_factor();
     renderer.set_viewport(VideoViewport {
@@ -282,15 +294,52 @@ mod tests {
             Gui::new().expect("Slint video test window should be created");
         publisher
             .publish(ViewState {
-                page: ViewPage::Streaming,
+                page: ViewPage::StreamRequest,
                 page_title: "DMA-BUF decode and render test".to_string(),
-                page_subtitle: "Hardware H.264 decoder → EGLImage → Slint OpenGL".to_string(),
+                page_subtitle: "Waiting for the first decoded frame".to_string(),
+                status_text: "Waiting for the first video frame".to_string(),
                 stream_title: "Synthetic test stream".to_string(),
                 stream_resolution: "1280 × 720".to_string(),
                 local_server_online: true,
                 ..ViewState::default()
             })
-            .expect("Streaming test state should reach Slint");
+            .expect("Waiting-for-video test state should reach Slint");
+
+        let first_frame_presented = Rc::new(Cell::new(false));
+        let renderer_failed = Rc::new(Cell::new(false));
+        let event_first_frame_presented = Rc::clone(&first_frame_presented);
+        let event_renderer_failed = Rc::clone(&renderer_failed);
+        let event_publisher = publisher.clone();
+        let event_timer = slint::Timer::default();
+        event_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(10),
+            move || {
+                while let Ok(intent) = intents.try_recv() {
+                    match intent {
+                        GuiIntent::VideoFrameReady { .. }
+                            if !event_first_frame_presented.replace(true) =>
+                        {
+                            event_publisher
+                                .publish(ViewState {
+                                    page: ViewPage::Streaming,
+                                    page_title: "DMA-BUF decode and render test".to_string(),
+                                    page_subtitle:
+                                        "Hardware H.264 decoder → EGLImage → Slint OpenGL"
+                                            .to_string(),
+                                    stream_title: "Synthetic test stream".to_string(),
+                                    stream_resolution: "1280 × 720".to_string(),
+                                    local_server_online: true,
+                                    ..ViewState::default()
+                                })
+                                .expect("First decoded frame should open the streaming view");
+                        }
+                        GuiIntent::VideoRendererFailed(_) => event_renderer_failed.set(true),
+                        _ => {}
+                    }
+                }
+            },
+        );
 
         let test_publisher = publisher.clone();
         let test_thread = std::thread::Builder::new()
@@ -315,21 +364,16 @@ mod tests {
             .join()
             .expect("Client video test thread should not panic");
 
-        let events = intents.try_iter().collect::<Vec<_>>();
         assert!(
             decoded_frames > 0,
             "Hardware decoder should produce at least one DMA-BUF frame"
         );
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, GuiIntent::VideoFramePresented { .. })),
-            "Slint bridge should present at least one decoded DMA-BUF frame; events: {events:?}"
+            first_frame_presented.get(),
+            "The first decoded DMA-BUF should open the streaming view"
         );
         assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, GuiIntent::VideoRendererFailed(_))),
+            !renderer_failed.get(),
             "Slint bridge should not report a renderer failure"
         );
     }

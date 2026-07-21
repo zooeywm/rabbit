@@ -46,7 +46,7 @@ fn position_matrix(output_size: PixelSize, placement: KmsPlanePlacement) -> [f32
     let scale_x = width / output_width;
     let scale_y = height / output_height;
     let offset_x = 2.0 * f64::from(destination.x) / output_width + scale_x - 1.0;
-    let offset_y = 1.0 - 2.0 * f64::from(destination.y) / output_height - scale_y;
+    let offset_y = 2.0 * f64::from(destination.y) / output_height + scale_y - 1.0;
 
     [
         scale_x as f32,
@@ -85,7 +85,7 @@ fn texture_coordinate(
     texture_x: f64,
     texture_y: f64,
 ) -> (f64, f64) {
-    let (source_x, source_y) = source_coordinate(placement.transform, texture_x, 1.0 - texture_y);
+    let (source_x, source_y) = source_coordinate(placement.transform, texture_x, texture_y);
     let source = placement.source;
     let framebuffer_width = f64::from(framebuffer_size.width) * FIXED_POINT_SCALE;
     let framebuffer_height = f64::from(framebuffer_size.height) * FIXED_POINT_SCALE;
@@ -120,11 +120,74 @@ fn source_coordinate(
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::platform::screen_capture::kms::composition::subtract_hotspot;
+    use crate::{
+        infra::platform::screen_capture::kms::{
+            composition::{position_matrix, subtract_hotspot, texture_coordinate},
+            types::{KmsDestinationRect, KmsPlanePlacement, KmsPlaneTransform, KmsSourceRect},
+        },
+        kernel::geometry::PixelSize,
+    };
 
     #[test]
     fn cursor_hotspot_offsets_and_saturates_the_plane_position() {
         assert_eq!(subtract_hotspot(100, 8), 92);
         assert_eq!(subtract_hotspot(i32::MIN, 1), i32::MIN);
+    }
+
+    #[test]
+    fn writes_a_top_down_drm_plane_into_a_top_down_exported_target() {
+        let size = PixelSize {
+            width: 1920,
+            height: 1080,
+        };
+        let placement = KmsPlanePlacement {
+            zpos: 0,
+            source: KmsSourceRect {
+                x: 0,
+                y: 0,
+                width: size.width << 16,
+                height: size.height << 16,
+            },
+            destination: KmsDestinationRect {
+                x: 0,
+                y: 0,
+                width: size.width,
+                height: size.height,
+            },
+            transform: KmsPlaneTransform::default(),
+        };
+
+        assert_eq!(texture_coordinate(size, placement, 0.0, 0.0), (0.0, 0.0));
+        assert_eq!(texture_coordinate(size, placement, 0.0, 1.0), (0.0, 1.0));
+    }
+
+    #[test]
+    fn maps_a_top_left_drm_destination_to_the_gl_target_bottom() {
+        let placement = KmsPlanePlacement {
+            zpos: 0,
+            source: KmsSourceRect {
+                x: 0,
+                y: 0,
+                width: 20 << 16,
+                height: 20 << 16,
+            },
+            destination: KmsDestinationRect {
+                x: 10,
+                y: 10,
+                width: 20,
+                height: 20,
+            },
+            transform: KmsPlaneTransform::default(),
+        };
+        let matrix = position_matrix(
+            PixelSize {
+                width: 100,
+                height: 100,
+            },
+            placement,
+        );
+
+        assert_eq!(matrix[4], 0.2);
+        assert_eq!(matrix[7], -0.6);
     }
 }

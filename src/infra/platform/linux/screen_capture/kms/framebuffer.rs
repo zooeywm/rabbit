@@ -19,6 +19,8 @@ use crate::{
     kernel::geometry::PixelSize,
 };
 
+const MAX_COHERENT_SNAPSHOT_ATTEMPTS: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KmsFramebufferDescriptor {
     size: (u32, u32),
@@ -38,7 +40,21 @@ pub(super) struct KmsFramebufferCacheEntry {
 }
 
 impl KmsOutput {
-    pub(crate) fn snapshot_framebuffers(&mut self) -> eros::Result<KmsFramebufferSnapshot> {
+    pub(crate) fn snapshot_framebuffers(&mut self) -> eros::Result<Option<KmsFramebufferSnapshot>> {
+        for _ in 0..MAX_COHERENT_SNAPSHOT_ATTEMPTS {
+            if let Some(snapshot) = self.try_snapshot_framebuffers()? {
+                return Ok(Some(snapshot));
+            }
+        }
+
+        tracing::trace!(
+            attempts = MAX_COHERENT_SNAPSHOT_ATTEMPTS,
+            "Skipped a KMS capture cycle because plane framebuffers kept changing"
+        );
+        Ok(None)
+    }
+
+    fn try_snapshot_framebuffers(&mut self) -> eros::Result<Option<KmsFramebufferSnapshot>> {
         let KmsPlaneSnapshot {
             output_size,
             planes: active_planes,
@@ -63,6 +79,7 @@ impl KmsOutput {
                         cursor_hotspot: active_plane.cursor_hotspot,
                         cache_key,
                     }),
+                    Err(KmsPlaneCaptureError::SnapshotChanged { .. }) => return Ok(None),
                     Err(error) => issues.push(KmsPlaneIssue {
                         plane_id: active_plane.id,
                         plane_type: Some(active_plane.plane_type),
@@ -78,11 +95,11 @@ impl KmsOutput {
         }
         self.retain_active_framebuffers(&active_framebuffers);
 
-        Ok(KmsFramebufferSnapshot {
+        Ok(Some(KmsFramebufferSnapshot {
             output_size,
             planes,
             issues,
-        })
+        }))
     }
 
     fn export_framebuffer(
