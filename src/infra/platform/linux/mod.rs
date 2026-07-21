@@ -1,3 +1,4 @@
+mod client_video_probe;
 mod dma_buf;
 mod egl_dma_buf;
 mod frame_pipeline;
