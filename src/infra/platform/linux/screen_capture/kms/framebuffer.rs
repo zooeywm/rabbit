@@ -57,6 +57,7 @@ impl KmsOutput {
     fn try_snapshot_framebuffers(&mut self) -> eros::Result<Option<KmsFramebufferSnapshot>> {
         let KmsPlaneSnapshot {
             output_size,
+            frame_rate,
             planes: active_planes,
             mut issues,
         } = self.snapshot_planes()?;
@@ -97,6 +98,7 @@ impl KmsOutput {
 
         Ok(Some(KmsFramebufferSnapshot {
             output_size,
+            frame_rate,
             planes,
             issues,
         }))

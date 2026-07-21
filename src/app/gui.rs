@@ -5,7 +5,7 @@ use std::{
 };
 
 use eros::Context;
-use futures_util::{StreamExt as _, future::Either, pin_mut};
+use futures_util::{future::Either, pin_mut};
 use tracing::{error, info, trace, warn};
 
 use crate::app::{
@@ -17,7 +17,7 @@ use crate::app::{
         },
         view::{Gui, GuiIntent, ViewPublisher},
     },
-    model::{ApplicationModel, LatestVideoFrames, RunningScreenStream, RunningSession, SessionKey},
+    model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
 };
 
 use crate::{
@@ -37,7 +37,10 @@ use crate::{
             ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
         },
         screen_manager::{ScreenId, ScreenLayoutManager},
-        session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole, SessionSend},
+        session::{
+            ReceivedVideoFrame, Session, SessionId, SessionMessage, SessionRecv, SessionRole,
+            SessionSend,
+        },
         session_control::{ControlMessage, OutgoingScreenList},
         transport::TransportRecv,
     },
@@ -126,7 +129,7 @@ pub(crate) enum RootMessage {
     ConnectionRequestFailed(eros::ErrorUnion),
     ConnectionListenerFailed(eros::ErrorUnion),
     SessionMessageReceived(SessionId, SessionMessage),
-    VideoFrameAvailable(SessionId, ScreenId),
+    VideoFrameReceived(SessionId, ReceivedVideoFrame),
     VideoFrameReady(SessionId, ScreenId),
     VideoDecoderFinished(SessionId, ScreenId, eros::Result<()>),
     VideoRendererFailed(String),
@@ -166,30 +169,18 @@ pub(crate) enum RootMessage {
 struct RunningVideoDecoder {
     session_id: SessionId,
     screen_id: ScreenId,
-    input: flume::Sender<crate::kernel::session::ReceivedVideoFrame>,
-    stale: flume::Receiver<crate::kernel::session::ReceivedVideoFrame>,
+    input: UnsyncQueue<VideoDecoderInput>,
     task: Option<compio::runtime::JoinHandle<()>>,
 }
 
+enum VideoDecoderInput {
+    Frame(ReceivedVideoFrame),
+    Shutdown,
+}
+
 impl RunningVideoDecoder {
-    fn publish(&self, mut frame: crate::kernel::session::ReceivedVideoFrame) -> eros::Result<()> {
-        loop {
-            match self.input.try_send(frame) {
-                Ok(()) => return Ok(()),
-                Err(flume::TrySendError::Full(returned)) => {
-                    frame = returned;
-                    match self.stale.try_recv() {
-                        Ok(_) | Err(flume::TryRecvError::Empty) => {}
-                        Err(flume::TryRecvError::Disconnected) => {
-                            eros::bail!("Video decoder input disconnected")
-                        }
-                    }
-                }
-                Err(flume::TrySendError::Disconnected(_)) => {
-                    eros::bail!("Video decoder input disconnected")
-                }
-            }
-        }
+    fn publish(&self, frame: ReceivedVideoFrame) {
+        self.input.push(VideoDecoderInput::Frame(frame));
     }
 
     fn matches(&self, session_id: SessionId, screen_id: ScreenId) -> bool {
@@ -199,6 +190,8 @@ impl RunningVideoDecoder {
 
 impl Drop for RunningVideoDecoder {
     fn drop(&mut self) {
+        while self.input.try_pop().is_some() {}
+        self.input.push(VideoDecoderInput::Shutdown);
         if let Some(task) = self.task.take() {
             task.detach();
         }
@@ -232,12 +225,20 @@ impl RootApplication {
         }
 
         self.stop_video_decoder()?;
-        let (input, receiver) = flume::bounded(1);
-        let stale = receiver.clone();
+        let input = UnsyncQueue::default();
+        let receiver = input.clone();
         let view = self.view.clone();
         let finished = sender.clone();
         let enable_probing = self.model.app.config.video.enable_probing;
-        let inputs = receiver.into_stream().map(Ok);
+        let inputs = Box::pin(futures_util::stream::unfold(
+            receiver,
+            |receiver| async move {
+                match receiver.pop().await {
+                    VideoDecoderInput::Frame(frame) => Some((Ok(frame), receiver)),
+                    VideoDecoderInput::Shutdown => None,
+                }
+            },
+        ));
         let task = compio::runtime::spawn(async move {
             let result = GStreamerVideoDecoder::run_with_probing(
                 inputs,
@@ -253,7 +254,6 @@ impl RootApplication {
             session_id,
             screen_id,
             input,
-            stale,
             task: Some(task),
         });
         Ok(())
@@ -354,7 +354,6 @@ impl RootApplication {
             return false;
         }
 
-        let received_video_frames = LatestVideoFrames::default();
         info!(
             event = "session_started",
             session_id = send.id().0,
@@ -366,12 +365,7 @@ impl RootApplication {
             peer_name,
             send: Rc::new(send),
             screen_streams: Default::default(),
-            received_video_frames: received_video_frames.clone(),
-            _receiver: compio::runtime::spawn(receive_session(
-                recv,
-                received_video_frames,
-                sender.clone(),
-            )),
+            _receiver: compio::runtime::spawn(receive_session(recv, sender.clone())),
         });
 
         true
@@ -1382,18 +1376,8 @@ impl RootApplication {
 
                 Ok(true)
             }
-            RootMessage::VideoFrameAvailable(id, screen_id) => {
-                let Some(session) = self
-                    .model
-                    .sessions
-                    .iter()
-                    .find(|session| session.send.id() == id)
-                else {
-                    return Ok(false);
-                };
-                let Some(video) = session.received_video_frames.take(&screen_id) else {
-                    return Ok(false);
-                };
+            RootMessage::VideoFrameReceived(id, video) => {
+                let screen_id = video.screen_id;
                 let payload_size = video.packets.iter().map(bytes::Bytes::len).sum::<usize>();
 
                 trace!(
@@ -1401,7 +1385,7 @@ impl RootApplication {
                     screen_id = video.screen_id.0,
                     packet_count = video.packets.len(),
                     payload_size,
-                    "Received latest complete video RTP frame"
+                    "Received complete video RTP frame"
                 );
 
                 if self.screen_stream.active_screen() != Some((id, screen_id)) {
@@ -1412,9 +1396,7 @@ impl RootApplication {
                     .video_decoder
                     .as_ref()
                     .context("Video decoder was not retained after startup")?;
-                decoder.publish(video).with_context(|| {
-                    format!("Failed to queue screen {} for decoding", screen_id.0)
-                })?;
+                decoder.publish(video);
                 Ok(false)
             }
             RootMessage::VideoFrameReady(id, screen_id) => {
@@ -1830,11 +1812,8 @@ async fn receive_connection_requests(endpoint: QuicEndpoint, sender: MessageSend
     }
 }
 
-async fn receive_session<R>(
-    mut session: SessionRecv<R>,
-    received_video_frames: LatestVideoFrames,
-    sender: MessageSender,
-) where
+async fn receive_session<R>(mut session: SessionRecv<R>, sender: MessageSender)
+where
     R: TransportRecv,
 {
     let id = session.id();
@@ -1842,11 +1821,7 @@ async fn receive_session<R>(
     loop {
         match session.recv().await {
             Ok(Some(SessionMessage::Video(frame))) => {
-                let screen_id = frame.screen_id;
-                let first_pending_frame = received_video_frames.publish(frame);
-                if first_pending_frame {
-                    sender.post(RootMessage::VideoFrameAvailable(id, screen_id));
-                }
+                sender.post(RootMessage::VideoFrameReceived(id, frame));
             }
             Ok(Some(message)) => sender.post(RootMessage::SessionMessageReceived(id, message)),
             Ok(None) => {

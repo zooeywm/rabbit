@@ -496,6 +496,7 @@ fn publish_single_pipeline_passthrough(
     });
     pipeline.outputs.publish(Ok(GbmFramePipelineFrame {
         buffer: frame.buffer,
+        frame_rate: frame.frame_rate,
         probe,
     }));
 
@@ -652,6 +653,7 @@ fn process_pipeline_frame(
 
     Ok(Some(GbmFramePipelineFrame {
         buffer,
+        frame_rate: frame.frame_rate,
         probe: frame.probe.clone().map(|mut probe| {
             probe.mark_gpu_submitted();
             probe

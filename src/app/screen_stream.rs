@@ -44,10 +44,15 @@ where
         },
         max_packet_size,
         move |packet: Encoder::Packet| {
-            std::future::ready(session.send_video(VideoMessage {
-                screen_id,
-                payload: packet.into(),
-            }))
+            let session = Rc::clone(&session);
+            async move {
+                session
+                    .send_video(VideoMessage {
+                        screen_id,
+                        payload: packet.into(),
+                    })
+                    .await
+            }
         },
     )
     .run()

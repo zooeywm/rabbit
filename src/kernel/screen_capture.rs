@@ -1,10 +1,11 @@
-use crate::kernel::screen_manager::ScreenId;
+use crate::kernel::{geometry::FrameRate, screen_manager::ScreenId};
 
 /// A composed physical-screen frame and any recoverable source-layer issues.
 #[derive(Debug)]
 pub struct CapturedFrame<Buffer, Issue> {
     pub buffer: Buffer,
     pub issues: Vec<Issue>,
+    pub frame_rate: FrameRate,
 }
 
 pub struct ScreenCaptureSource<Lease, Receiver> {

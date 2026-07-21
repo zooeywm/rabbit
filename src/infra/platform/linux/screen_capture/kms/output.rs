@@ -16,7 +16,7 @@ use crate::{
             KmsPlanePlacement, KmsPlaneSnapshot, KmsPlaneTransform, KmsRotation, KmsSourceRect,
         },
     },
-    kernel::geometry::PixelSize,
+    kernel::geometry::{FrameRate, PixelSize},
 };
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
@@ -143,6 +143,14 @@ impl KmsOutput {
             )
         })?;
         let (width, height) = mode.size();
+        let frame_rate = FrameRate::new(mode.vrefresh(), 1).with_context(|| {
+            format!(
+                "DRM CRTC {:?} on {} reported an invalid refresh rate {} Hz",
+                self.crtc,
+                self.device.path().display(),
+                mode.vrefresh()
+            )
+        })?;
         let output_size = PixelSize {
             width: u32::from(width),
             height: u32::from(height),
@@ -201,6 +209,7 @@ impl KmsOutput {
 
         Ok(KmsPlaneSnapshot {
             output_size,
+            frame_rate,
             planes,
             issues,
         })

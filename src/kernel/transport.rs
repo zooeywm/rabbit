@@ -52,8 +52,11 @@ pub trait TransportSend {
         false
     }
 
-    fn send_unreliable(&self, channel: TransportChannel, payload: bytes::Bytes)
-    -> eros::Result<()>;
+    fn send_unreliable(
+        &self,
+        channel: TransportChannel,
+        payload: bytes::Bytes,
+    ) -> impl Future<Output = eros::Result<()>>;
 
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>>;
 

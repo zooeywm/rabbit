@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     rc::Rc,
@@ -16,7 +15,7 @@ use crate::{
     kernel::{
         screen_configuration::{ScreenStreamRequestId, ScreenStreamsConfigured},
         screen_manager::ScreenId,
-        session::{ReceivedVideoFrame, SessionId, SessionRole, SessionSend},
+        session::{SessionId, SessionRole, SessionSend},
         session_control::ScreenInfo,
     },
 };
@@ -29,7 +28,6 @@ pub(crate) struct RunningSession {
     pub(crate) peer_name: Option<String>,
     pub(crate) send: Rc<SessionSend<QuicTransportSend>>,
     pub(crate) screen_streams: HashMap<ScreenId, RunningScreenStream>,
-    pub(crate) received_video_frames: LatestVideoFrames,
     pub(crate) _receiver: compio::runtime::JoinHandle<()>,
 }
 
@@ -56,24 +54,6 @@ impl SessionKey {
         self.role == SessionRole::Controller
             && self.peer_address.ip() == remote_ip
             && remote_port.is_none_or(|port| self.peer_address.port() == port)
-    }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct LatestVideoFrames {
-    frames: Rc<RefCell<HashMap<ScreenId, ReceivedVideoFrame>>>,
-}
-
-impl LatestVideoFrames {
-    pub(crate) fn publish(&self, frame: ReceivedVideoFrame) -> bool {
-        self.frames
-            .borrow_mut()
-            .insert(frame.screen_id, frame)
-            .is_none()
-    }
-
-    pub(crate) fn take(&self, screen_id: &ScreenId) -> Option<ReceivedVideoFrame> {
-        self.frames.borrow_mut().remove(screen_id)
     }
 }
 
@@ -202,39 +182,11 @@ impl ApplicationModel {
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
-    use bytes::Bytes;
-
     use crate::{
-        app::model::{LatestVideoFrames, RunningScreenStream, SessionKey},
+        app::model::{RunningScreenStream, SessionKey},
         infra::unsync_queue::UnsyncQueue,
-        kernel::{
-            screen_manager::ScreenId,
-            session::{ReceivedVideoFrame, SessionRole},
-        },
+        kernel::session::SessionRole,
     };
-
-    #[test]
-    fn video_queue_keeps_only_the_latest_complete_frame_per_screen() {
-        let frames = LatestVideoFrames::default();
-        let screen_id = ScreenId(2);
-
-        assert!(frames.publish(ReceivedVideoFrame {
-            screen_id,
-            packets: vec![Bytes::from_static(b"old")],
-        }));
-        assert!(!frames.publish(ReceivedVideoFrame {
-            screen_id,
-            packets: vec![Bytes::from_static(b"new")],
-        }));
-
-        assert_eq!(
-            frames
-                .take(&screen_id)
-                .expect("Latest video frame should remain queued")
-                .packets,
-            vec![Bytes::from_static(b"new")]
-        );
-    }
 
     #[test]
     fn screen_stream_shutdown_is_polled_before_the_stream_is_dropped() {

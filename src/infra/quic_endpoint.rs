@@ -29,6 +29,15 @@ pub(crate) struct QuicEndpoint {
 
 impl QuicEndpoint {
     pub(crate) async fn new() -> eros::Result<Self> {
+        Self::new_with_bind_address(None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_for_test() -> eros::Result<Self> {
+        Self::new_with_bind_address(Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0))).await
+    }
+
+    async fn new_with_bind_address(bind_address: Option<SocketAddr>) -> eros::Result<Self> {
         let mut transport_config = compio::quic::TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
         let transport_config = Arc::new(transport_config);
@@ -45,7 +54,12 @@ impl QuicEndpoint {
                 .with_context(|| "Failed to configure QUIC server certificate")?
                 .build();
         server_config.transport_config(transport_config.clone());
-        let endpoint = bind_endpoint(server_config).await?;
+        let endpoint = match bind_address {
+            Some(bind_address) => compio::quic::Endpoint::server(bind_address, server_config)
+                .await
+                .with_context(|| format!("Failed to bind test QUIC endpoint to {bind_address}"))?,
+            None => bind_endpoint(server_config).await?,
+        };
         let mut client_config =
             compio::quic::ClientBuilder::new_with_no_server_verification().build();
         client_config.transport_config(transport_config);
@@ -220,7 +234,7 @@ mod tests {
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime.block_on(async {
-            let endpoint = crate::infra::QuicEndpoint::new()
+            let endpoint = crate::infra::QuicEndpoint::new_for_test()
                 .await
                 .expect("Test QUIC endpoint should start");
             let local_address = endpoint
@@ -253,7 +267,7 @@ mod tests {
                     .is_none()
             );
 
-            let other_endpoint = crate::infra::QuicEndpoint::new()
+            let other_endpoint = crate::infra::QuicEndpoint::new_for_test()
                 .await
                 .expect("Second test QUIC endpoint should start");
             let other_address = other_endpoint

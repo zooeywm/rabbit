@@ -99,6 +99,7 @@ struct LatestFrameSubscriptionState<Frame> {
 #[derive(Debug)]
 pub(crate) struct GbmFramePipelineFrame {
     pub(crate) buffer: DmaBufFrame,
+    pub(crate) frame_rate: crate::kernel::geometry::FrameRate,
     pub(crate) probe: Option<crate::infra::platform::video_probe::VideoFrameProbe>,
 }
 

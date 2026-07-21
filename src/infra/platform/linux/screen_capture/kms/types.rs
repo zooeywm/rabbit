@@ -5,7 +5,10 @@ use drm::{
     control::{GetPlanarFramebufferError, PlaneType, crtc, framebuffer, plane},
 };
 
-use crate::{infra::platform::dma_buf::DmaBufFrame, kernel::geometry::PixelSize};
+use crate::{
+    infra::platform::dma_buf::DmaBufFrame,
+    kernel::geometry::{FrameRate, PixelSize},
+};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum KmsPlaneCaptureError {
@@ -99,6 +102,7 @@ pub(crate) struct KmsActivePlane {
 #[derive(Debug)]
 pub(crate) struct KmsPlaneSnapshot {
     pub output_size: PixelSize,
+    pub frame_rate: FrameRate,
     pub planes: Vec<KmsActivePlane>,
     pub issues: Vec<KmsPlaneIssue>,
 }
@@ -121,6 +125,7 @@ pub(crate) struct KmsFramebufferCacheKey(pub(crate) u64);
 #[derive(Debug)]
 pub(crate) struct KmsFramebufferSnapshot {
     pub output_size: PixelSize,
+    pub frame_rate: FrameRate,
     pub planes: Vec<KmsFramebufferPlane>,
     pub issues: Vec<KmsPlaneIssue>,
 }

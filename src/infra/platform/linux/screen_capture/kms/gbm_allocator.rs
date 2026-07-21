@@ -129,6 +129,7 @@ impl GbmFrameAllocator {
     ) -> eros::Result<Option<CapturedFrame<DmaBufFrame, KmsPlaneIssue>>> {
         let KmsFramebufferSnapshot {
             output_size,
+            frame_rate,
             planes,
             mut issues,
         } = snapshot;
@@ -209,6 +210,7 @@ impl GbmFrameAllocator {
         Ok(Some(CapturedFrame {
             buffer: frame,
             issues,
+            frame_rate,
         }))
     }
 }

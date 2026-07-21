@@ -163,7 +163,11 @@ impl TransportSend for QuicTransportSend {
         is_normal_close_reason(self.connection.close_reason())
     }
 
-    fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
+    fn send_unreliable(
+        &self,
+        channel: TransportChannel,
+        payload: Bytes,
+    ) -> impl Future<Output = eros::Result<()>> {
         self.send_unreliable_message(channel, payload)
     }
 
@@ -213,11 +217,11 @@ impl QuicTransportSend {
         match delivery {
             Delivery::ReliableOrdered => self.send_reliable_ordered(channel, payload).await,
             Delivery::ReliableUnordered => self.send_reliable_unordered(channel, payload).await,
-            Delivery::Unreliable => self.send_unreliable_message(channel, payload),
+            Delivery::Unreliable => self.send_unreliable_message(channel, payload).await,
         }
     }
 
-    fn send_unreliable_message(
+    async fn send_unreliable_message(
         &self,
         channel: TransportChannel,
         payload: Bytes,
@@ -227,7 +231,8 @@ impl QuicTransportSend {
 
         Ok(self
             .connection
-            .send_datagram(datagram)
+            .send_datagram_wait(datagram)
+            .await
             .with_context(|| "Failed to send QUIC datagram")?)
     }
 
@@ -618,10 +623,10 @@ mod tests {
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime.block_on(async {
-            let outgoing = QuicEndpoint::new()
+            let outgoing = QuicEndpoint::new_for_test()
                 .await
                 .expect("Outgoing QUIC endpoint should start");
-            let incoming = QuicEndpoint::new()
+            let incoming = QuicEndpoint::new_for_test()
                 .await
                 .expect("Incoming QUIC endpoint should start");
             let remote_address = SocketAddr::new(
@@ -689,10 +694,10 @@ mod tests {
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime.block_on(async {
-            let outgoing = QuicEndpoint::new()
+            let outgoing = QuicEndpoint::new_for_test()
                 .await
                 .expect("Outgoing QUIC endpoint should start");
-            let incoming = QuicEndpoint::new()
+            let incoming = QuicEndpoint::new_for_test()
                 .await
                 .expect("Incoming QUIC endpoint should start");
             let remote_address = SocketAddr::new(

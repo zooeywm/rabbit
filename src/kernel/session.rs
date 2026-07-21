@@ -67,10 +67,20 @@ where
     video_streams: HashMap<ScreenId, RtpVideoStream>,
 }
 
-#[derive(Default)]
 struct RtpVideoStream {
     next_sequence: Option<u16>,
     frame: Option<RtpFrameAssembly>,
+    waiting_for_keyframe: bool,
+}
+
+impl Default for RtpVideoStream {
+    fn default() -> Self {
+        Self {
+            next_sequence: None,
+            frame: None,
+            waiting_for_keyframe: true,
+        }
+    }
 }
 
 struct RtpFrameAssembly {
@@ -78,12 +88,14 @@ struct RtpFrameAssembly {
     packets: Vec<bytes::Bytes>,
     payload_size: usize,
     valid: bool,
+    keyframe: bool,
 }
 
 struct RtpPacketMetadata {
     sequence: u16,
     timestamp: u32,
     marker: bool,
+    keyframe: bool,
 }
 
 const RTP_FIXED_HEADER_SIZE: usize = 12;
@@ -152,12 +164,13 @@ where
         self.send.close()
     }
 
-    pub fn send_video(&self, message: VideoMessage) -> eros::Result<()> {
+    pub async fn send_video(&self, message: VideoMessage) -> eros::Result<()> {
         require_role(self.role, SessionRole::Host, "send video")?;
         let screen_id = message.screen_id;
 
         self.send
             .send_unreliable(TransportChannel::Video(screen_id), message.payload)
+            .await
             .with_context(|| format!("Failed to send video packet for screen {}", screen_id.0))
     }
 
@@ -263,17 +276,18 @@ fn assemble_video_frame(
         .next_sequence
         .is_none_or(|expected| metadata.sequence == expected);
     stream.next_sequence = Some(metadata.sequence.wrapping_add(1));
-
-    if stream
+    let starts_new_frame = stream
         .frame
         .as_ref()
-        .is_none_or(|frame| frame.timestamp != metadata.timestamp)
-    {
+        .is_none_or(|frame| frame.timestamp != metadata.timestamp);
+
+    if starts_new_frame {
         stream.frame = Some(RtpFrameAssembly {
             timestamp: metadata.timestamp,
             packets: Vec::new(),
             payload_size: 0,
-            valid: sequence_is_contiguous,
+            valid: sequence_is_contiguous || metadata.keyframe,
+            keyframe: metadata.keyframe,
         });
     }
     let frame = stream
@@ -282,8 +296,12 @@ fn assemble_video_frame(
         .with_context(|| format!("RTP frame for screen {} is missing", screen_id.0))?;
 
     if !sequence_is_contiguous {
-        frame.valid = false;
+        stream.waiting_for_keyframe = true;
+        if !starts_new_frame || !metadata.keyframe {
+            frame.valid = false;
+        }
     }
+    frame.keyframe |= metadata.keyframe;
     frame.payload_size = frame
         .payload_size
         .checked_add(packet_size)
@@ -307,6 +325,12 @@ fn assemble_video_frame(
         .with_context(|| format!("Completed RTP frame for screen {} is missing", screen_id.0))?;
     if !frame.valid {
         return Ok(None);
+    }
+    if stream.waiting_for_keyframe {
+        if !frame.keyframe {
+            return Ok(None);
+        }
+        stream.waiting_for_keyframe = false;
     }
 
     Ok(Some(ReceivedVideoFrame {
@@ -332,7 +356,39 @@ fn decode_rtp_metadata(packet: &bytes::Bytes) -> eros::Result<RtpPacketMetadata>
         sequence: u16::from_be_bytes([packet[2], packet[3]]),
         timestamp: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
         marker: packet[1] & 0x80 != 0,
+        keyframe: h264_rtp_payload_contains_idr(&packet[RTP_FIXED_HEADER_SIZE..]),
     })
+}
+
+fn h264_rtp_payload_contains_idr(payload: &[u8]) -> bool {
+    let Some(&nal_header) = payload.first() else {
+        return false;
+    };
+
+    match nal_header & 0x1f {
+        5 => true,
+        24 => stap_a_contains_idr(&payload[1..]),
+        28 => payload
+            .get(1)
+            .is_some_and(|fu_header| fu_header & 0x80 != 0 && fu_header & 0x1f == 5),
+        _ => false,
+    }
+}
+
+fn stap_a_contains_idr(mut payload: &[u8]) -> bool {
+    while payload.len() >= 2 {
+        let nal_size = usize::from(u16::from_be_bytes([payload[0], payload[1]]));
+        payload = &payload[2..];
+        let Some(nal) = payload.get(..nal_size) else {
+            return false;
+        };
+        if nal.first().is_some_and(|header| header & 0x1f == 5) {
+            return true;
+        }
+        payload = &payload[nal_size..];
+    }
+
+    false
 }
 
 fn require_role(role: SessionRole, expected: SessionRole, operation: &str) -> eros::Result<()> {
@@ -393,7 +449,13 @@ mod tests {
         packet[1] = u8::from(marker) << 7;
         packet[2..4].copy_from_slice(&sequence.to_be_bytes());
         packet[4..8].copy_from_slice(&timestamp.to_be_bytes());
-        packet[12] = sequence as u8;
+        packet[12] = 5;
+        Bytes::from(packet)
+    }
+
+    fn rtp_delta_packet(sequence: u16, timestamp: u32, marker: bool) -> Bytes {
+        let mut packet = rtp_packet(sequence, timestamp, marker).to_vec();
+        packet[12] = 1;
         Bytes::from(packet)
     }
 
@@ -450,9 +512,36 @@ mod tests {
                 .is_some()
         );
         assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_packet(10, 12, true))
+            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(10, 12, true))
                 .expect("Frame with a missing first packet should be discarded")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn waits_for_a_complete_idr_after_an_rtp_sequence_gap() {
+        let screen_id = ScreenId(6);
+        let mut streams = HashMap::new();
+
+        assert!(
+            assemble_video_frame(&mut streams, screen_id, rtp_packet(1, 1, true))
+                .expect("Initial IDR should be accepted")
+                .is_some()
+        );
+        assert!(
+            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
+                .expect("Sequence gap should be handled")
+                .is_none()
+        );
+        assert!(
+            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(4, 3, true))
+                .expect("Dependent frame should be discarded while waiting for IDR")
+                .is_none()
+        );
+        assert!(
+            assemble_video_frame(&mut streams, screen_id, rtp_packet(5, 4, true))
+                .expect("Complete IDR should restore the stream")
+                .is_some()
         );
     }
 
@@ -493,13 +582,17 @@ mod tests {
             Some(1173)
         }
 
-        fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
+        fn send_unreliable(
+            &self,
+            channel: TransportChannel,
+            payload: Bytes,
+        ) -> impl Future<Output = eros::Result<()>> {
             self.messages.borrow_mut().push(TransportMessage {
                 channel,
                 delivery: Delivery::Unreliable,
                 payload,
             });
-            Ok(())
+            ready(Ok(()))
         }
 
         fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
@@ -575,11 +668,12 @@ mod tests {
             },
         };
         let packet = Bytes::from_static(b"standard RTP packet");
-        session
-            .send_video(VideoMessage {
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+        runtime
+            .block_on(session.send_video(VideoMessage {
                 screen_id: ScreenId(3),
                 payload: packet,
-            })
+            }))
             .expect("Host should send one video packet");
 
         assert_eq!(session.max_video_packet_size(), Some(1173));

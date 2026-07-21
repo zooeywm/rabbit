@@ -20,6 +20,7 @@ use crate::infra::platform::{
     video_encoder::gstreamer::probe::GStreamerVideoProbe,
     video_probe::VideoFrameProbe,
 };
+use crate::kernel::geometry::FrameRate;
 
 struct DmaBufLeaseOwner {
     _lease: DmaBufLease,
@@ -47,6 +48,7 @@ struct DmaBufInputSignature {
     size: crate::kernel::geometry::PixelSize,
     format: DrmFourcc,
     modifier: DrmModifier,
+    frame_rate: FrameRate,
 }
 
 impl TryFrom<&gstreamer::CapsRef> for DmaBufInputSignature {
@@ -67,6 +69,13 @@ impl TryFrom<&gstreamer::CapsRef> for DmaBufInputSignature {
             .with_context(|| "GStreamer DMA-BUF input caps do not contain a DRM format")?;
         let (fourcc, modifier) = gstreamer_video::dma_drm_fourcc_from_str(drm_format)
             .with_context(|| "Failed to parse GStreamer DMA-BUF input DRM format")?;
+        let frame_rate = structure
+            .get::<gstreamer::Fraction>("framerate")
+            .with_context(|| "GStreamer DMA-BUF input caps do not contain a fixed frame rate")?;
+        let numerator = u32::try_from(frame_rate.numer())
+            .with_context(|| "GStreamer DMA-BUF input frame-rate numerator is not positive")?;
+        let denominator = u32::try_from(frame_rate.denom())
+            .with_context(|| "GStreamer DMA-BUF input frame-rate denominator is not positive")?;
 
         Ok(Self {
             size: crate::kernel::geometry::PixelSize {
@@ -78,6 +87,8 @@ impl TryFrom<&gstreamer::CapsRef> for DmaBufInputSignature {
             format: DrmFourcc::try_from(fourcc)
                 .with_context(|| "GStreamer DMA-BUF input fourcc is unknown")?,
             modifier: DrmModifier::from(modifier),
+            frame_rate: FrameRate::new(numerator, denominator)
+                .with_context(|| "GStreamer DMA-BUF input frame rate is invalid")?,
         })
     }
 }
@@ -132,6 +143,7 @@ impl GStreamerVideoFrame {
             size: frame.size,
             format: frame.format,
             modifier,
+            frame_rate: source.frame_rate,
         };
         if let Some((_, expected_signature)) = expected
             && input_signature != expected_signature
@@ -191,7 +203,7 @@ impl GStreamerVideoFrame {
 
         let input_caps = match expected {
             Some((caps, _)) => caps.to_owned(),
-            None => dmabuf_caps(frame, modifier)?,
+            None => dmabuf_caps(frame, modifier, Some(source.frame_rate))?,
         };
         let allocator = gstreamer_allocators::DmaBufAllocator::new();
         let mut buffer = gstreamer::Buffer::new();
@@ -279,7 +291,11 @@ fn validate_dmabuf_buffer(buffer: &gstreamer::BufferRef) -> eros::Result<()> {
     Ok(())
 }
 
-fn dmabuf_caps(frame: &DmaBufFrame, modifier: DrmModifier) -> eros::Result<gstreamer::Caps> {
+fn dmabuf_caps(
+    frame: &DmaBufFrame,
+    modifier: DrmModifier,
+    frame_rate: Option<FrameRate>,
+) -> eros::Result<gstreamer::Caps> {
     let width = i32::try_from(frame.size.width)
         .with_context(|| "GStreamer NV12 frame width exceeds i32")?;
     let height = i32::try_from(frame.size.height)
@@ -294,13 +310,23 @@ fn dmabuf_caps(frame: &DmaBufFrame, modifier: DrmModifier) -> eros::Result<gstre
         gstreamer_video::dma_drm_fourcc_to_string(frame.format as u32, modifier.into()).to_string()
     };
 
+    let frame_rate = match frame_rate {
+        Some(frame_rate) => gstreamer::Fraction::new(
+            i32::try_from(frame_rate.numerator())
+                .with_context(|| "GStreamer frame-rate numerator exceeds i32")?,
+            i32::try_from(frame_rate.denominator())
+                .with_context(|| "GStreamer frame-rate denominator exceeds i32")?,
+        ),
+        None => gstreamer::Fraction::new(0, 1),
+    };
+
     Ok(gstreamer::Caps::builder("video/x-raw")
         .features(["memory:DMABuf"])
         .field("format", "DMA_DRM")
         .field("drm-format", drm_format)
         .field("width", width)
         .field("height", height)
-        .field("framerate", gstreamer::Fraction::new(0, 1))
+        .field("framerate", frame_rate)
         .field("interlace-mode", "progressive")
         .field("colorimetry", "bt709")
         .build())
@@ -315,7 +341,7 @@ pub(crate) fn hardware_h264_encoder_for(
         .first()
         .with_context(|| "NV12 DMA-BUF probe frame has no planes")?
         .modifier;
-    let caps = dmabuf_caps(frame, modifier)?;
+    let caps = dmabuf_caps(frame, modifier, None)?;
     let encoder_caps = match frame.format {
         DrmFourcc::Nv12 => caps,
         DrmFourcc::Xrgb8888 => {
@@ -474,7 +500,6 @@ impl From<GStreamerRtpPacket> for bytes::Bytes {
 pub(crate) struct GStreamerVideoEncoder {
     pipeline: gstreamer::Pipeline,
     source: gstreamer_app::AppSrc,
-    sink: gstreamer_app::AppSink,
     output: gstreamer_app::app_sink::AppSinkStream,
     terminal_messages: flume::Receiver<gstreamer::Message>,
     input_caps: gstreamer::Caps,
@@ -567,7 +592,17 @@ impl GStreamerVideoEncoder {
                     factory_name
                 )
             })?;
-        configure_low_latency_encoder(&element);
+        configure_low_latency_encoder(&element, input_signature.frame_rate);
+        tracing::info!(
+            target: "rabbit::video_encoder",
+            event = "video_encoder_selected",
+            factory = %factory_name,
+            frame_rate_numerator = input_signature.frame_rate.numerator(),
+            frame_rate_denominator = input_signature.frame_rate.denominator(),
+            bitrate_kbps = H264_BITRATE_KBPS,
+            cpb_size_kbits = H264_CPB_SIZE_KBITS,
+            "Selected low-latency hardware H.264 encoder"
+        );
         let source = create_required_element("appsrc", "video-input")?;
         let Ok(source) = source.downcast::<gstreamer_app::AppSrc>() else {
             eros::bail!("GStreamer appsrc factory returned an unexpected element type");
@@ -583,14 +618,17 @@ impl GStreamerVideoEncoder {
             let vpp = create_required_element("vapostproc", "video-postprocessor")?;
             let filter = create_required_element("capsfilter", "video-postprocessor-output")?;
             filter.set_property("caps", vpp_caps);
-            Some((vpp, filter))
+            let queue = create_pipeline_stage_queue("processed-frame-queue")?;
+            Some((vpp, filter, queue))
         } else {
             None
         };
 
         let parser = create_required_element("h264parse", "h264-parser")?;
+        let encoded_output_queue = create_pipeline_stage_queue("encoded-output-queue")?;
         let payloader = create_required_element("rtph264pay", "rtp-payloader")?;
         payloader.set_property("mtu", rtp_mtu);
+        payloader.set_property("config-interval", -1_i32);
         let sink = create_required_element("appsink", "rtp-output")?;
         let Ok(sink) = sink.downcast::<gstreamer_app::AppSink>() else {
             eros::bail!("GStreamer appsink factory returned an unexpected element type");
@@ -604,6 +642,7 @@ impl GStreamerVideoEncoder {
         let base_elements = [
             source.upcast_ref(),
             &element,
+            &encoded_output_queue,
             &parser,
             &payloader,
             sink.upcast_ref(),
@@ -611,15 +650,17 @@ impl GStreamerVideoEncoder {
         pipeline
             .add_many(base_elements)
             .with_context(|| "Failed to add H.264 encoding elements to GStreamer pipeline")?;
-        if let Some((vpp, filter)) = &vpp {
+        if let Some((vpp, filter, queue)) = &vpp {
             pipeline
-                .add_many([vpp, filter])
+                .add_many([vpp, filter, queue])
                 .with_context(|| "Failed to add VAAPI VPP elements to GStreamer pipeline")?;
             gstreamer::Element::link_many([
                 source.upcast_ref(),
                 vpp,
                 filter,
+                queue,
                 &element,
+                &encoded_output_queue,
                 &parser,
                 &payloader,
                 sink.upcast_ref(),
@@ -632,7 +673,7 @@ impl GStreamerVideoEncoder {
         let probe = if enable_probing {
             Some(GStreamerVideoProbe::new(
                 &source,
-                vpp.as_ref().map(|(vpp, _)| vpp),
+                vpp.as_ref().map(|(vpp, _, _)| vpp),
                 &element,
             )?)
         } else {
@@ -643,7 +684,6 @@ impl GStreamerVideoEncoder {
         Ok(Self {
             pipeline,
             source,
-            sink,
             output,
             terminal_messages,
             input_caps,
@@ -748,24 +788,6 @@ impl GStreamerVideoEncoder {
         }
 
         Ok(packet)
-    }
-
-    async fn send_packet_burst<SendPacket, SendFuture>(
-        &mut self,
-        first: GStreamerRtpPacket,
-        send_packet: &mut SendPacket,
-    ) -> eros::Result<()>
-    where
-        SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
-        SendFuture: Future<Output = eros::Result<()>>,
-    {
-        send_packet(first).await?;
-
-        while let Some(sample) = self.sink.try_pull_sample(gstreamer::ClockTime::ZERO) {
-            send_packet(self.packet_from_sample(sample)?).await?;
-        }
-
-        Ok(())
     }
 
     #[cfg(test)]
@@ -874,7 +896,7 @@ impl GStreamerVideoEncoder {
                 let Some(packet) = self.receive_packet().await? else {
                     return Ok(());
                 };
-                self.send_packet_burst(packet, send_packet).await?;
+                send_packet(packet).await?;
                 continue;
             }
 
@@ -901,7 +923,7 @@ impl GStreamerVideoEncoder {
                     input_open = false;
                 }
                 Event::Packet(packet) => match packet? {
-                    Some(packet) => self.send_packet_burst(packet, send_packet).await?,
+                    Some(packet) => send_packet(packet).await?,
                     None => return Ok(()),
                 },
             }
@@ -998,6 +1020,15 @@ fn create_required_element(factory: &str, name: &str) -> eros::Result<gstreamer:
         .with_context(|| format!("Failed to create required GStreamer element {factory}"))?)
 }
 
+fn create_pipeline_stage_queue(name: &str) -> eros::Result<gstreamer::Element> {
+    let queue = create_required_element("queue", name)?;
+    queue.set_property("max-size-buffers", 2_u32);
+    queue.set_property("max-size-bytes", 0_u32);
+    queue.set_property("max-size-time", 0_u64);
+
+    Ok(queue)
+}
+
 fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gstreamer::Caps> {
     let structure = input
         .structure(0)
@@ -1021,7 +1052,10 @@ fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gstreamer::Cap
         .build())
 }
 
-fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
+const H264_BITRATE_KBPS: u32 = 50_000;
+const H264_CPB_SIZE_KBITS: u32 = 5_000;
+
+fn configure_low_latency_encoder(encoder: &gstreamer::Element, frame_rate: FrameRate) {
     let is_vaapi = encoder
         .factory()
         .is_some_and(|factory| factory.name().starts_with("va"));
@@ -1032,7 +1066,16 @@ fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
     encoder.set_property("b-frames", 0_u32);
     encoder.set_property("ref-frames", 1_u32);
     encoder.set_property("target-usage", 7_u32);
-    encoder.set_property_from_str("rate-control", "cqp");
+    encoder.set_property_from_str("rate-control", "cbr");
+    encoder.set_property("bitrate", H264_BITRATE_KBPS);
+    encoder.set_property("cpb-size", H264_CPB_SIZE_KBITS);
+    encoder.set_property(
+        "key-int-max",
+        frame_rate
+            .numerator()
+            .div_ceil(frame_rate.denominator())
+            .clamp(1, 1_024),
+    );
 }
 
 fn h264_rtp_caps() -> gstreamer::Caps {
@@ -1072,8 +1115,7 @@ mod tests {
     use drm::buffer::{DrmFourcc, DrmModifier};
     use gstreamer::glib::prelude::{Cast as _, ObjectExt as _};
     use gstreamer::prelude::{
-        ElementExt as _, GObjectExtManualGst as _, GstBinExt as _, GstBinExtManual as _,
-        PadExtManual as _,
+        ElementExt as _, GstBinExt as _, GstBinExtManual as _, PadExtManual as _,
     };
     use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
     use tracing_subscriber::{
@@ -1094,14 +1136,14 @@ mod tests {
                 screen_capture::{KmsCaptureLease, KmsFrameReceiver},
                 video_encoder::gstreamer::{
                     GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
-                    create_required_element, h264_rtp_caps, va_vpp_input_modifier,
-                    validate_dmabuf_buffer,
+                    configure_low_latency_encoder, create_required_element, h264_rtp_caps,
+                    va_vpp_input_modifier, validate_dmabuf_buffer,
                 },
             },
         },
         kernel::{
             frame_pipeline::{FramePipelineManager, FramePipelineParameters},
-            geometry::PixelSize,
+            geometry::{FrameRate, PixelSize},
             screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
             screen_manager::{
                 Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
@@ -1351,7 +1393,11 @@ mod tests {
         );
         assert_eq!(
             encoder
-                .sink
+                .pipeline
+                .by_name("rtp-output")
+                .expect("The encoding pipeline should retain its RTP appsink")
+                .downcast::<gstreamer_app::AppSink>()
+                .expect("The RTP output element should remain an appsink")
                 .caps()
                 .expect("The pipeline appsink should retain its output caps"),
             h264_rtp_caps()
@@ -1368,6 +1414,7 @@ mod tests {
         for name in [
             "video-input",
             "h264-encoder",
+            "encoded-output-queue",
             "h264-parser",
             "rtp-payloader",
             "rtp-output",
@@ -1377,6 +1424,13 @@ mod tests {
                 .by_name(name)
                 .expect("The encoding pipeline should contain every required element");
         }
+        let encoded_output_queue = encoder
+            .pipeline
+            .by_name("encoded-output-queue")
+            .expect("The encoding pipeline should contain its encoded-output queue");
+        assert_eq!(encoded_output_queue.property::<u32>("max-size-buffers"), 2);
+        assert_eq!(encoded_output_queue.property::<u32>("max-size-bytes"), 0);
+        assert_eq!(encoded_output_queue.property::<u64>("max-size-time"), 0);
     }
 
     #[test]
@@ -1797,17 +1851,17 @@ mod tests {
                 "height",
                 i32::try_from(frame.size.height).expect("Test height should fit i32"),
             )
-            .field("framerate", gstreamer::Fraction::new(0, 1))
+            .field("framerate", gstreamer::Fraction::new(120, 1))
             .build();
         let filter = create_required_element("capsfilter", "vaapi-test-output-caps")
             .expect("GStreamer capsfilter should be available");
         filter.set_property("caps", &output_caps);
         let encoder = create_required_element("vah264enc", "vaapi-test-encoder")
             .expect("GStreamer VAAPI H.264 encoder should be available");
-        encoder.set_property("b-frames", 0_u32);
-        encoder.set_property("ref-frames", 1_u32);
-        encoder.set_property("target-usage", 7_u32);
-        encoder.set_property_from_str("rate-control", "cqp");
+        configure_low_latency_encoder(
+            &encoder,
+            FrameRate::new(120, 1).expect("Test frame rate should be valid"),
+        );
         let sink = create_required_element("appsink", "vaapi-test-output")
             .expect("GStreamer appsink should be available")
             .downcast::<gstreamer_app::AppSink>()
@@ -1870,7 +1924,7 @@ mod tests {
                 "height",
                 i32::try_from(frame.size.height).expect("Test height should fit i32"),
             )
-            .field("framerate", gstreamer::Fraction::new(0, 1))
+            .field("framerate", gstreamer::Fraction::new(120, 1))
             .build()
     }
 
@@ -1910,7 +1964,7 @@ mod tests {
     }
 
     fn registered_nv12_dmabuf_input_caps() -> gstreamer::Caps {
-        GStreamerVideoEncoder::find_hardware_h264_encoders()
+        let mut caps = GStreamerVideoEncoder::find_hardware_h264_encoders()
             .expect("At least one hardware H.264 encoder should be registered")
             .into_iter()
             .flat_map(|factory| factory.static_pad_templates())
@@ -1930,7 +1984,12 @@ mod tests {
                     })
                     .find(|caps| GStreamerVideoEncoder::is_nv12_dmabuf_input_caps(caps))
             })
-            .expect("A hardware H.264 encoder should advertise NV12 DMA-BUF input caps")
+            .expect("A hardware H.264 encoder should advertise NV12 DMA-BUF input caps");
+        caps.make_mut()
+            .structure_mut(0)
+            .expect("Test encoder caps should contain one structure")
+            .set("framerate", gstreamer::Fraction::new(120, 1));
+        caps
     }
 
     fn init_host_video_tracing() {
@@ -2066,6 +2125,7 @@ mod tests {
                 readiness_fence: None,
                 lease,
             },
+            frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
             probe: None,
         })
     }

@@ -20,7 +20,7 @@ enum VideoViewCommand {
     Present {
         session_id: SessionId,
         screen_id: ScreenId,
-        frame: GStreamerDecodedFrame,
+        frame: Box<GStreamerDecodedFrame>,
     },
     Clear,
 }
@@ -143,7 +143,7 @@ impl VideoViewPublisher {
         self.publish(VideoViewCommand::Present {
             session_id,
             screen_id,
-            frame,
+            frame: Box::new(frame),
         })
     }
 
@@ -208,7 +208,7 @@ fn render_video_frame(
                     "Slint requested video rendering before the OpenGL renderer was ready",
                 )?;
                 *active_stream = Some((session_id, screen_id));
-                renderer.present(frame);
+                renderer.present(*frame);
                 presented = Some((session_id, screen_id));
             }
             VideoViewCommand::Clear => {

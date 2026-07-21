@@ -272,7 +272,7 @@ impl GStreamerVideoDecoder {
     {
         enum Event {
             Input(Option<eros::Result<ReceivedVideoFrame>>),
-            Frame(eros::Result<Option<GStreamerDecodedFrame>>),
+            Frame(Box<eros::Result<Option<GStreamerDecodedFrame>>>),
         }
 
         let mut input_open = true;
@@ -286,13 +286,13 @@ impl GStreamerVideoDecoder {
             }
 
             let event = {
-                let input = poll_fn(|context| Pin::new(&mut *inputs).poll_next(context));
                 let frame = self.receive_frame();
-                futures_util::pin_mut!(input, frame);
+                let input = poll_fn(|context| Pin::new(&mut *inputs).poll_next(context));
+                futures_util::pin_mut!(frame, input);
 
-                match select(input, frame).await {
-                    Either::Left((input, _)) => Event::Input(input),
-                    Either::Right((frame, _)) => Event::Frame(frame),
+                match select(frame, input).await {
+                    Either::Left((frame, _)) => Event::Frame(Box::new(frame)),
+                    Either::Right((input, _)) => Event::Input(input),
                 }
             };
 
@@ -304,9 +304,11 @@ impl GStreamerVideoDecoder {
                     self.finish()?;
                     input_open = false;
                 }
-                Event::Frame(Ok(Some(frame))) => present_frame(frame).await?,
-                Event::Frame(Ok(None)) => return Ok(()),
-                Event::Frame(Err(error)) => return Err(error),
+                Event::Frame(frame) => match *frame {
+                    Ok(Some(frame)) => present_frame(frame).await?,
+                    Ok(None) => return Ok(()),
+                    Err(error) => return Err(error),
+                },
             }
         }
     }

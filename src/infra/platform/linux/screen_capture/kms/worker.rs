@@ -15,13 +15,14 @@ use crate::{
         screen_capture::kms::{capture::KmsCapturer, types::KmsPlaneIssue},
         video_probe::{VideoFrameProbe, VideoProbeClock},
     },
-    kernel::screen_capture::ScreenCaptureSource,
+    kernel::{geometry::FrameRate, screen_capture::ScreenCaptureSource},
 };
 
 #[derive(Debug)]
 pub(crate) struct KmsCapturedFrame {
     pub(crate) buffer: DmaBufFrame,
     pub(crate) issues: Vec<KmsPlaneIssue>,
+    pub(crate) frame_rate: FrameRate,
     pub(crate) probe: Option<VideoFrameProbe>,
 }
 
@@ -37,6 +38,7 @@ pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCa
             lease: None,
         },
         issues: Vec::new(),
+        frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
         probe: None,
     }
 }
@@ -187,6 +189,7 @@ fn run_capture_loop(
                 Ok((Some(frame), timing)) => Ok(Some(KmsCapturedFrame {
                     buffer: frame.buffer,
                     issues: frame.issues,
+                    frame_rate: frame.frame_rate,
                     probe: Some(clock.frame(timing)),
                 })),
                 Ok((None, _)) => Ok(None),
@@ -197,6 +200,7 @@ fn run_capture_loop(
                 frame.map(|frame| KmsCapturedFrame {
                     buffer: frame.buffer,
                     issues: frame.issues,
+                    frame_rate: frame.frame_rate,
                     probe: None,
                 })
             })
