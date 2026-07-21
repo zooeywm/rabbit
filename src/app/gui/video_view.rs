@@ -277,13 +277,16 @@ mod tests {
         kernel::{
             screen_manager::ScreenId,
             session::{ReceivedVideoFrame, SessionId},
-            video_decoder::VideoDecoder,
         },
     };
 
     #[test]
     #[ignore = "run through scripts/test-client-video"]
     fn renders_hardware_decoded_dma_bufs_through_the_slint_bridge() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_test_writer()
+            .try_init();
         let seconds = std::env::var("RABBIT_CLIENT_VIDEO_TEST_SECONDS")
             .expect("RABBIT_CLIENT_VIDEO_TEST_SECONDS should specify the run duration")
             .parse::<u32>()
@@ -389,10 +392,14 @@ mod tests {
         };
         let decoded_frames = Rc::new(Cell::new(0_usize));
         let callback_frames = Rc::clone(&decoded_frames);
-        let result = GStreamerVideoDecoder::run(inputs, move |frame| {
-            callback_frames.set(callback_frames.get() + 1);
-            std::future::ready(publisher.present_video(SessionId(0), ScreenId(0), frame))
-        })
+        let result = GStreamerVideoDecoder::run_with_probing(
+            inputs,
+            move |frame| {
+                callback_frames.set(callback_frames.get() + 1);
+                std::future::ready(publisher.present_video(SessionId(0), ScreenId(0), frame))
+            },
+            true,
+        )
         .await;
         pipeline
             .set_state(gstreamer::State::Null)

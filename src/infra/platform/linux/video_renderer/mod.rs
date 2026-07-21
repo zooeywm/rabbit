@@ -13,6 +13,7 @@ use khronos_egl as egl;
 
 use crate::{
     infra::platform::{
+        client_video_probe::ClientVideoProbeReporter,
         egl_dma_buf::{
             DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
             DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, ITU_REC709_EXT, LINUX_DMA_BUF_EXT,
@@ -75,6 +76,7 @@ pub(crate) struct OpenGlVideoRenderer {
     viewport: Option<VideoViewport>,
     pending_frame: Option<GStreamerDecodedFrame>,
     current_frame: Option<ImportedFrame>,
+    probe_reporter: ClientVideoProbeReporter,
     thread_affinity: PhantomData<Rc<()>>,
 }
 
@@ -154,6 +156,7 @@ impl OpenGlVideoRenderer {
             viewport: None,
             pending_frame: None,
             current_frame: None,
+            probe_reporter: ClientVideoProbeReporter::default(),
             thread_affinity: PhantomData,
         })
     }
@@ -168,10 +171,13 @@ impl OpenGlVideoRenderer {
     }
 
     fn import_pending_frame(&mut self) -> eros::Result<()> {
-        let Some(frame) = self.pending_frame.take() else {
+        let Some(mut frame) = self.pending_frame.take() else {
             return Ok(());
         };
         self.release_current()?;
+        if let Some(probe) = &mut frame.probe {
+            probe.mark_dma_buf_import_started();
+        }
         let image = self.import_dma_buf(&frame)?;
         let texture = match self.create_external_texture(image) {
             Ok(texture) => texture,
@@ -186,6 +192,9 @@ impl OpenGlVideoRenderer {
                 };
             }
         };
+        if let Some(probe) = &mut frame.probe {
+            probe.mark_dma_buf_import_completed();
+        }
         self.current_frame = Some(ImportedFrame {
             frame,
             image,
@@ -331,7 +340,7 @@ impl OpenGlVideoRenderer {
         Ok(())
     }
 
-    fn draw_current(&self) -> eros::Result<()> {
+    fn draw_current(&mut self) -> eros::Result<()> {
         let (Some(viewport), Some(current)) = (self.viewport, &self.current_frame) else {
             return Ok(());
         };
@@ -351,6 +360,15 @@ impl OpenGlVideoRenderer {
             .with_context(|| "Video viewport lies outside the window framebuffer")?;
         let width = i32::try_from(fitted.width).with_context(|| "Video width exceeds i32")?;
         let height = i32::try_from(fitted.height).with_context(|| "Video height exceeds i32")?;
+        let texture = current.texture;
+
+        if let Some(probe) = self
+            .current_frame
+            .as_mut()
+            .and_then(|current| current.frame.probe.as_mut())
+        {
+            probe.mark_render_started();
+        }
 
         unsafe {
             self.gl.disable(glow::BLEND);
@@ -361,8 +379,7 @@ impl OpenGlVideoRenderer {
             self.gl.use_program(Some(self.program));
             self.gl.bind_vertex_array(Some(self.vertex_array));
             self.gl.active_texture(glow::TEXTURE0);
-            self.gl
-                .bind_texture(TEXTURE_EXTERNAL, Some(current.texture));
+            self.gl.bind_texture(TEXTURE_EXTERNAL, Some(texture));
             self.gl.uniform_1_i32(Some(&self.texture_uniform), 0);
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
@@ -370,6 +387,15 @@ impl OpenGlVideoRenderer {
         state.restore(&self.gl);
         if error != glow::NO_ERROR {
             eros::bail!("Failed to draw video DMA-BUF: GL error 0x{:04X}", error);
+        }
+
+        let Some(current) = self.current_frame.as_mut() else {
+            eros::bail!("Current video frame disappeared while rendering");
+        };
+        let screen_id = current.frame.screen_id;
+        if let Some(mut probe) = current.frame.probe.take() {
+            probe.mark_render_completed();
+            self.probe_reporter.record_frame(screen_id, probe);
         }
         Ok(())
     }
@@ -382,7 +408,10 @@ impl VideoRenderer for OpenGlVideoRenderer {
         self.viewport = Some(viewport);
     }
 
-    fn present(&mut self, frame: Self::Frame) {
+    fn present(&mut self, mut frame: Self::Frame) {
+        if let Some(probe) = &mut frame.probe {
+            probe.mark_gui_received();
+        }
         self.pending_frame = Some(frame);
     }
 
@@ -393,7 +422,9 @@ impl VideoRenderer for OpenGlVideoRenderer {
 
     fn clear(&mut self) -> eros::Result<()> {
         self.pending_frame = None;
-        self.release_current()
+        let release = self.release_current();
+        self.probe_reporter.finish();
+        release
     }
 }
 

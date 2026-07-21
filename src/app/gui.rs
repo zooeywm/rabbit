@@ -40,7 +40,6 @@ use crate::{
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole, SessionSend},
         session_control::{ControlMessage, OutgoingScreenList},
         transport::TransportRecv,
-        video_decoder::VideoDecoder,
     },
 };
 
@@ -237,11 +236,14 @@ impl RootApplication {
         let stale = receiver.clone();
         let view = self.view.clone();
         let finished = sender.clone();
+        let enable_probing = self.model.app.config.video.enable_probing;
         let inputs = receiver.into_stream().map(Ok);
         let task = compio::runtime::spawn(async move {
-            let result = GStreamerVideoDecoder::run(inputs, move |frame| {
-                std::future::ready(view.present_video(session_id, screen_id, frame))
-            })
+            let result = GStreamerVideoDecoder::run_with_probing(
+                inputs,
+                move |frame| std::future::ready(view.present_video(session_id, screen_id, frame)),
+                enable_probing,
+            )
             .await;
             finished.post(RootMessage::VideoDecoderFinished(
                 session_id, screen_id, result,

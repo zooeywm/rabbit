@@ -314,6 +314,7 @@ impl GStreamerVideoDecoder {
     async fn run_inner<Inputs, PresentFrame, PresentFuture>(
         mut inputs: Inputs,
         mut present_frame: PresentFrame,
+        enable_probing: bool,
     ) -> eros::Result<()>
     where
         Inputs: futures_core::Stream<Item = eros::Result<ReceivedVideoFrame>> + Unpin,
@@ -324,7 +325,7 @@ impl GStreamerVideoDecoder {
         else {
             return Ok(());
         };
-        let mut decoder = Self::create(false)?;
+        let mut decoder = Self::create(enable_probing)?;
         decoder.start()?;
         let result = match first_input {
             Ok(first_input) => {
@@ -402,7 +403,22 @@ impl VideoDecoder for GStreamerVideoDecoder {
         PresentFrame: FnMut(Self::Frame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        Self::run_inner(inputs, present_frame)
+        Self::run_inner(inputs, present_frame, false)
+    }
+}
+
+impl GStreamerVideoDecoder {
+    pub(crate) fn run_with_probing<Inputs, PresentFrame, PresentFuture>(
+        inputs: Inputs,
+        present_frame: PresentFrame,
+        enable_probing: bool,
+    ) -> impl Future<Output = eros::Result<()>>
+    where
+        Inputs: futures_core::Stream<Item = eros::Result<ReceivedVideoFrame>> + Unpin,
+        PresentFrame: FnMut(GStreamerDecodedFrame) -> PresentFuture,
+        PresentFuture: Future<Output = eros::Result<()>>,
+    {
+        Self::run_inner(inputs, present_frame, enable_probing)
     }
 }
 
