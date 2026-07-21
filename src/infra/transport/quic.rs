@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::infra::unsync_queue::UnsyncQueue;
 use crate::kernel::transport::{
     Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
@@ -7,11 +9,13 @@ use eros::Context;
 use thin_cell::unsync::ThinCell;
 
 const TLV_HEADER_SIZE: usize = size_of::<u8>() + size_of::<u16>();
+const MAX_DATAGRAM_BATCH_SIZE: usize = 256;
 
 type ReceiveResult = eros::Result<Option<TransportMessage>>;
+type ReceiveBatchResult = eros::Result<Option<VecDeque<TransportMessage>>>;
 
 struct ReceiveItem {
-    result: ReceiveResult,
+    result: ReceiveBatchResult,
     consumed: UnsyncQueue<()>,
 }
 
@@ -30,6 +34,7 @@ pub(crate) struct QuicTransportSend {
 
 pub(crate) struct QuicTransportRecv {
     messages: UnsyncQueue<ReceiveItem>,
+    pending: VecDeque<TransportMessage>,
     _tasks: [compio::runtime::JoinHandle<()>; 3],
 }
 
@@ -131,6 +136,7 @@ impl Transport for QuicTransport {
         };
         let recv = QuicTransportRecv {
             messages: messages.clone(),
+            pending: VecDeque::new(),
             _tasks: [
                 compio::runtime::spawn(receive_reliable_ordered(
                     ReliableStreamReader::from(self.control_recv),
@@ -150,7 +156,7 @@ impl Transport for QuicTransport {
 
 impl TransportRecv for QuicTransportRecv {
     fn recv(&mut self) -> impl Future<Output = eros::Result<Option<TransportMessage>>> {
-        receive_next_message(&self.messages)
+        receive_next_message(&mut self.pending, &self.messages)
     }
 }
 
@@ -181,11 +187,24 @@ impl TransportSend for QuicTransportSend {
 }
 
 async fn receive_next_message(
+    pending: &mut VecDeque<TransportMessage>,
     messages: &UnsyncQueue<ReceiveItem>,
 ) -> eros::Result<Option<TransportMessage>> {
+    if let Some(message) = pending.pop_front() {
+        return Ok(Some(message));
+    }
+
     let item = messages.pop().await;
     item.consumed.push(());
-    item.result
+    let Some(mut received) = item.result? else {
+        return Ok(None);
+    };
+    let message = received
+        .pop_front()
+        .with_context(|| "QUIC receive task published an empty message batch")?;
+    pending.append(&mut received);
+
+    Ok(Some(message))
 }
 
 async fn close_connection(connection: &compio::quic::Connection) {
@@ -340,7 +359,7 @@ async fn receive_reliable_ordered(
         let message = recv_reliable_ordered(&mut reader).await;
         let finished = !matches!(&message, Ok(Some(_)));
 
-        publish_received(&messages, &consumed, message).await;
+        publish_received(&messages, &consumed, single_message_batch(message)).await;
 
         if finished {
             return;
@@ -367,7 +386,7 @@ async fn receive_reliable_unordered(
         let message = recv_reliable_unordered(&connection).await;
         let finished = !matches!(&message, Ok(Some(_)));
 
-        publish_received(&messages, &consumed, message).await;
+        publish_received(&messages, &consumed, single_message_batch(message)).await;
 
         if finished {
             return;
@@ -382,10 +401,10 @@ async fn receive_unreliable(
     let consumed = UnsyncQueue::default();
 
     loop {
-        let message = recv_unreliable(&connection).await;
-        let finished = !matches!(&message, Ok(Some(_)));
+        let batch = recv_unreliable_batch(&connection).await;
+        let finished = !matches!(&batch, Ok(Some(_)));
 
-        publish_received(&messages, &consumed, message).await;
+        publish_received(&messages, &consumed, batch).await;
 
         if finished {
             return;
@@ -393,10 +412,14 @@ async fn receive_unreliable(
     }
 }
 
+fn single_message_batch(result: ReceiveResult) -> ReceiveBatchResult {
+    result.map(|message| message.map(|message| VecDeque::from([message])))
+}
+
 async fn publish_received(
     messages: &UnsyncQueue<ReceiveItem>,
     consumed: &UnsyncQueue<()>,
-    result: ReceiveResult,
+    result: ReceiveBatchResult,
 ) {
     messages.push(ReceiveItem {
         result,
@@ -405,17 +428,33 @@ async fn publish_received(
     consumed.pop().await;
 }
 
-async fn recv_unreliable(connection: &compio::quic::Connection) -> ReceiveResult {
+async fn recv_unreliable_batch(connection: &compio::quic::Connection) -> ReceiveBatchResult {
     let datagram = connection.recv_datagram().await;
     if datagram.as_ref().is_err_and(is_normal_connection_close) {
         return Ok(None);
     }
     let datagram = datagram.with_context(|| "Failed to receive QUIC datagram")?;
+    let mut batch = VecDeque::with_capacity(MAX_DATAGRAM_BATCH_SIZE);
+    batch.push_back(decode_unreliable_datagram(datagram)?);
 
-    Ok(Some(
-        decode_tlv(datagram, Delivery::Unreliable)
-            .with_context(|| "Failed to decode QUIC datagram")?,
-    ))
+    while batch.len() < MAX_DATAGRAM_BATCH_SIZE {
+        let datagram = match connection.try_recv_datagram() {
+            Ok(Some(datagram)) => datagram,
+            Ok(None) => break,
+            Err(error) if is_normal_connection_close(&error) => break,
+            Err(error) => {
+                return Ok(Err(error).with_context(|| "Failed to drain queued QUIC datagrams")?);
+            }
+        };
+        batch.push_back(decode_unreliable_datagram(datagram)?);
+    }
+
+    Ok(Some(batch))
+}
+
+fn decode_unreliable_datagram(datagram: Bytes) -> eros::Result<TransportMessage> {
+    Ok(decode_tlv(datagram, Delivery::Unreliable)
+        .with_context(|| "Failed to decode QUIC datagram")?)
 }
 
 async fn recv_reliable_unordered(connection: &compio::quic::Connection) -> ReceiveResult {
@@ -576,14 +615,21 @@ fn max_tlv_payload_size(max_datagram_size: Option<usize>) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+    use std::{
+        collections::VecDeque,
+        net::{IpAddr, Ipv6Addr, SocketAddr},
+    };
 
     use bytes::Bytes;
 
     use crate::{
         infra::{
             QuicEndpoint,
-            transport::quic::{QuicTransport, is_normal_close_reason, max_tlv_payload_size},
+            transport::quic::{
+                QuicTransport, ReceiveItem, is_normal_close_reason, max_tlv_payload_size,
+                receive_next_message,
+            },
+            unsync_queue::UnsyncQueue,
         },
         kernel::transport::{
             Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
@@ -616,6 +662,42 @@ mod tests {
             })
         )));
         assert!(!is_normal_close_reason(None));
+    }
+
+    #[test]
+    fn transfers_one_received_batch_without_per_packet_task_handoffs() {
+        let messages = UnsyncQueue::default();
+        let consumed = UnsyncQueue::default();
+        let first = TransportMessage {
+            channel: TransportChannel::Video(crate::kernel::screen_manager::ScreenId(2)),
+            delivery: Delivery::Unreliable,
+            payload: Bytes::from_static(b"first"),
+        };
+        let second = TransportMessage {
+            channel: TransportChannel::Video(crate::kernel::screen_manager::ScreenId(2)),
+            delivery: Delivery::Unreliable,
+            payload: Bytes::from_static(b"second"),
+        };
+        messages.push(ReceiveItem {
+            result: Ok(Some(VecDeque::from([first.clone(), second.clone()]))),
+            consumed: consumed.clone(),
+        });
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+        let mut pending = VecDeque::new();
+
+        assert_eq!(
+            runtime
+                .block_on(receive_next_message(&mut pending, &messages))
+                .expect("First batched message should be received"),
+            Some(first)
+        );
+        assert!(consumed.try_pop().is_some());
+        assert_eq!(
+            runtime
+                .block_on(receive_next_message(&mut pending, &messages))
+                .expect("Second batched message should be received"),
+            Some(second)
+        );
     }
 
     #[test]

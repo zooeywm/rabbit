@@ -8,11 +8,14 @@ use std::{
 
 use bytes::Bytes;
 use eros::Context;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tracing::{debug, info};
 
 const BASE_PORT: u16 = 52731;
 const LAST_PORT: u16 = BASE_PORT + 4;
 const SERVER_NAME: &str = "rabbit";
+const DATAGRAM_RECEIVE_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+const UDP_SOCKET_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 pub(crate) const SELF_CONNECTION_CLOSE_REASON: &[u8] = b"Self-connection is not allowed";
 
 pub(crate) enum QuicConnectOutcome {
@@ -40,6 +43,7 @@ impl QuicEndpoint {
     async fn new_with_bind_address(bind_address: Option<SocketAddr>) -> eros::Result<Self> {
         let mut transport_config = compio::quic::TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
+        transport_config.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUFFER_SIZE));
         let transport_config = Arc::new(transport_config);
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec!["rabbit".into()])
@@ -55,8 +59,7 @@ impl QuicEndpoint {
                 .build();
         server_config.transport_config(transport_config.clone());
         let endpoint = match bind_address {
-            Some(bind_address) => compio::quic::Endpoint::server(bind_address, server_config)
-                .await
+            Some(bind_address) => create_endpoint(bind_address, server_config)
                 .with_context(|| format!("Failed to bind test QUIC endpoint to {bind_address}"))?,
             None => bind_endpoint(server_config).await?,
         };
@@ -210,7 +213,7 @@ async fn bind_endpoint(
     for port in BASE_PORT..=LAST_PORT {
         let bind_address = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
 
-        match compio::quic::Endpoint::server(bind_address, server_config.clone()).await {
+        match create_endpoint(bind_address, server_config.clone()) {
             Ok(endpoint) => return Ok(endpoint),
             Err(error) if error.kind() == ErrorKind::AddrInUse => {}
             Err(error) => {
@@ -221,6 +224,43 @@ async fn bind_endpoint(
     }
 
     eros::bail!("QUIC ports {BASE_PORT} through {LAST_PORT} are already in use");
+}
+
+fn create_endpoint(
+    bind_address: SocketAddr,
+    server_config: compio::quic::ServerConfig,
+) -> std::io::Result<compio::quic::Endpoint> {
+    let domain = if bind_address.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if bind_address.is_ipv6() {
+        socket.set_only_v6(false)?;
+    }
+    socket.set_recv_buffer_size(UDP_SOCKET_BUFFER_SIZE)?;
+    socket.set_send_buffer_size(UDP_SOCKET_BUFFER_SIZE)?;
+    socket.bind(&SockAddr::from(bind_address))?;
+    let receive_buffer_size = socket.recv_buffer_size()?;
+    let send_buffer_size = socket.send_buffer_size()?;
+    let socket = compio::net::UdpSocket::from_std(socket.into())?;
+    let endpoint = compio::quic::Endpoint::new(
+        socket,
+        compio::quic::EndpointConfig::default(),
+        Some(server_config),
+        None,
+    )?;
+
+    info!(
+        event = "quic_udp_socket_configured",
+        %bind_address,
+        receive_buffer_size,
+        send_buffer_size,
+        "Configured QUIC UDP socket buffers"
+    );
+
+    Ok(endpoint)
 }
 
 #[cfg(test)]

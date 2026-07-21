@@ -835,7 +835,9 @@ checksum = "e5cf9e29d3c2d2a37078198795631b61d2b5c9cab68191e31526fe342d742135"
 dependencies = [
  "compio-buf",
  "compio-driver",
+ "compio-io",
  "compio-log",
+ "compio-net",
  "compio-quic",
  "compio-runtime",
  "compio-tls",
@@ -4361,6 +4363,7 @@ dependencies = [
  "rcgen",
  "serde",
  "slint",
+ "socket2",
  "thin-cell",
  "thiserror 2.0.18",
  "time",

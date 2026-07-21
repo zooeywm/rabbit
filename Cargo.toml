@@ -8,7 +8,7 @@ toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 directories = "6.0"
 eros = "0.7"
-compio = { version = "0.19", features = ["quic", "ring", "time"] }
+compio = { version = "0.19", features = ["net", "quic", "ring", "time"] }
 bytes = "1"
 binrw = "0.15"
 futures-core = "0.3"
@@ -23,6 +23,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 slint = { version = "1.17.1", default-features = false, features = ["accessibility", "backend-winit", "compat-1-2", "raw-window-handle-06", "renderer-femtovg", "std"] }
+socket2 = "0.6"
 
 # Linux screen layout and KMS capture backends.
 [target.'cfg(target_os = "linux")'.dependencies]
