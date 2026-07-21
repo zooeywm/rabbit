@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use gstreamer::prelude::{ElementExt as _, PadExtManual as _};
+
 use crate::kernel::screen_manager::ScreenId;
 
 const REPORT_WINDOW: Duration = Duration::from_secs(2);
@@ -7,6 +9,12 @@ const REPORT_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Debug, Default)]
 pub(crate) struct ClientVideoProbeClock {
     next_frame_id: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientVideoDecodeProbe {
+    clock: ClientVideoProbeClock,
+    submitted: flume::Sender<ClientVideoFrameProbe>,
 }
 
 #[derive(Debug)]
@@ -75,6 +83,78 @@ impl ClientVideoProbeClock {
     }
 }
 
+impl ClientVideoDecodeProbe {
+    pub(crate) fn new(
+        decoder: &gstreamer::Element,
+    ) -> eros::Result<(Self, flume::Receiver<ClientVideoFrameProbe>)> {
+        let (submitted, decoder_inputs) = flume::unbounded::<ClientVideoFrameProbe>();
+        let (decoder_entered, entered_frames) = flume::unbounded::<ClientVideoFrameProbe>();
+        let (decoder_completed, completed_frames) = flume::unbounded::<ClientVideoFrameProbe>();
+
+        let Some(sink_pad) = decoder.static_pad("sink") else {
+            eros::bail!("GStreamer H.264 decoder does not expose a sink pad");
+        };
+        sink_pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            let Ok(mut probe) = decoder_inputs.try_recv() else {
+                tracing::warn!(
+                    target: "rabbit::client_video_probe",
+                    "Hardware decoder received a frame without a client video probe"
+                );
+                return gstreamer::PadProbeReturn::Ok;
+            };
+            probe.mark_decoder_entered();
+            if decoder_entered.send(probe).is_err() {
+                tracing::warn!(
+                    target: "rabbit::client_video_probe",
+                    "Client video decoder-entered probe channel disconnected"
+                );
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+
+        let Some(source_pad) = decoder.static_pad("src") else {
+            eros::bail!("GStreamer H.264 decoder does not expose a source pad");
+        };
+        source_pad.add_probe(gstreamer::PadProbeType::BUFFER, move |_, _| {
+            let Ok(mut probe) = entered_frames.try_recv() else {
+                tracing::warn!(
+                    target: "rabbit::client_video_probe",
+                    "Hardware decoder produced a frame without an entered client video probe"
+                );
+                return gstreamer::PadProbeReturn::Ok;
+            };
+            probe.mark_decoder_completed();
+            if decoder_completed.send(probe).is_err() {
+                tracing::warn!(
+                    target: "rabbit::client_video_probe",
+                    "Client video decoder-completed probe channel disconnected"
+                );
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+
+        Ok((
+            Self {
+                clock: ClientVideoProbeClock::default(),
+                submitted,
+            },
+            completed_frames,
+        ))
+    }
+
+    pub(crate) fn submit_frame(
+        &mut self,
+        rtp_packets: usize,
+        rtp_bytes: usize,
+    ) -> eros::Result<()> {
+        let probe = self.clock.frame(rtp_packets, rtp_bytes);
+        if self.submitted.send(probe).is_err() {
+            eros::bail!("Client video decoder probe channel disconnected");
+        }
+        Ok(())
+    }
+}
+
 impl ClientVideoFrameProbe {
     fn new(frame_id: u64, rtp_packets: u64, rtp_bytes: u64, submitted: Instant) -> Self {
         Self {
@@ -96,6 +176,10 @@ impl ClientVideoFrameProbe {
 
     pub(crate) fn mark_decoder_entered(&mut self) {
         self.timestamps.decoder_entered = Some(Instant::now());
+    }
+
+    pub(crate) fn frame_id(&self) -> u64 {
+        self.frame_id
     }
 
     pub(crate) fn mark_decoder_completed(&mut self) {
@@ -284,9 +368,13 @@ fn rate(count: u64, duration: Duration) -> f64 {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use gstreamer::glib::prelude::Cast as _;
+    use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _};
+
     use crate::{
         infra::platform::client_video_probe::{
-            ClientVideoFrameProbe, ClientVideoProbeClock, ClientVideoProbeReporter,
+            ClientVideoDecodeProbe, ClientVideoFrameProbe, ClientVideoProbeClock,
+            ClientVideoProbeReporter,
         },
         kernel::screen_manager::ScreenId,
     };
@@ -302,6 +390,57 @@ mod tests {
         assert_eq!(second.frame_id, 1);
         assert_eq!(second.rtp_packets, 3);
         assert_eq!(second.rtp_bytes, 1_800);
+    }
+
+    #[test]
+    fn moves_a_client_probe_through_decoder_pads() {
+        gstreamer::init().expect("GStreamer should initialize for the client decode probe test");
+        let pipeline = gstreamer::Pipeline::new();
+        let source = gstreamer::ElementFactory::make("appsrc")
+            .build()
+            .expect("The client decode probe test should create appsrc")
+            .downcast::<gstreamer_app::AppSrc>()
+            .expect("The client decode probe test source should be AppSrc");
+        let decoder = gstreamer::ElementFactory::make("identity")
+            .build()
+            .expect("The client decode probe test should create an identity decoder");
+        let sink = gstreamer::ElementFactory::make("appsink")
+            .build()
+            .expect("The client decode probe test should create appsink")
+            .downcast::<gstreamer_app::AppSink>()
+            .expect("The client decode probe test sink should be AppSink");
+        sink.set_sync(false);
+        sink.set_async(false);
+        let elements = [source.upcast_ref(), &decoder, sink.upcast_ref()];
+        pipeline
+            .add_many(elements)
+            .expect("The client decode probe test elements should join one pipeline");
+        gstreamer::Element::link_many(elements)
+            .expect("The client decode probe test elements should link");
+        let (mut probe, completed) = ClientVideoDecodeProbe::new(&decoder)
+            .expect("The client decode probe should attach to decoder pads");
+        pipeline
+            .set_state(gstreamer::State::Playing)
+            .expect("The client decode probe test pipeline should start");
+
+        probe
+            .submit_frame(2, 1_200)
+            .expect("The encoded frame probe should reach the decoder");
+        source
+            .push_buffer(gstreamer::Buffer::from_slice([0_u8]))
+            .expect("The client decode probe test buffer should reach the decoder");
+        sink.pull_sample()
+            .expect("The client decode probe test pipeline should produce a sample");
+        let completed = completed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("The client decode probe should leave the decoder with its frame");
+
+        assert_eq!(completed.frame_id(), 0);
+        assert!(completed.timestamps.decoder_entered.is_some());
+        assert!(completed.timestamps.decoder_completed.is_some());
+        pipeline
+            .set_state(gstreamer::State::Null)
+            .expect("The client decode probe test pipeline should stop");
     }
 
     #[test]

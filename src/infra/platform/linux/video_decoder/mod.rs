@@ -12,7 +12,10 @@ use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _, GstObjectExt as 
 use tracing::info;
 
 use crate::{
-    infra::platform::dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+    infra::platform::{
+        client_video_probe::{ClientVideoDecodeProbe, ClientVideoFrameProbe},
+        dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
+    },
     kernel::{
         geometry::PixelSize, screen_manager::ScreenId, session::ReceivedVideoFrame,
         video_decoder::VideoDecoder,
@@ -22,20 +25,27 @@ use crate::{
 pub(crate) struct GStreamerVideoDecoder {
     pipeline: gstreamer::Pipeline,
     source: gstreamer_app::AppSrc,
-    output: flume::Receiver<gstreamer::Sample>,
+    output: flume::Receiver<DecodedSample>,
     terminal_messages: flume::Receiver<gstreamer::Message>,
     screen_id: Option<ScreenId>,
+    probe: Option<ClientVideoDecodeProbe>,
+}
+
+struct DecodedSample {
+    sample: gstreamer::Sample,
+    probe: Option<ClientVideoFrameProbe>,
 }
 
 #[derive(Debug)]
 pub(crate) struct GStreamerDecodedFrame {
     pub(crate) screen_id: ScreenId,
     pub(crate) buffer: DmaBufFrame,
+    pub(crate) probe: Option<ClientVideoFrameProbe>,
     _owner: gstreamer::Buffer,
 }
 
 impl GStreamerVideoDecoder {
-    fn create() -> eros::Result<Self> {
+    fn create(enable_probing: bool) -> eros::Result<Self> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
         let input_caps = h264_rtp_caps();
         let output_caps = decoded_dma_buf_caps();
@@ -76,19 +86,40 @@ impl GStreamerVideoDecoder {
         sink.set_sync(false);
         sink.set_max_buffers(1);
         sink.set_drop(true);
+        let (probe, decoded_probes) = if enable_probing {
+            let (probe, decoded_probes) = ClientVideoDecodeProbe::new(&decoder)?;
+            (Some(probe), Some(decoded_probes))
+        } else {
+            (None, None)
+        };
         let (decoded_frames, output) = flume::bounded(1);
         let stale_frame = output.clone();
         sink.set_callbacks(
             gstreamer_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
-                    let Ok(mut sample) = sink.pull_sample() else {
+                    let Ok(sample) = sink.pull_sample() else {
                         return Err(gstreamer::FlowError::Error);
                     };
+                    let probe =
+                        decoded_probes
+                            .as_ref()
+                            .and_then(|probes| match probes.try_recv() {
+                                Ok(probe) => Some(probe),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        target: "rabbit::client_video_probe",
+                                        error = ?error,
+                                        "Decoded sample has no matching client video probe"
+                                    );
+                                    None
+                                }
+                            });
+                    let mut decoded = DecodedSample { sample, probe };
                     loop {
-                        match decoded_frames.try_send(sample) {
+                        match decoded_frames.try_send(decoded) {
                             Ok(()) => return Ok(gstreamer::FlowSuccess::Ok),
                             Err(flume::TrySendError::Full(returned)) => {
-                                sample = returned;
+                                decoded = returned;
                                 match stale_frame.try_recv() {
                                     Ok(_) | Err(flume::TryRecvError::Empty) => {}
                                     Err(flume::TryRecvError::Disconnected) => {
@@ -130,6 +161,7 @@ impl GStreamerVideoDecoder {
             output,
             terminal_messages,
             screen_id: None,
+            probe,
         })
     }
 
@@ -165,6 +197,14 @@ impl GStreamerVideoDecoder {
             Some(_) => {}
         }
 
+        if let Some(probe) = &mut self.probe {
+            let rtp_bytes = frame
+                .packets
+                .iter()
+                .fold(0_usize, |total, packet| total.saturating_add(packet.len()));
+            probe.submit_frame(frame.packets.len(), rtp_bytes)?;
+        }
+
         for packet in frame.packets {
             self.source
                 .push_buffer(gstreamer::Buffer::from_slice(packet))
@@ -181,7 +221,7 @@ impl GStreamerVideoDecoder {
 
     async fn receive_frame(&mut self) -> eros::Result<Option<GStreamerDecodedFrame>> {
         enum ReceiveEvent {
-            Sample(Result<gstreamer::Sample, flume::RecvError>),
+            Sample(Result<DecodedSample, flume::RecvError>),
             Terminal(Result<gstreamer::Message, flume::RecvError>),
         }
 
@@ -197,12 +237,14 @@ impl GStreamerVideoDecoder {
         };
 
         match event {
-            ReceiveEvent::Sample(Ok(sample)) => {
+            ReceiveEvent::Sample(Ok(decoded)) => {
                 let screen_id = self
                     .screen_id
                     .with_context(|| "GStreamer decoder produced a frame before receiving input")?;
                 Ok(Some(GStreamerDecodedFrame::try_from_sample(
-                    screen_id, sample,
+                    screen_id,
+                    decoded.sample,
+                    decoded.probe,
                 )?))
             }
             ReceiveEvent::Sample(Err(_)) => {
@@ -282,7 +324,7 @@ impl GStreamerVideoDecoder {
         else {
             return Ok(());
         };
-        let mut decoder = Self::create()?;
+        let mut decoder = Self::create(false)?;
         decoder.start()?;
         let result = match first_input {
             Ok(first_input) => {
@@ -365,7 +407,11 @@ impl VideoDecoder for GStreamerVideoDecoder {
 }
 
 impl GStreamerDecodedFrame {
-    fn try_from_sample(screen_id: ScreenId, sample: gstreamer::Sample) -> eros::Result<Self> {
+    fn try_from_sample(
+        screen_id: ScreenId,
+        sample: gstreamer::Sample,
+        probe: Option<ClientVideoFrameProbe>,
+    ) -> eros::Result<Self> {
         let caps = sample
             .caps()
             .with_context(|| "GStreamer decoded frame sample is missing caps")?;
@@ -461,6 +507,7 @@ impl GStreamerDecodedFrame {
                 readiness_fence: None,
                 lease: None,
             },
+            probe,
             _owner: owner,
         })
     }
@@ -601,7 +648,7 @@ mod tests {
     #[test]
     #[ignore = "run through scripts/test-gstreamer"]
     fn creates_hardware_h264_dma_buf_pipeline() {
-        let decoder = GStreamerVideoDecoder::create()
+        let decoder = GStreamerVideoDecoder::create(false)
             .expect("A hardware H.264 DMA-BUF decoder should be available");
         let factory = decoder
             .pipeline
