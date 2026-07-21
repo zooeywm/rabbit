@@ -1,6 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 mod backend;
@@ -61,7 +65,13 @@ pub(crate) struct VideoViewPublisher {
     sender: flume::Sender<VideoViewCommand>,
     stale: flume::Receiver<VideoViewCommand>,
     window: slint::Weak<RabbitWindow>,
-    redraw_scheduled: Arc<AtomicBool>,
+    delivery_scheduled: Arc<AtomicBool>,
+}
+
+struct VideoViewState {
+    display: Option<ActiveVideoDisplay>,
+    active_stream: Option<(SessionId, ScreenId)>,
+    failed: bool,
 }
 
 pub(crate) fn install(
@@ -74,31 +84,75 @@ pub(crate) fn install(
         sender,
         stale: receiver.clone(),
         window: window.as_weak(),
-        redraw_scheduled: Arc::new(AtomicBool::new(false)),
+        delivery_scheduled: Arc::new(AtomicBool::new(false)),
     };
     let weak_window = window.as_weak();
-    let mut display = None;
-    let mut active_stream = None;
-    let mut failed = false;
+    let view_state = Rc::new(RefCell::new(VideoViewState {
+        display: None,
+        active_stream: None,
+        failed: false,
+    }));
 
+    let direct_state = Rc::clone(&view_state);
+    let direct_commands = receiver.clone();
+    let direct_window = weak_window.clone();
+    let direct_errors = errors.clone();
+    window.on_video_frame_available(move || {
+        let mut state = direct_state.borrow_mut();
+        if state.failed {
+            return;
+        }
+        if !matches!(state.display, Some(ActiveVideoDisplay::Wayland(_))) {
+            if let Some(window) = direct_window.upgrade() {
+                window.window().request_redraw();
+            }
+            return;
+        }
+        let VideoViewState {
+            display,
+            active_stream,
+            ..
+        } = &mut *state;
+        match render_wayland_frame(&direct_commands, &direct_window, display, active_stream) {
+            Ok(Some((session_id, screen_id))) => {
+                let _ = direct_errors.send(GuiIntent::VideoFrameReady {
+                    session_id,
+                    screen_id,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => fail_video_display(&mut state, &direct_errors, error),
+        }
+    });
+
+    let rendering_state = Rc::clone(&view_state);
     window
         .window()
         .set_rendering_notifier(move |state, graphics_api| {
+            let mut video = rendering_state.borrow_mut();
+            if video.failed {
+                return;
+            }
             let result = match state {
                 RenderingState::RenderingSetup => Ok(()),
                 RenderingState::AfterRendering => {
                     let GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
                         return report_error_once(
                             &errors,
-                            &mut failed,
+                            &mut video.failed,
                             "Slint did not provide the required native OpenGL renderer".to_string(),
                         );
                     };
+                    let VideoViewState {
+                        display,
+                        active_stream,
+                        ..
+                    } = &mut *video;
                     let result = render_video_frame(
                         &receiver,
                         &weak_window,
-                        &mut display,
-                        &mut active_stream,
+                        display,
+                        active_stream,
                         preference,
                         *get_proc_address,
                     );
@@ -119,7 +173,7 @@ pub(crate) fn install(
                         Err(error) => Err(error),
                     }
                 }
-                RenderingState::RenderingTeardown => match display.take() {
+                RenderingState::RenderingTeardown => match video.display.take() {
                     Some(mut display) => display.teardown(),
                     None => Ok(()),
                 },
@@ -128,17 +182,7 @@ pub(crate) fn install(
             };
 
             if let Err(error) = result {
-                let cleanup_error = display
-                    .as_mut()
-                    .and_then(|display| display.teardown().err());
-                display = None;
-                let mut error = format!("{error:?}");
-                if let Some(cleanup_error) = cleanup_error {
-                    error.push_str(&format!(
-                        "\nAdditionally failed to release video renderer resources: {cleanup_error:?}"
-                    ));
-                }
-                report_error_once(&errors, &mut failed, error);
+                fail_video_display(&mut video, &errors, error);
             }
         })
         .context("Failed to install the Slint DMA-BUF video rendering bridge")?;
@@ -190,21 +234,21 @@ impl VideoViewPublisher {
             }
         }
 
-        if self.redraw_scheduled.swap(true, Ordering::Relaxed) {
+        if self.delivery_scheduled.swap(true, Ordering::Relaxed) {
             return Ok(());
         }
 
         let window = self.window.clone();
-        let redraw_scheduled = Arc::clone(&self.redraw_scheduled);
+        let delivery_scheduled = Arc::clone(&self.delivery_scheduled);
         if let Err(error) = slint::invoke_from_event_loop(move || {
-            redraw_scheduled.store(false, Ordering::Relaxed);
+            delivery_scheduled.store(false, Ordering::Relaxed);
             if let Some(window) = window.upgrade() {
-                window.window().request_redraw();
+                window.invoke_video_frame_available();
             }
         }) {
-            self.redraw_scheduled.store(false, Ordering::Relaxed);
+            self.delivery_scheduled.store(false, Ordering::Relaxed);
             Err::<(), _>(error)
-                .context("Failed to request a Slint redraw for a decoded video frame")?;
+                .context("Failed to deliver a decoded video frame to the GUI event loop")?;
         }
         Ok(())
     }
@@ -237,8 +281,9 @@ fn render_video_frame(
                     )?);
                 }
                 present_video_frame(display, preference, get_proc_address, *frame)?;
-                *active_stream = Some((session_id, screen_id));
-                presented = Some((session_id, screen_id));
+                if activate_stream(active_stream, session_id, screen_id) {
+                    presented = Some((session_id, screen_id));
+                }
             }
             VideoViewCommand::Clear => {
                 *active_stream = None;
@@ -289,6 +334,65 @@ fn render_video_frame(
         }
     }
     Ok(presented)
+}
+
+fn render_wayland_frame(
+    commands: &flume::Receiver<VideoViewCommand>,
+    weak_window: &slint::Weak<RabbitWindow>,
+    display: &mut Option<ActiveVideoDisplay>,
+    active_stream: &mut Option<(SessionId, ScreenId)>,
+) -> eros::Result<Option<(SessionId, ScreenId)>> {
+    let Some(ActiveVideoDisplay::Wayland(renderer)) = display.as_mut() else {
+        return Ok(None);
+    };
+    let mut presented = None;
+    if let Ok(command) = commands.try_recv() {
+        match command {
+            VideoViewCommand::Present {
+                session_id,
+                screen_id,
+                frame,
+            } => {
+                renderer.validate_frame(&frame)?;
+                renderer.present(*frame);
+                if activate_stream(active_stream, session_id, screen_id) {
+                    presented = Some((session_id, screen_id));
+                }
+            }
+            VideoViewCommand::Clear => {
+                *active_stream = None;
+                renderer.clear()?;
+            }
+        }
+    }
+    render_wayland_viewport(weak_window, renderer, active_stream.is_some())?;
+    Ok(presented)
+}
+
+fn render_wayland_viewport(
+    weak_window: &slint::Weak<RabbitWindow>,
+    renderer: &mut WaylandVideoRenderer,
+    stream_active: bool,
+) -> eros::Result<()> {
+    let Some(window) = weak_window.upgrade() else {
+        return Ok(());
+    };
+    if !window.get_video_viewport_visible() || !stream_active {
+        renderer.set_viewport(WaylandVideoViewport {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        })?;
+    } else {
+        renderer.set_viewport(WaylandVideoViewport {
+            x: logical_pixels(window.get_video_viewport_x())?,
+            y: logical_pixels(window.get_video_viewport_y())?,
+            width: logical_pixels(window.get_video_viewport_width())?,
+            height: logical_pixels(window.get_video_viewport_height())?,
+        })?;
+    }
+    renderer.render()
 }
 
 fn create_video_display(
@@ -396,6 +500,16 @@ fn logical_pixels(logical: f32) -> eros::Result<i32> {
     Ok(logical.round() as i32)
 }
 
+fn activate_stream(
+    active_stream: &mut Option<(SessionId, ScreenId)>,
+    session_id: SessionId,
+    screen_id: ScreenId,
+) -> bool {
+    let first_frame = *active_stream != Some((session_id, screen_id));
+    *active_stream = Some((session_id, screen_id));
+    first_frame
+}
+
 fn report_error_once(errors: &flume::Sender<GuiIntent>, failed: &mut bool, error: String) {
     if *failed {
         return;
@@ -406,6 +520,25 @@ fn report_error_once(errors: &flume::Sender<GuiIntent>, failed: &mut bool, error
     {
         eprintln!("Failed to stop Slint after the video renderer failed: {error}");
     }
+}
+
+fn fail_video_display(
+    state: &mut VideoViewState,
+    errors: &flume::Sender<GuiIntent>,
+    error: eros::ErrorUnion,
+) {
+    let cleanup_error = state
+        .display
+        .as_mut()
+        .and_then(|display| display.teardown().err());
+    state.display = None;
+    let mut error = format!("{error:?}");
+    if let Some(cleanup_error) = cleanup_error {
+        error.push_str(&format!(
+            "\nAdditionally failed to release video renderer resources: {cleanup_error:?}"
+        ));
+    }
+    report_error_once(errors, &mut state.failed, error);
 }
 
 // Focused hardware test: scripts/test-client-video [positive-seconds]
@@ -430,6 +563,27 @@ mod tests {
             session::{ReceivedVideoFrame, SessionId},
         },
     };
+
+    #[test]
+    fn only_the_first_frame_of_an_active_stream_notifies_the_app() {
+        let mut active_stream = None;
+
+        assert!(super::activate_stream(
+            &mut active_stream,
+            SessionId(3),
+            ScreenId(1)
+        ));
+        assert!(!super::activate_stream(
+            &mut active_stream,
+            SessionId(3),
+            ScreenId(1)
+        ));
+        assert!(super::activate_stream(
+            &mut active_stream,
+            SessionId(4),
+            ScreenId(1)
+        ));
+    }
 
     #[test]
     #[ignore = "run through scripts/test-client-video"]

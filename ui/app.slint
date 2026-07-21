@@ -413,6 +413,7 @@ export component RabbitWindow inherits Window {
     in property <[RemoteScreenItem]> remote-screens;
 
     callback connect(string);
+    callback video-frame-available();
     callback select-section(NavigationSection);
     callback decide-request(int, bool);
     callback open-screen(int);
