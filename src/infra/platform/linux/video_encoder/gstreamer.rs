@@ -618,14 +618,15 @@ impl GStreamerVideoEncoder {
             let vpp = create_required_element("vapostproc", "video-postprocessor")?;
             let filter = create_required_element("capsfilter", "video-postprocessor-output")?;
             filter.set_property("caps", vpp_caps);
-            let queue = create_pipeline_stage_queue("processed-frame-queue")?;
+            let queue = create_pipeline_stage_queue("processed-frame-queue", 1)?;
+            queue.set_property_from_str("leaky", "downstream");
             Some((vpp, filter, queue))
         } else {
             None
         };
 
         let parser = create_required_element("h264parse", "h264-parser")?;
-        let encoded_output_queue = create_pipeline_stage_queue("encoded-output-queue")?;
+        let encoded_output_queue = create_pipeline_stage_queue("encoded-output-queue", 2)?;
         let payloader = create_required_element("rtph264pay", "rtp-payloader")?;
         payloader.set_property("mtu", rtp_mtu);
         payloader.set_property("config-interval", -1_i32);
@@ -1020,9 +1021,12 @@ fn create_required_element(factory: &str, name: &str) -> eros::Result<gstreamer:
         .with_context(|| format!("Failed to create required GStreamer element {factory}"))?)
 }
 
-fn create_pipeline_stage_queue(name: &str) -> eros::Result<gstreamer::Element> {
+fn create_pipeline_stage_queue(
+    name: &str,
+    max_size_buffers: u32,
+) -> eros::Result<gstreamer::Element> {
     let queue = create_required_element("queue", name)?;
-    queue.set_property("max-size-buffers", 2_u32);
+    queue.set_property("max-size-buffers", max_size_buffers);
     queue.set_property("max-size-bytes", 0_u32);
     queue.set_property("max-size-time", 0_u64);
 
@@ -1066,6 +1070,9 @@ fn configure_low_latency_encoder(encoder: &gstreamer::Element, frame_rate: Frame
     encoder.set_property("b-frames", 0_u32);
     encoder.set_property("ref-frames", 1_u32);
     encoder.set_property("target-usage", 7_u32);
+    if encoder.find_property("mbbrc").is_some() {
+        encoder.set_property_from_str("mbbrc", "disabled");
+    }
     encoder.set_property_from_str("rate-control", "cbr");
     encoder.set_property("bitrate", H264_BITRATE_KBPS);
     encoder.set_property("cpb-size", H264_CPB_SIZE_KBITS);

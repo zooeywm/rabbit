@@ -30,6 +30,7 @@ pub(crate) struct GStreamerVideoProbe {
     submitted_probes: HashMap<u64, VideoFrameProbe>,
     encoding_probes: HashMap<u64, VideoFrameProbe>,
     events: flume::Receiver<VideoProbeEvent>,
+    pipeline_input_order: VecDeque<u64>,
     encoded_probe_order: VecDeque<u64>,
     encoder_completed_by_pts: HashMap<u64, Instant>,
     pending_rtp_frames: HashMap<u64, RtpFrameStats>,
@@ -49,6 +50,7 @@ impl GStreamerVideoProbe {
             submitted_probes: HashMap::new(),
             encoding_probes: HashMap::new(),
             events: receiver,
+            pipeline_input_order: VecDeque::new(),
             encoded_probe_order: VecDeque::new(),
             encoder_completed_by_pts: HashMap::new(),
             pending_rtp_frames: HashMap::new(),
@@ -115,7 +117,7 @@ impl GStreamerVideoProbe {
                 VideoProbeEvent::PipelineInput { pts_ns } => {
                     if let Some(probe) = self.submitted_probes.remove(&pts_ns) {
                         self.encoding_probes.insert(pts_ns, probe);
-                        self.encoded_probe_order.push_back(pts_ns);
+                        self.pipeline_input_order.push_back(pts_ns);
                     }
                     self.submitted_probes
                         .retain(|pending_pts_ns, _| *pending_pts_ns > pts_ns);
@@ -131,6 +133,13 @@ impl GStreamerVideoProbe {
                     }
                 }
                 VideoProbeEvent::EncoderEntered { pts_ns, at } => {
+                    while let Some(input_pts_ns) = self.pipeline_input_order.pop_front() {
+                        if input_pts_ns == pts_ns {
+                            self.encoded_probe_order.push_back(input_pts_ns);
+                            break;
+                        }
+                        self.encoding_probes.remove(&input_pts_ns);
+                    }
                     if let Some(probe) = self.encoding_probes.get_mut(&pts_ns) {
                         probe.mark_encoder_entered(at);
                     }
