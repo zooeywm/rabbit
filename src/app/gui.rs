@@ -51,7 +51,8 @@ mod video_view;
 mod view;
 
 pub(crate) fn run() -> eros::Result<()> {
-    let (gui, publisher, intents) = Gui::new()?;
+    let config = Config::new()?;
+    let (gui, publisher, intents) = Gui::new(config.video.display_backend)?;
     let thread_publisher = publisher.clone();
     let application_thread = std::thread::Builder::new()
         .name("rabbit-app".to_string())
@@ -59,7 +60,11 @@ pub(crate) fn run() -> eros::Result<()> {
             let result = (|| {
                 let runtime = compio::runtime::Runtime::new()
                     .context("Failed to create the Rabbit Compio runtime")?;
-                runtime.block_on(RootApplication::run(thread_publisher.clone(), intents))
+                runtime.block_on(RootApplication::run(
+                    config,
+                    thread_publisher.clone(),
+                    intents,
+                ))
             })();
 
             if result.is_err()
@@ -577,11 +582,11 @@ impl RootApplication {
 
 impl RootApplication {
     async fn new(
+        config: Config,
         view: ViewPublisher,
         messages: UnsyncQueue<RootMessage>,
         sender: &MessageSender,
     ) -> eros::Result<Self> {
-        let config = Config::new()?;
         let logger_guard = init_logging(&config)?;
         let (worker_reaper, worker_reaper_handle) =
             WorkerReaper::new().context("Failed to start the background worker reaper")?;
@@ -638,12 +643,16 @@ impl RootApplication {
         })
     }
 
-    async fn run(view: ViewPublisher, intents: flume::Receiver<GuiIntent>) -> eros::Result<()> {
+    async fn run(
+        config: Config,
+        view: ViewPublisher,
+        intents: flume::Receiver<GuiIntent>,
+    ) -> eros::Result<()> {
         let messages = UnsyncQueue::default();
         let sender = MessageSender {
             messages: messages.clone(),
         };
-        let mut application = Self::new(view, messages, &sender).await?;
+        let mut application = Self::new(config, view, messages, &sender).await?;
         application.publish_view_state()?;
 
         while !application.finished {

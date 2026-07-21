@@ -3,7 +3,7 @@ use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecMod
 
 use crate::app::gui::video_view::{self, VideoViewPublisher};
 use crate::app::{
-    config::APP_ID,
+    config::{APP_ID, VideoDisplayPreference},
     gui::state::{
         ConnectedDeviceView, ConnectionRequestView, HostedScreenStreamView, RemoteScreenView,
         ViewPage, ViewState, WorkspaceSection,
@@ -56,7 +56,9 @@ pub(crate) struct ViewPublisher {
 }
 
 impl Gui {
-    pub(crate) fn new() -> eros::Result<(Self, ViewPublisher, flume::Receiver<GuiIntent>)> {
+    pub(crate) fn new(
+        video_display: VideoDisplayPreference,
+    ) -> eros::Result<(Self, ViewPublisher, flume::Receiver<GuiIntent>)> {
         slint::BackendSelector::new()
             .require_opengl_es_with_version(3, 0)
             .select()
@@ -147,7 +149,7 @@ impl Gui {
             }
         });
 
-        let video = video_view::install(&window, sender.clone())?;
+        let video = video_view::install(&window, sender.clone(), video_display)?;
         let publisher = ViewPublisher {
             window: window.as_weak(),
             video,

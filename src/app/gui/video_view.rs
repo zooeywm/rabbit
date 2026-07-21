@@ -3,18 +3,28 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+mod backend;
+
 use eros::Context as _;
 use slint::{ComponentHandle as _, GraphicsAPI, RenderingState};
+use tracing::info;
 
 use crate::{
-    app::gui::view::{GuiIntent, RabbitWindow},
-    infra::{GStreamerDecodedFrame, OpenGlVideoRenderer},
+    app::{
+        config::VideoDisplayPreference,
+        gui::view::{GuiIntent, RabbitWindow},
+    },
+    infra::{
+        GStreamerDecodedFrame, OpenGlVideoRenderer, WaylandVideoRenderer, WaylandVideoViewport,
+    },
     kernel::{
         screen_manager::ScreenId,
         session::SessionId,
         video_renderer::{VideoRenderer as _, VideoViewport},
     },
 };
+
+use crate::app::gui::video_view::backend::{VideoDisplayBackend, select_video_display_backend};
 
 enum VideoViewCommand {
     Present {
@@ -23,6 +33,27 @@ enum VideoViewCommand {
         frame: Box<GStreamerDecodedFrame>,
     },
     Clear,
+}
+
+enum ActiveVideoDisplay {
+    Wayland(WaylandVideoRenderer),
+    Slint(OpenGlVideoRenderer),
+}
+
+impl ActiveVideoDisplay {
+    fn clear(&mut self) -> eros::Result<()> {
+        match self {
+            Self::Wayland(renderer) => renderer.clear(),
+            Self::Slint(renderer) => renderer.clear(),
+        }
+    }
+
+    fn teardown(&mut self) -> eros::Result<()> {
+        match self {
+            Self::Wayland(renderer) => renderer.teardown(),
+            Self::Slint(renderer) => renderer.teardown(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -36,6 +67,7 @@ pub(crate) struct VideoViewPublisher {
 pub(crate) fn install(
     window: &RabbitWindow,
     errors: flume::Sender<GuiIntent>,
+    preference: VideoDisplayPreference,
 ) -> eros::Result<VideoViewPublisher> {
     let (sender, receiver) = flume::bounded(1);
     let publisher = VideoViewPublisher {
@@ -45,16 +77,16 @@ pub(crate) fn install(
         redraw_scheduled: Arc::new(AtomicBool::new(false)),
     };
     let weak_window = window.as_weak();
-    let mut renderer = None;
+    let mut display = None;
     let mut active_stream = None;
     let mut failed = false;
-    let mut initialization_error = None;
 
     window
         .window()
         .set_rendering_notifier(move |state, graphics_api| {
             let result = match state {
-                RenderingState::RenderingSetup => {
+                RenderingState::RenderingSetup => Ok(()),
+                RenderingState::AfterRendering => {
                     let GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
                         return report_error_once(
                             &errors,
@@ -62,23 +94,13 @@ pub(crate) fn install(
                             "Slint did not provide the required native OpenGL renderer".to_string(),
                         );
                     };
-                    match OpenGlVideoRenderer::new(*get_proc_address) {
-                        Ok(created) => {
-                            renderer = Some(created);
-                            Ok(())
-                        }
-                        Err(error) => {
-                            initialization_error = Some(format!("{error:?}"));
-                            Ok(())
-                        }
-                    }
-                }
-                RenderingState::AfterRendering => {
                     let result = render_video_frame(
                         &receiver,
                         &weak_window,
-                        &mut renderer,
+                        &mut display,
                         &mut active_stream,
+                        preference,
+                        *get_proc_address,
                     );
                     match result {
                         Ok(Some((session_id, screen_id))) => {
@@ -97,8 +119,8 @@ pub(crate) fn install(
                         Err(error) => Err(error),
                     }
                 }
-                RenderingState::RenderingTeardown => match renderer.take() {
-                    Some(mut renderer) => renderer.teardown(),
+                RenderingState::RenderingTeardown => match display.take() {
+                    Some(mut display) => display.teardown(),
                     None => Ok(()),
                 },
                 RenderingState::BeforeRendering => Ok(()),
@@ -106,13 +128,11 @@ pub(crate) fn install(
             };
 
             if let Err(error) = result {
-                let cleanup_error = renderer
+                let cleanup_error = display
                     .as_mut()
-                    .and_then(|renderer| renderer.teardown().err());
-                renderer = None;
-                let mut error = initialization_error
-                    .take()
-                    .unwrap_or_else(|| format!("{error:?}"));
+                    .and_then(|display| display.teardown().err());
+                display = None;
+                let mut error = format!("{error:?}");
                 if let Some(cleanup_error) = cleanup_error {
                     error.push_str(&format!(
                         "\nAdditionally failed to release video renderer resources: {cleanup_error:?}"
@@ -193,8 +213,10 @@ impl VideoViewPublisher {
 fn render_video_frame(
     commands: &flume::Receiver<VideoViewCommand>,
     weak_window: &slint::Weak<RabbitWindow>,
-    renderer: &mut Option<OpenGlVideoRenderer>,
+    display: &mut Option<ActiveVideoDisplay>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
+    preference: VideoDisplayPreference,
+    get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
 ) -> eros::Result<Option<(SessionId, ScreenId)>> {
     let mut presented = None;
     if let Ok(command) = commands.try_recv() {
@@ -204,17 +226,24 @@ fn render_video_frame(
                 screen_id,
                 frame,
             } => {
-                let renderer = renderer.as_mut().context(
-                    "Slint requested video rendering before the OpenGL renderer was ready",
-                )?;
+                let window = weak_window
+                    .upgrade()
+                    .with_context(|| "Slint window closed before video display initialization")?;
+                if display.is_none() {
+                    *display = Some(create_video_display(
+                        preference,
+                        window.window(),
+                        get_proc_address,
+                    )?);
+                }
+                present_video_frame(display, preference, get_proc_address, *frame)?;
                 *active_stream = Some((session_id, screen_id));
-                renderer.present(*frame);
                 presented = Some((session_id, screen_id));
             }
             VideoViewCommand::Clear => {
                 *active_stream = None;
-                if let Some(renderer) = renderer.as_mut() {
-                    renderer.clear()?;
+                if let Some(display) = display.as_mut() {
+                    display.clear()?;
                 }
             }
         }
@@ -223,21 +252,133 @@ fn render_video_frame(
     let Some(window) = weak_window.upgrade() else {
         return Ok(None);
     };
-    let Some(renderer) = renderer.as_mut() else {
+    let Some(display) = display.as_mut() else {
         return Ok(None);
     };
     if !window.get_video_viewport_visible() || active_stream.is_none() {
+        if let ActiveVideoDisplay::Wayland(renderer) = display {
+            renderer.set_viewport(WaylandVideoViewport {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            })?;
+            renderer.render()?;
+        }
         return Ok(presented);
     }
-    let scale = window.window().scale_factor();
-    renderer.set_viewport(VideoViewport {
-        x: physical_pixels(window.get_video_viewport_x(), scale)?,
-        y: physical_pixels(window.get_video_viewport_y(), scale)?,
-        width: physical_pixels(window.get_video_viewport_width(), scale)?,
-        height: physical_pixels(window.get_video_viewport_height(), scale)?,
-    });
-    renderer.render()?;
+    match display {
+        ActiveVideoDisplay::Wayland(renderer) => {
+            renderer.set_viewport(WaylandVideoViewport {
+                x: logical_pixels(window.get_video_viewport_x())?,
+                y: logical_pixels(window.get_video_viewport_y())?,
+                width: logical_pixels(window.get_video_viewport_width())?,
+                height: logical_pixels(window.get_video_viewport_height())?,
+            })?;
+            renderer.render()?;
+        }
+        ActiveVideoDisplay::Slint(renderer) => {
+            let scale = window.window().scale_factor();
+            renderer.set_viewport(VideoViewport {
+                x: physical_pixels(window.get_video_viewport_x(), scale)?,
+                y: physical_pixels(window.get_video_viewport_y(), scale)?,
+                width: physical_pixels(window.get_video_viewport_width(), scale)?,
+                height: physical_pixels(window.get_video_viewport_height(), scale)?,
+            });
+            renderer.render()?;
+        }
+    }
     Ok(presented)
+}
+
+fn create_video_display(
+    preference: VideoDisplayPreference,
+    window: &slint::Window,
+    get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+) -> eros::Result<ActiveVideoDisplay> {
+    if preference == VideoDisplayPreference::Slint {
+        let selection = select_video_display_backend(preference, None)?;
+        let display = ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(get_proc_address)?);
+        log_video_display_selection(preference, selection.backend, None);
+        return Ok(display);
+    }
+
+    match WaylandVideoRenderer::new(window) {
+        Ok(renderer) => {
+            let selection = select_video_display_backend(preference, None)?;
+            log_video_display_selection(preference, selection.backend, None);
+            Ok(ActiveVideoDisplay::Wayland(renderer))
+        }
+        Err(error) => {
+            let reason = format!("{error:?}");
+            let selection = select_video_display_backend(preference, Some(reason.clone()))?;
+            let display = ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(get_proc_address)?);
+            log_video_display_selection(
+                preference,
+                selection.backend,
+                selection.fallback_reason.as_deref(),
+            );
+            Ok(display)
+        }
+    }
+}
+
+fn present_video_frame(
+    display: &mut Option<ActiveVideoDisplay>,
+    preference: VideoDisplayPreference,
+    get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+    frame: GStreamerDecodedFrame,
+) -> eros::Result<()> {
+    let error = match display.as_mut() {
+        Some(ActiveVideoDisplay::Wayland(renderer)) => match renderer.validate_frame(&frame) {
+            Ok(()) => {
+                renderer.present(frame);
+                return Ok(());
+            }
+            Err(error) => error,
+        },
+        Some(ActiveVideoDisplay::Slint(renderer)) => {
+            renderer.present(frame);
+            return Ok(());
+        }
+        None => eros::bail!("Video display disappeared before presenting a decoded frame"),
+    };
+
+    if preference != VideoDisplayPreference::Auto {
+        return Err(error);
+    }
+    let reason = format!("{error:?}");
+    if let Some(mut previous) = display.take() {
+        previous
+            .teardown()
+            .with_context(|| "Failed to tear down rejected Wayland video display")?;
+    }
+    let mut fallback = OpenGlVideoRenderer::new(get_proc_address)
+        .with_context(|| "Failed to create Slint video display fallback")?;
+    fallback.present(frame);
+    *display = Some(ActiveVideoDisplay::Slint(fallback));
+    let selection = select_video_display_backend(preference, Some(reason))?;
+    log_video_display_selection(
+        preference,
+        selection.backend,
+        selection.fallback_reason.as_deref(),
+    );
+    Ok(())
+}
+
+fn log_video_display_selection(
+    preference: VideoDisplayPreference,
+    backend: VideoDisplayBackend,
+    fallback_reason: Option<&str>,
+) {
+    info!(
+        target: "rabbit::video_display",
+        event = "video_display_selected",
+        requested = ?preference,
+        backend = backend.name(),
+        fallback_reason,
+        "Selected client video display backend"
+    );
 }
 
 fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
@@ -246,6 +387,13 @@ fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
         eros::bail!("Invalid physical video viewport coordinate {}", physical);
     }
     Ok(physical.round() as u32)
+}
+
+fn logical_pixels(logical: f32) -> eros::Result<i32> {
+    if !logical.is_finite() || logical < 0.0 || logical > i32::MAX as f32 {
+        eros::bail!("Invalid logical video viewport coordinate {}", logical);
+    }
+    Ok(logical.round() as i32)
 }
 
 fn report_error_once(errors: &flume::Sender<GuiIntent>, failed: &mut bool, error: String) {
@@ -269,9 +417,12 @@ mod tests {
     use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _};
 
     use crate::{
-        app::gui::{
-            state::{ViewPage, ViewState},
-            view::{Gui, GuiIntent, ViewPublisher},
+        app::{
+            config::VideoDisplayPreference,
+            gui::{
+                state::{ViewPage, ViewState},
+                view::{Gui, GuiIntent, ViewPublisher},
+            },
         },
         infra::GStreamerVideoDecoder,
         kernel::{
@@ -293,8 +444,8 @@ mod tests {
             .expect("RABBIT_CLIENT_VIDEO_TEST_SECONDS should be a positive integer");
         assert!(seconds > 0, "Client video test duration should be positive");
 
-        let (gui, publisher, intents) =
-            Gui::new().expect("Slint video test window should be created");
+        let (gui, publisher, intents) = Gui::new(VideoDisplayPreference::Slint)
+            .expect("Slint video test window should be created");
         publisher
             .publish(ViewState {
                 page: ViewPage::StreamRequest,

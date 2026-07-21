@@ -14,8 +14,8 @@ pub(crate) use platform::{
     GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder, GbmFramePipelineManager,
     GbmFramePipelineManagerState, KmsScreenCaptureManager, KmsScreenCaptureManagerState,
     NiriScreenLayoutManager, NiriScreenLayoutManagerState, OpenGlVideoRenderer,
-    create_frame_pipeline_manager_state, create_screen_capture_manager_state,
-    create_screen_layout_manager_state,
+    WaylandVideoRenderer, WaylandVideoViewport, create_frame_pipeline_manager_state,
+    create_screen_capture_manager_state, create_screen_layout_manager_state,
 };
 pub(crate) use quic_endpoint::{QuicConnectOutcome, QuicEndpoint};
 pub(crate) use transport::{QuicTransport, QuicTransportRecv, QuicTransportSend};

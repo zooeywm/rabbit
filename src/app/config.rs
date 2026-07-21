@@ -33,6 +33,16 @@ pub struct LoggingConfig {
 #[serde(default)]
 pub struct VideoConfig {
     pub enable_probing: bool,
+    pub display_backend: VideoDisplayPreference,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoDisplayPreference {
+    #[default]
+    Auto,
+    Wayland,
+    Slint,
 }
 
 impl Default for LoggingConfig {
@@ -125,7 +135,7 @@ const fn default_app_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::config::Config;
+    use crate::app::config::{Config, VideoDisplayPreference};
 
     #[test]
     fn video_probing_is_disabled_by_default() {
@@ -138,5 +148,28 @@ mod tests {
             .expect("Video probing configuration should deserialize");
 
         assert!(config.video.enable_probing);
+    }
+
+    #[test]
+    fn video_display_backend_defaults_to_auto() {
+        assert_eq!(
+            Config::default().video.display_backend,
+            VideoDisplayPreference::Auto
+        );
+    }
+
+    #[test]
+    fn video_display_backend_can_be_selected_from_config() {
+        for (configured, expected) in [
+            ("auto", VideoDisplayPreference::Auto),
+            ("wayland", VideoDisplayPreference::Wayland),
+            ("slint", VideoDisplayPreference::Slint),
+        ] {
+            let config =
+                toml::from_str::<Config>(&format!("[video]\ndisplay_backend = \"{configured}\""))
+                    .expect("Video display backend configuration should deserialize");
+
+            assert_eq!(config.video.display_backend, expected);
+        }
     }
 }

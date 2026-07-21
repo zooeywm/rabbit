@@ -17,7 +17,7 @@ pub(crate) use screen_layout::{
 };
 pub(crate) use video_decoder::{GStreamerDecodedFrame, GStreamerVideoDecoder};
 pub(crate) use video_encoder::GStreamerVideoEncoder;
-pub(crate) use video_renderer::OpenGlVideoRenderer;
+pub(crate) use video_renderer::{OpenGlVideoRenderer, WaylandVideoRenderer, WaylandVideoViewport};
 
 /// Negotiates the Linux capture output requested by the selected encoder stack.
 pub(crate) fn create_screen_capture_manager_state(

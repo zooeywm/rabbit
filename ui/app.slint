@@ -71,6 +71,13 @@ component Card inherits Rectangle {
     drop-shadow-offset-y: 4px;
 }
 
+// Defines the video layout region. On Wayland this rectangle is covered by a
+// DMA-BUF subsurface; the Slint backend draws into the same region.
+component VideoDisplaySurface inherits Rectangle {
+    background: #17191c;
+    border-radius: 10px;
+}
+
 component PersonIcon inherits Rectangle {
     width: 46px;
     height: 46px;
@@ -893,11 +900,9 @@ export component RabbitWindow inherits Window {
                         }
                     }
 
-                    video-surface := Rectangle {
+                    video-surface := VideoDisplaySurface {
                         width: 100%;
                         vertical-stretch: 1;
-                        background: #17191c;
-                        border-radius: 10px;
                     }
                 }
 

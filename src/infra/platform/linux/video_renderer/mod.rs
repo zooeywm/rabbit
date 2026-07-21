@@ -25,6 +25,10 @@ use crate::{
     kernel::video_renderer::{VideoRenderer, VideoViewport},
 };
 
+mod wayland;
+
+pub(crate) use wayland::{WaylandVideoRenderer, WaylandVideoViewport};
+
 const TEXTURE_EXTERNAL: u32 = 0x8D65;
 const TEXTURE_BINDING_EXTERNAL: u32 = 0x8D67;
 
