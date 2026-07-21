@@ -26,8 +26,12 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport, wp_viewporter},
 };
 
-use crate::infra::platform::{
-    client_video_probe::ClientVideoProbeReporter, video_decoder::GStreamerDecodedFrame,
+use crate::{
+    infra::platform::{
+        client_video_probe::ClientVideoProbeReporter, video_decoder::GStreamerDecodedFrame,
+        video_renderer::fit_viewport,
+    },
+    kernel::{geometry::PixelSize, video_renderer::VideoViewport},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +145,8 @@ pub(crate) struct WaylandVideoRenderer {
     subsurface: wl_subsurface::WlSubsurface,
     viewport: wp_viewport::WpViewport,
     layout: Option<WaylandVideoViewport>,
+    applied_viewport: Option<WaylandVideoViewport>,
+    current_frame_size: Option<PixelSize>,
     pending_frame: Option<GStreamerDecodedFrame>,
     submitted: VecDeque<SubmittedBuffer>,
     probe_reporter: ClientVideoProbeReporter,
@@ -238,6 +244,8 @@ impl WaylandVideoRenderer {
             subsurface,
             viewport,
             layout: None,
+            applied_viewport: None,
+            current_frame_size: None,
             pending_frame: None,
             submitted: VecDeque::new(),
             probe_reporter: ClientVideoProbeReporter::default(),
@@ -251,17 +259,6 @@ impl WaylandVideoRenderer {
                 viewport.width,
                 viewport.height
             );
-        }
-        if self.layout == Some(viewport) {
-            return Ok(());
-        }
-        if viewport.width == 0 || viewport.height == 0 {
-            self.surface.set_opaque_region(None);
-        } else {
-            let region = self.compositor.create_region(&self.queue_handle, ());
-            region.add(0, 0, viewport.width, viewport.height);
-            self.surface.set_opaque_region(Some(&region));
-            region.destroy();
         }
         self.layout = Some(viewport);
         Ok(())
@@ -298,18 +295,28 @@ impl WaylandVideoRenderer {
         let Some(layout) = self.layout else {
             return Ok(());
         };
-        self.subsurface.set_position(layout.x, layout.y);
         if layout.width == 0 || layout.height == 0 {
-            self.surface.attach(None, 0, 0);
-            self.surface.commit();
-            self.connection
-                .flush()
-                .with_context(|| "Failed to flush hidden Wayland video subsurface")?;
+            self.hide_surface()?;
             return Ok(());
         }
-        self.viewport.set_destination(layout.width, layout.height);
+        let frame_size = self
+            .pending_frame
+            .as_ref()
+            .map(|frame| frame.buffer.size)
+            .or(self.current_frame_size);
+        let Some(frame_size) = frame_size else {
+            return Ok(());
+        };
+        let fitted = fit_wayland_viewport(layout, frame_size)?;
+        let geometry_changed = self.apply_viewport(fitted);
 
         let Some(mut frame) = self.pending_frame.take() else {
+            if geometry_changed {
+                self.surface.commit();
+                self.connection
+                    .flush()
+                    .with_context(|| "Failed to flush resized Wayland video subsurface")?;
+            }
             return Ok(());
         };
         if let Some(probe) = &mut frame.probe {
@@ -363,6 +370,7 @@ impl WaylandVideoRenderer {
             .flush()
             .with_context(|| "Failed to flush Wayland video buffer commit")?;
 
+        self.current_frame_size = Some(frame.buffer.size);
         let screen_id = frame.screen_id;
         if let Some(mut probe) = frame.probe.take() {
             probe.mark_render_completed();
@@ -377,6 +385,9 @@ impl WaylandVideoRenderer {
 
     pub(crate) fn clear(&mut self) -> eros::Result<()> {
         self.pending_frame = None;
+        self.current_frame_size = None;
+        self.applied_viewport = None;
+        self.surface.set_opaque_region(None);
         self.surface.attach(None, 0, 0);
         self.surface.commit();
         self.connection
@@ -384,6 +395,34 @@ impl WaylandVideoRenderer {
             .with_context(|| "Failed to flush cleared Wayland video subsurface")?;
         self.collect_released_buffers()?;
         self.probe_reporter.finish();
+        Ok(())
+    }
+
+    fn apply_viewport(&mut self, viewport: WaylandVideoViewport) -> bool {
+        if self.applied_viewport == Some(viewport) {
+            return false;
+        }
+        self.subsurface.set_position(viewport.x, viewport.y);
+        self.viewport
+            .set_destination(viewport.width, viewport.height);
+        let region = self.compositor.create_region(&self.queue_handle, ());
+        region.add(0, 0, viewport.width, viewport.height);
+        self.surface.set_opaque_region(Some(&region));
+        region.destroy();
+        self.applied_viewport = Some(viewport);
+        true
+    }
+
+    fn hide_surface(&mut self) -> eros::Result<()> {
+        if self.applied_viewport.take().is_none() {
+            return Ok(());
+        }
+        self.surface.set_opaque_region(None);
+        self.surface.attach(None, 0, 0);
+        self.surface.commit();
+        self.connection
+            .flush()
+            .with_context(|| "Failed to flush hidden Wayland video subsurface")?;
         Ok(())
     }
 
@@ -425,12 +464,38 @@ impl WaylandVideoRenderer {
     }
 }
 
+fn fit_wayland_viewport(
+    viewport: WaylandVideoViewport,
+    frame_size: PixelSize,
+) -> eros::Result<WaylandVideoViewport> {
+    let fitted = fit_viewport(
+        VideoViewport {
+            x: u32::try_from(viewport.x).with_context(|| "Wayland video viewport x is negative")?,
+            y: u32::try_from(viewport.y).with_context(|| "Wayland video viewport y is negative")?,
+            width: u32::try_from(viewport.width)
+                .with_context(|| "Wayland video viewport width is negative")?,
+            height: u32::try_from(viewport.height)
+                .with_context(|| "Wayland video viewport height is negative")?,
+        },
+        frame_size,
+    )?;
+    Ok(WaylandVideoViewport {
+        x: i32::try_from(fitted.x).with_context(|| "Fitted Wayland video x exceeds i32")?,
+        y: i32::try_from(fitted.y).with_context(|| "Fitted Wayland video y exceeds i32")?,
+        width: i32::try_from(fitted.width)
+            .with_context(|| "Fitted Wayland video width exceeds i32")?,
+        height: i32::try_from(fitted.height)
+            .with_context(|| "Fitted Wayland video height exceeds i32")?,
+    })
+}
+
 // Focused test: cargo test infra::platform::video_renderer::wayland::tests --lib
 #[cfg(test)]
 mod tests {
     use crate::infra::platform::video_renderer::wayland::{
-        SupportedDmaBufFormats, WaylandVideoViewport,
+        SupportedDmaBufFormats, WaylandVideoViewport, fit_wayland_viewport,
     };
+    use crate::kernel::geometry::PixelSize;
 
     #[test]
     fn dma_buf_support_requires_an_exact_format_modifier_pair() {
@@ -454,5 +519,32 @@ mod tests {
         assert_eq!(viewport.y, 24);
         assert_eq!(viewport.width, 960);
         assert_eq!(viewport.height, 600);
+    }
+
+    #[test]
+    fn fits_video_inside_wayland_region_with_centered_letterbox() {
+        let fitted = fit_wayland_viewport(
+            WaylandVideoViewport {
+                x: 12,
+                y: 24,
+                width: 960,
+                height: 600,
+            },
+            PixelSize {
+                width: 1920,
+                height: 1080,
+            },
+        )
+        .expect("Wayland video viewport should fit");
+
+        assert_eq!(
+            fitted,
+            WaylandVideoViewport {
+                x: 12,
+                y: 54,
+                width: 960,
+                height: 540,
+            }
+        );
     }
 }
