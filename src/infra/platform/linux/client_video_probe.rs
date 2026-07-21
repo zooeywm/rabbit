@@ -1,24 +1,370 @@
-#[derive(Debug)]
-pub(crate) struct ClientVideoFrameProbe;
+use std::time::{Duration, Instant};
+
+use crate::kernel::screen_manager::ScreenId;
+
+const REPORT_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
-pub(crate) struct ClientVideoProbeReporter;
+pub(crate) struct ClientVideoProbeClock {
+    next_frame_id: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientVideoFrameProbe {
+    frame_id: u64,
+    rtp_packets: u64,
+    rtp_bytes: u64,
+    timestamps: ClientVideoFrameTimestamps,
+}
+
+#[derive(Debug)]
+struct ClientVideoFrameTimestamps {
+    decoder_submitted: Instant,
+    decoder_entered: Option<Instant>,
+    decoder_completed: Option<Instant>,
+    gui_received: Option<Instant>,
+    dma_buf_import_started: Option<Instant>,
+    dma_buf_import_completed: Option<Instant>,
+    render_started: Option<Instant>,
+    render_completed: Option<Instant>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ClientVideoProbeReporter {
+    window_started: Option<Instant>,
+    frames: u64,
+    rtp_packets: u64,
+    rtp_bytes: u64,
+    totals: ClientVideoProbeStageTotals,
+}
+
+#[derive(Debug, Default)]
+struct ClientVideoProbeStageTotals {
+    decoder_queue: Duration,
+    decode: Duration,
+    presentation_queue: Duration,
+    dma_buf_import_queue: Duration,
+    dma_buf_import: Duration,
+    render_queue: Duration,
+    render: Duration,
+    client_latency: Duration,
+}
+
+struct ClientVideoFrameTimings {
+    decoder_queue: Duration,
+    decode: Duration,
+    presentation_queue: Duration,
+    dma_buf_import_queue: Duration,
+    dma_buf_import: Duration,
+    render_queue: Duration,
+    render: Duration,
+    client_latency: Duration,
+}
+
+impl ClientVideoProbeClock {
+    pub(crate) fn frame(&mut self, rtp_packets: usize, rtp_bytes: usize) -> ClientVideoFrameProbe {
+        let frame_id = self.next_frame_id;
+        self.next_frame_id = self.next_frame_id.saturating_add(1);
+
+        ClientVideoFrameProbe::new(
+            frame_id,
+            u64::try_from(rtp_packets).unwrap_or(u64::MAX),
+            u64::try_from(rtp_bytes).unwrap_or(u64::MAX),
+            Instant::now(),
+        )
+    }
+}
+
+impl ClientVideoFrameProbe {
+    fn new(frame_id: u64, rtp_packets: u64, rtp_bytes: u64, submitted: Instant) -> Self {
+        Self {
+            frame_id,
+            rtp_packets,
+            rtp_bytes,
+            timestamps: ClientVideoFrameTimestamps {
+                decoder_submitted: submitted,
+                decoder_entered: None,
+                decoder_completed: None,
+                gui_received: None,
+                dma_buf_import_started: None,
+                dma_buf_import_completed: None,
+                render_started: None,
+                render_completed: None,
+            },
+        }
+    }
+
+    pub(crate) fn mark_decoder_entered(&mut self) {
+        self.timestamps.decoder_entered = Some(Instant::now());
+    }
+
+    pub(crate) fn mark_decoder_completed(&mut self) {
+        self.timestamps.decoder_completed = Some(Instant::now());
+    }
+
+    pub(crate) fn mark_gui_received(&mut self) {
+        self.timestamps.gui_received = Some(Instant::now());
+    }
+
+    pub(crate) fn mark_dma_buf_import_started(&mut self) {
+        self.timestamps.dma_buf_import_started = Some(Instant::now());
+    }
+
+    pub(crate) fn mark_dma_buf_import_completed(&mut self) {
+        self.timestamps.dma_buf_import_completed = Some(Instant::now());
+    }
+
+    pub(crate) fn mark_render_started(&mut self) {
+        self.timestamps.render_started = Some(Instant::now());
+    }
+
+    pub(crate) fn mark_render_completed(&mut self) {
+        self.timestamps.render_completed = Some(Instant::now());
+    }
+
+    fn finish(&self) -> Result<ClientVideoFrameTimings, &'static str> {
+        let timestamps = &self.timestamps;
+        let decoder_entered = required(timestamps.decoder_entered, "decoder_entered")?;
+        let decoder_completed = required(timestamps.decoder_completed, "decoder_completed")?;
+        let gui_received = required(timestamps.gui_received, "gui_received")?;
+        let dma_buf_import_started =
+            required(timestamps.dma_buf_import_started, "dma_buf_import_started")?;
+        let dma_buf_import_completed = required(
+            timestamps.dma_buf_import_completed,
+            "dma_buf_import_completed",
+        )?;
+        let render_started = required(timestamps.render_started, "render_started")?;
+        let render_completed = required(timestamps.render_completed, "render_completed")?;
+
+        Ok(ClientVideoFrameTimings {
+            decoder_queue: elapsed(timestamps.decoder_submitted, decoder_entered),
+            decode: elapsed(decoder_entered, decoder_completed),
+            presentation_queue: elapsed(decoder_completed, gui_received),
+            dma_buf_import_queue: elapsed(gui_received, dma_buf_import_started),
+            dma_buf_import: elapsed(dma_buf_import_started, dma_buf_import_completed),
+            render_queue: elapsed(dma_buf_import_completed, render_started),
+            render: elapsed(render_started, render_completed),
+            client_latency: elapsed(timestamps.decoder_submitted, render_completed),
+        })
+    }
+}
 
 impl ClientVideoProbeReporter {
-    pub(crate) fn record_frame(&mut self, _probe: ClientVideoFrameProbe) {}
+    pub(crate) fn record_frame(&mut self, screen_id: ScreenId, probe: ClientVideoFrameProbe) {
+        let now = Instant::now();
+        let timings = match probe.finish() {
+            Ok(timings) => timings,
+            Err(stage) => {
+                tracing::warn!(
+                    target: "rabbit::client_video_probe",
+                    screen_id = screen_id.get(),
+                    frame_id = probe.frame_id,
+                    missing_stage = stage,
+                    "Client video frame probe is incomplete"
+                );
+                return;
+            }
+        };
+
+        tracing::trace!(
+            target: "rabbit::client_video_probe",
+            screen_id = screen_id.get(),
+            frame_id = probe.frame_id,
+            decoder_queue_ms = duration_ms(timings.decoder_queue),
+            decode_ms = duration_ms(timings.decode),
+            presentation_queue_ms = duration_ms(timings.presentation_queue),
+            dma_buf_import_queue_ms = duration_ms(timings.dma_buf_import_queue),
+            dma_buf_import_ms = duration_ms(timings.dma_buf_import),
+            render_queue_ms = duration_ms(timings.render_queue),
+            render_ms = duration_ms(timings.render),
+            client_latency_ms = duration_ms(timings.client_latency),
+            rtp_packets = probe.rtp_packets,
+            rtp_bytes = probe.rtp_bytes,
+            "Client video frame rendered"
+        );
+
+        self.window_started.get_or_insert(now);
+        self.frames += 1;
+        self.rtp_packets += probe.rtp_packets;
+        self.rtp_bytes += probe.rtp_bytes;
+        self.totals.add(&timings);
+
+        if self
+            .window_started
+            .is_some_and(|started| now.duration_since(started) >= REPORT_WINDOW)
+        {
+            self.report_window(false);
+        }
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.report_window(true);
+        self.window_started = None;
+    }
+
+    fn report_window(&mut self, partial: bool) {
+        let Some(started) = self.window_started else {
+            return;
+        };
+        if self.frames == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let window_elapsed = now.duration_since(started);
+        let frames = self.frames;
+
+        tracing::info!(
+            target: "rabbit::client_video_probe",
+            partial,
+            window_ms = duration_ms(window_elapsed),
+            frames,
+            fps = rate(frames, window_elapsed),
+            avg_client_latency_ms = average_ms(self.totals.client_latency, frames),
+            avg_decoder_queue_ms = average_ms(self.totals.decoder_queue, frames),
+            avg_decode_ms = average_ms(self.totals.decode, frames),
+            avg_presentation_queue_ms = average_ms(self.totals.presentation_queue, frames),
+            avg_dma_buf_import_queue_ms = average_ms(
+                self.totals.dma_buf_import_queue,
+                frames
+            ),
+            avg_dma_buf_import_ms = average_ms(self.totals.dma_buf_import, frames),
+            avg_render_queue_ms = average_ms(self.totals.render_queue, frames),
+            avg_render_ms = average_ms(self.totals.render, frames),
+            rtp_packets = self.rtp_packets,
+            rtp_bytes = self.rtp_bytes,
+            "Client video throughput window"
+        );
+
+        self.window_started = Some(now);
+        self.frames = 0;
+        self.rtp_packets = 0;
+        self.rtp_bytes = 0;
+        self.totals = ClientVideoProbeStageTotals::default();
+    }
+}
+
+impl ClientVideoProbeStageTotals {
+    fn add(&mut self, timings: &ClientVideoFrameTimings) {
+        self.decoder_queue += timings.decoder_queue;
+        self.decode += timings.decode;
+        self.presentation_queue += timings.presentation_queue;
+        self.dma_buf_import_queue += timings.dma_buf_import_queue;
+        self.dma_buf_import += timings.dma_buf_import;
+        self.render_queue += timings.render_queue;
+        self.render += timings.render;
+        self.client_latency += timings.client_latency;
+    }
+}
+
+fn required(timestamp: Option<Instant>, stage: &'static str) -> Result<Instant, &'static str> {
+    timestamp.ok_or(stage)
+}
+
+fn elapsed(start: Instant, end: Instant) -> Duration {
+    end.checked_duration_since(start).unwrap_or(Duration::ZERO)
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+fn average_ms(total: Duration, count: u64) -> f64 {
+    duration_ms(total) / count as f64
+}
+
+fn rate(count: u64, duration: Duration) -> f64 {
+    if duration.is_zero() {
+        return 0.0;
+    }
+    count as f64 / duration.as_secs_f64()
 }
 
 // Focused test: cargo test infra::platform::client_video_probe::tests:: --lib
 #[cfg(test)]
 mod tests {
-    use crate::infra::platform::client_video_probe::{
-        ClientVideoFrameProbe, ClientVideoProbeReporter,
+    use std::time::{Duration, Instant};
+
+    use crate::{
+        infra::platform::client_video_probe::{
+            ClientVideoFrameProbe, ClientVideoProbeClock, ClientVideoProbeReporter,
+        },
+        kernel::screen_manager::ScreenId,
     };
 
     #[test]
-    fn client_video_probe_accepts_a_completed_frame() {
-        let mut reporter = ClientVideoProbeReporter;
+    fn assigns_monotonic_client_frame_ids() {
+        let mut clock = ClientVideoProbeClock::default();
 
-        reporter.record_frame(ClientVideoFrameProbe);
+        let first = clock.frame(2, 1_200);
+        let second = clock.frame(3, 1_800);
+
+        assert_eq!(first.frame_id, 0);
+        assert_eq!(second.frame_id, 1);
+        assert_eq!(second.rtp_packets, 3);
+        assert_eq!(second.rtp_bytes, 1_800);
+    }
+
+    #[test]
+    fn calculates_complete_client_video_stage_timings() {
+        let start = Instant::now();
+        let probe = completed_probe(start);
+
+        let timings = probe
+            .finish()
+            .expect("A complete client video probe should produce timings");
+
+        assert_eq!(timings.decoder_queue, Duration::from_millis(2));
+        assert_eq!(timings.decode, Duration::from_millis(3));
+        assert_eq!(timings.presentation_queue, Duration::from_millis(5));
+        assert_eq!(timings.dma_buf_import_queue, Duration::from_millis(7));
+        assert_eq!(timings.dma_buf_import, Duration::from_millis(11));
+        assert_eq!(timings.render_queue, Duration::from_millis(13));
+        assert_eq!(timings.render, Duration::from_millis(17));
+        assert_eq!(timings.client_latency, Duration::from_millis(58));
+    }
+
+    #[test]
+    fn rejects_an_incomplete_client_video_probe() {
+        let probe = ClientVideoFrameProbe::new(0, 1, 600, Instant::now());
+
+        assert_eq!(probe.finish().err(), Some("decoder_entered"));
+    }
+
+    #[test]
+    fn reporter_accumulates_completed_client_frames() {
+        let start = Instant::now() - Duration::from_millis(100);
+        let mut reporter = ClientVideoProbeReporter::default();
+
+        reporter.record_frame(ScreenId(2), completed_probe(start));
+
+        assert_eq!(reporter.frames, 1);
+        assert_eq!(reporter.rtp_packets, 3);
+        assert_eq!(reporter.rtp_bytes, 1_800);
+        assert_eq!(reporter.totals.decode, Duration::from_millis(3));
+        assert_eq!(reporter.totals.client_latency, Duration::from_millis(58));
+    }
+
+    #[test]
+    fn finishing_a_client_video_probe_window_resets_its_start() {
+        let start = Instant::now() - Duration::from_millis(100);
+        let mut reporter = ClientVideoProbeReporter::default();
+        reporter.record_frame(ScreenId(2), completed_probe(start));
+
+        reporter.finish();
+
+        assert!(reporter.window_started.is_none());
+        assert_eq!(reporter.frames, 0);
+    }
+
+    fn completed_probe(start: Instant) -> ClientVideoFrameProbe {
+        let mut probe = ClientVideoFrameProbe::new(7, 3, 1_800, start);
+        probe.timestamps.decoder_entered = Some(start + Duration::from_millis(2));
+        probe.timestamps.decoder_completed = Some(start + Duration::from_millis(5));
+        probe.timestamps.gui_received = Some(start + Duration::from_millis(10));
+        probe.timestamps.dma_buf_import_started = Some(start + Duration::from_millis(17));
+        probe.timestamps.dma_buf_import_completed = Some(start + Duration::from_millis(28));
+        probe.timestamps.render_started = Some(start + Duration::from_millis(41));
+        probe.timestamps.render_completed = Some(start + Duration::from_millis(58));
+        probe
     }
 }
