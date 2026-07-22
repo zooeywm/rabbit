@@ -3,6 +3,8 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
+use eros::Context;
+
 use crate::kernel::{
     geometry::PixelSize,
     screen_configuration::{
@@ -12,23 +14,66 @@ use crate::kernel::{
     session::SessionId,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DirectTarget {
-    ip: IpAddr,
+    host: String,
     port: Option<u16>,
 }
 
 impl DirectTarget {
-    pub(crate) fn new(ip: IpAddr, port: Option<u16>) -> Self {
-        Self { ip, port }
+    pub(crate) fn new(host: String, port: Option<u16>) -> Self {
+        Self { host, port }
+    }
+
+    pub(crate) fn parse(input: &str) -> eros::Result<Self> {
+        let input = input.trim();
+        if input.is_empty() {
+            eros::bail!("Direct connection address is empty");
+        }
+
+        if let Ok(address) = input.parse::<SocketAddr>() {
+            return Ok(Self::new(address.ip().to_string(), Some(address.port())));
+        }
+        if let Ok(ip) = input.parse::<IpAddr>() {
+            return Ok(Self::new(ip.to_string(), None));
+        }
+
+        let (host, port) = match input.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() => {
+                let port = port
+                    .parse::<u16>()
+                    .with_context(|| format!("Failed to parse direct connection port {port:?}"))?;
+                (host, Some(port))
+            }
+            Some(_) => eros::bail!("Direct connection hostname is empty"),
+            None => (input, None),
+        };
+        if host.chars().any(char::is_whitespace) {
+            eros::bail!("Direct connection hostname contains whitespace");
+        }
+
+        Ok(Self::new(host.to_string(), port))
+    }
+
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    pub(crate) fn ip(&self) -> Option<IpAddr> {
+        self.host.parse().ok()
     }
 }
 
 impl fmt::Display for DirectTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.port {
-            Some(port) => SocketAddr::new(self.ip, port).fmt(formatter),
-            None => self.ip.fmt(formatter),
+        match (self.ip(), self.port) {
+            (Some(ip), Some(port)) => SocketAddr::new(ip, port).fmt(formatter),
+            (_, Some(port)) => write!(formatter, "{}:{port}", self.host),
+            (_, None) => self.host.fmt(formatter),
         }
     }
 }
@@ -77,7 +122,7 @@ impl DirectConnectionState {
         let Self::Connecting { target } = self else {
             return false;
         };
-        let target = *target;
+        let target = target.clone();
 
         *self = match completion {
             DirectConnectionCompletion::Connected(peer) => Self::Connected { peer },
@@ -294,16 +339,21 @@ mod tests {
 
     #[test]
     fn direct_connection_flow_preserves_the_target_until_completion() {
-        let target = DirectTarget::new(IpAddr::V4(Ipv4Addr::LOCALHOST), None);
+        let target = DirectTarget::new(Ipv4Addr::LOCALHOST.to_string(), None);
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52732);
         let mut state = DirectConnectionState::default();
 
-        assert!(state.begin(target));
+        assert!(state.begin(target.clone()));
         assert!(!state.begin(DirectTarget::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Ipv4Addr::LOCALHOST.to_string(),
             Some(52733)
         )));
-        assert_eq!(state, DirectConnectionState::Connecting { target });
+        assert_eq!(
+            state,
+            DirectConnectionState::Connecting {
+                target: target.clone()
+            }
+        );
 
         assert!(state.complete(DirectConnectionCompletion::Connected(peer)));
         assert_eq!(state, DirectConnectionState::Connected { peer });
@@ -311,16 +361,31 @@ mod tests {
 
     #[test]
     fn direct_connection_flow_distinguishes_remote_and_self_rejection() {
-        let target = DirectTarget::new(IpAddr::V4(Ipv4Addr::LOCALHOST), Some(52731));
+        let target = DirectTarget::new(Ipv4Addr::LOCALHOST.to_string(), Some(52731));
         let mut state = DirectConnectionState::default();
 
-        assert!(state.begin(target));
+        assert!(state.begin(target.clone()));
         assert!(state.complete(DirectConnectionCompletion::Rejected));
-        assert_eq!(state, DirectConnectionState::Rejected { target });
+        assert_eq!(
+            state,
+            DirectConnectionState::Rejected {
+                target: target.clone()
+            }
+        );
 
-        assert!(state.begin(target));
+        assert!(state.begin(target.clone()));
         assert!(state.complete(DirectConnectionCompletion::SelfRejected));
         assert_eq!(state, DirectConnectionState::SelfRejected { target });
+    }
+
+    #[test]
+    fn direct_target_accepts_hostname_with_port() {
+        let target = DirectTarget::parse("test.io:23944")
+            .expect("Hostname direct target should parse");
+
+        assert_eq!(target.host(), "test.io");
+        assert_eq!(target.port(), Some(23944));
+        assert_eq!(target.to_string(), "test.io:23944");
     }
 
     #[test]

@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    net::{IpAddr, SocketAddr},
-    rc::Rc,
-    time::Duration,
-};
+use std::{collections::HashSet, net::SocketAddr, rc::Rc, time::Duration};
 
 use eros::Context;
 use futures_util::{future::Either, pin_mut};
@@ -471,20 +466,6 @@ impl RootApplication {
         self.status_message = status.into();
     }
 
-    fn parse_direct_target(input: &str) -> eros::Result<(IpAddr, Option<u16>)> {
-        let input = input.trim();
-
-        if let Ok(address) = input.parse::<SocketAddr>() {
-            return Ok((address.ip(), Some(address.port())));
-        }
-
-        let ip = input
-            .parse::<IpAddr>()
-            .with_context(|| format!("Failed to parse direct connection IP {input:?}"))?;
-
-        Ok((ip, None))
-    }
-
     fn take_connection_request(&mut self, index: usize) -> Option<PendingConnectionRequest> {
         if index >= self.model.pending_connection_requests.len() {
             return None;
@@ -921,7 +902,8 @@ impl RootApplication {
                         DirectConnectionState::Idle => (
                             ViewPage::Connect,
                             "Connect to a device".to_string(),
-                            "Enter the server IP address or IP:port".to_string(),
+                            "Enter the server IP address, hostname, or either with a port"
+                                .to_string(),
                             self.status_message.clone(),
                             String::new(),
                             String::new(),
@@ -1111,22 +1093,25 @@ impl RootApplication {
                     return Ok(true);
                 }
 
-                let (remote_ip, remote_port) = match Self::parse_direct_target(&input) {
+                let target = match DirectTarget::parse(&input) {
                     Ok(target) => target,
                     Err(error) => {
                         self.set_connection_status(format!("Invalid address: {error}"));
                         return Ok(true);
                     }
                 };
-                if self.model.has_controller_session(remote_ip, remote_port) {
+                if target.ip().is_some_and(|remote_ip| {
+                    self.model.has_controller_session(remote_ip, target.port())
+                }) {
                     self.set_connection_status("Session already connected");
                     return Ok(true);
                 }
-                let target = DirectTarget::new(remote_ip, remote_port);
-                if !self.direct_connection.begin(target) {
+                if !self.direct_connection.begin(target.clone()) {
                     self.set_connection_status("Connection already in progress");
                     return Ok(true);
                 }
+                let remote_host = target.host().to_string();
+                let remote_port = target.port();
                 let endpoint: &ConnectionEndpoint = self.model.app.as_ref();
                 let endpoint = endpoint.clone();
                 let request = ConnectionRequest {
@@ -1136,13 +1121,13 @@ impl RootApplication {
 
                 info!(
                     event = "direct_connection_started",
-                    %remote_ip,
+                    %remote_host,
                     ?remote_port,
                     "Direct connection started"
                 );
                 compio::runtime::spawn(async move {
                     let result =
-                        connect_transport(&endpoint, remote_ip, remote_port, request).await;
+                        connect_transport(&endpoint, remote_host, remote_port, request).await;
                     connection_sender.post(RootMessage::DirectConnectionFinished(result));
                 })
                 .detach();

@@ -396,7 +396,7 @@ export component RabbitWindow inherits Window {
     in property <NavigationSection> section: NavigationSection.remote-devices;
     in-out property <string> direct-address: "127.0.0.1";
     in property <string> page-title: "Connect to a device";
-    in property <string> page-subtitle: "Enter the server IP address or IP:port";
+    in property <string> page-subtitle: "Enter the server IP address, hostname, or either with a port";
     in property <string> status-text;
     in property <string> local-port;
     in property <bool> local-server-online;
@@ -486,7 +486,7 @@ export component RabbitWindow inherits Window {
 
                             address-input := LineEdit {
                                 text <=> root.direct-address;
-                                placeholder-text: "IP address or IP:port";
+                                placeholder-text: "IP address, hostname, or either with a port";
                                 horizontal-stretch: 1;
                                 accepted => { root.connect(address-input.text); }
                             }

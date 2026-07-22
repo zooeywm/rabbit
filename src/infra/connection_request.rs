@@ -5,6 +5,7 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use compio::net::ToSocketAddrsAsync;
 use eros::Context;
 use tracing::{debug, info};
 
@@ -53,6 +54,38 @@ impl From<compio::quic::Connection> for IncomingConnection {
 }
 
 pub(crate) async fn connect_transport(
+    endpoint: &ConnectionEndpoint,
+    remote_host: String,
+    remote_port: Option<u16>,
+    request: ConnectionRequest,
+) -> eros::Result<DirectConnectionOutcome> {
+    let resolved = (remote_host.clone(), remote_port.unwrap_or(0))
+        .to_socket_addrs_async()
+        .await
+        .with_context(|| format!("Failed to resolve Rabbit host {remote_host}"))?;
+    let mut remote_ips = Vec::new();
+    for address in resolved {
+        if !remote_ips.contains(&address.ip()) {
+            remote_ips.push(address.ip());
+        }
+    }
+    let mut last_error = None;
+
+    for remote_ip in remote_ips {
+        match connect_resolved_transport(endpoint, remote_ip, remote_port, request.clone()).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    let Some(last_error) = last_error else {
+        eros::bail!("Rabbit host {} resolved to no IP addresses", remote_host);
+    };
+
+    Err(last_error).with_context(|| format!("Failed to connect resolved Rabbit host {remote_host}"))
+}
+
+async fn connect_resolved_transport(
     endpoint: &ConnectionEndpoint,
     remote_ip: IpAddr,
     remote_port: Option<u16>,
@@ -586,7 +619,7 @@ mod tests {
             });
             let outcome = connect_transport(
                 &ConnectionEndpoint::Tcp(outgoing),
-                incoming_address.ip(),
+                "localhost".to_string(),
                 Some(incoming_address.port()),
                 ConnectionRequest {
                     requester_name: "outgoing".to_string(),
@@ -630,7 +663,7 @@ mod tests {
             });
             let outcome = connect_transport(
                 &ConnectionEndpoint::Tcp(endpoint),
-                address.ip(),
+                address.ip().to_string(),
                 Some(address.port()),
                 ConnectionRequest {
                     requester_name: "self".to_string(),
