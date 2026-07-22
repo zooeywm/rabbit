@@ -157,6 +157,11 @@ pub(crate) enum RootMessage {
         screen_id: ScreenId,
         result: eros::Result<()>,
     },
+    KeyFrameRequestFinished {
+        session_id: SessionId,
+        screen_id: ScreenId,
+        result: eros::Result<()>,
+    },
     HostScreenStreamStopFinished {
         session_id: SessionId,
         screen_id: ScreenId,
@@ -402,6 +407,8 @@ impl RootApplication {
         let session_send = Rc::clone(&session.send);
         let cancellation = UnsyncQueue::default();
         let task_cancellation = cancellation.clone();
+        let encoder_commands = UnsyncQueue::default();
+        let task_encoder_commands = encoder_commands.clone();
         let task_sender = sender.clone();
         let task = compio::runtime::spawn(async move {
             let result = run_host_screen_stream::<_, _, crate::infra::GStreamerVideoEncoder>(
@@ -409,6 +416,7 @@ impl RootApplication {
                 screen_id,
                 session_send,
                 task_cancellation,
+                task_encoder_commands,
             )
             .await;
             task_sender.post(RootMessage::ScreenStreamFinished(
@@ -421,6 +429,7 @@ impl RootApplication {
             RunningScreenStream {
                 id: stream_id,
                 cancellation,
+                encoder_commands,
                 task: Some(task),
             },
         );
@@ -1340,6 +1349,39 @@ impl RootApplication {
                         ));
                         self.model.screen_stream_results.insert(id, configured);
                     }
+                    SessionMessage::Control(ControlMessage::RequestKeyFrame(request)) => {
+                        let Some(session) = self
+                            .model
+                            .sessions
+                            .iter_mut()
+                            .find(|session| session.send.id() == id)
+                        else {
+                            warn!(
+                                event = "key_frame_request_session_missing",
+                                session_id = id.0,
+                                screen_id = request.screen_id.0,
+                                "Key-frame request arrived after its Session closed"
+                            );
+                            return Ok(false);
+                        };
+                        let Some(stream) = session.screen_streams.get(&request.screen_id) else {
+                            warn!(
+                                event = "key_frame_request_stream_missing",
+                                session_id = id.0,
+                                screen_id = request.screen_id.0,
+                                "Key-frame request has no running Host screen stream"
+                            );
+                            return Ok(false);
+                        };
+
+                        stream.request_key_frame();
+                        trace!(
+                            event = "key_frame_requested",
+                            session_id = id.0,
+                            screen_id = request.screen_id.0,
+                            "Queued key-frame request for Host encoder"
+                        );
+                    }
                     SessionMessage::Control(ControlMessage::StopScreenStream(stop)) => {
                         let role = self
                             .model
@@ -1383,6 +1425,33 @@ impl RootApplication {
                     }
                     SessionMessage::Video(_) => {
                         eros::bail!("Video frame bypassed the latest-frame session queue")
+                    }
+                    SessionMessage::KeyFrameRequired(screen_id) => {
+                        let Some(session) = self
+                            .model
+                            .sessions
+                            .iter()
+                            .find(|session| session.send.id() == id)
+                        else {
+                            warn!(
+                                event = "key_frame_request_session_missing",
+                                session_id = id.0,
+                                screen_id = screen_id.0,
+                                "Cannot request a key frame after the Session closed"
+                            );
+                            return Ok(false);
+                        };
+                        let session_send = Rc::clone(&session.send);
+                        let request_sender = sender.clone();
+                        compio::runtime::spawn(async move {
+                            let result = session_send.request_key_frame(screen_id).await;
+                            request_sender.post(RootMessage::KeyFrameRequestFinished {
+                                session_id: id,
+                                screen_id,
+                                result,
+                            });
+                        })
+                        .detach();
                     }
                 }
 
@@ -1533,6 +1602,37 @@ impl RootApplication {
                 }
 
                 Ok(changed)
+            }
+            RootMessage::KeyFrameRequestFinished {
+                session_id,
+                screen_id,
+                result,
+            } => {
+                if let Err(error) = result {
+                    warn!(
+                        event = "key_frame_request_failed",
+                        session_id = session_id.0,
+                        screen_id = screen_id.0,
+                        error = ?error,
+                        "Failed to request the preferred on-demand key frame; stopping the Client screen stream"
+                    );
+                    if self.video_decoder.as_ref().is_some_and(|decoder| {
+                        decoder.session_id == session_id && decoder.screen_id == screen_id
+                    }) {
+                        self.stop_video_decoder()?;
+                        self.screen_stream.fail_session(
+                            session_id,
+                            format!("Failed to request a recovery key frame: {error}"),
+                        );
+                        self.set_connection_status(format!(
+                            "Session {} screen {} key-frame request failed: {error}",
+                            session_id.0, screen_id.0
+                        ));
+                        return Ok(true);
+                    }
+                }
+
+                Ok(false)
             }
             RootMessage::SessionClosed(id) => {
                 self.stop_session_video_decoder(id)?;

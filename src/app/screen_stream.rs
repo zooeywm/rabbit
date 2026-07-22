@@ -14,7 +14,7 @@ use crate::{
         screen_stream::ScreenStream,
         session::{SessionSend, VideoMessage},
         transport::TransportSend,
-        video_encoder::VideoEncoder,
+        video_encoder::{VideoEncoder, VideoEncoderCommand},
     },
 };
 
@@ -23,6 +23,7 @@ pub(crate) async fn run_host_screen_stream<Frames, Send, Encoder>(
     screen_id: ScreenId,
     session: Rc<SessionSend<Send>>,
     cancellation: UnsyncQueue<()>,
+    encoder_commands: UnsyncQueue<VideoEncoderCommand>,
 ) -> eros::Result<()>
 where
     Encoder: VideoEncoder,
@@ -37,11 +38,17 @@ where
         );
     };
 
-    ScreenStream::<_, Encoder, _>::new(
+    let commands = futures_util::stream::poll_fn(move |context| {
+        let mut command = encoder_commands.pop();
+        Pin::new(&mut command).poll(context).map(Some)
+    });
+
+    ScreenStream::<_, _, Encoder, _>::new(
         CancellableFrames {
             frames,
             cancellation,
         },
+        commands,
         max_packet_size,
         move |packet: Encoder::Packet| {
             let session = Rc::clone(&session);

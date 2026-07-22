@@ -17,6 +17,7 @@ use crate::{
         screen_manager::ScreenId,
         session::{SessionId, SessionRole, SessionSend},
         session_control::ScreenInfo,
+        video_encoder::VideoEncoderCommand,
     },
 };
 
@@ -60,6 +61,7 @@ impl SessionKey {
 pub(crate) struct RunningScreenStream {
     pub(crate) id: u64,
     pub(crate) cancellation: UnsyncQueue<()>,
+    pub(crate) encoder_commands: UnsyncQueue<VideoEncoderCommand>,
     pub(crate) task: Option<compio::runtime::JoinHandle<()>>,
 }
 
@@ -74,6 +76,12 @@ impl Drop for RunningScreenStream {
 }
 
 impl RunningScreenStream {
+    pub(crate) fn request_key_frame(&self) {
+        while self.encoder_commands.try_pop().is_some() {}
+        self.encoder_commands
+            .push(VideoEncoderCommand::RequestKeyFrame);
+    }
+
     pub(crate) fn begin_shutdown(&mut self) -> Option<compio::runtime::JoinHandle<()>> {
         self.cancellation.push(());
         self.task.take()
@@ -185,7 +193,7 @@ mod tests {
     use crate::{
         app::model::{RunningScreenStream, SessionKey},
         infra::unsync_queue::UnsyncQueue,
-        kernel::session::SessionRole,
+        kernel::{session::SessionRole, video_encoder::VideoEncoderCommand},
     };
 
     #[test]
@@ -200,6 +208,7 @@ mod tests {
             let mut stream = RunningScreenStream {
                 id: 0,
                 cancellation,
+                encoder_commands: UnsyncQueue::default(),
                 task: Some(compio::runtime::spawn(async move {
                     task_cancellation.pop().await;
                     task_stopped.set(true);
@@ -214,6 +223,26 @@ mod tests {
 
             assert!(stopped.get());
         });
+    }
+
+    #[test]
+    fn screen_stream_coalesces_pending_key_frame_requests() {
+        let encoder_commands = UnsyncQueue::default();
+        let stream = RunningScreenStream {
+            id: 0,
+            cancellation: UnsyncQueue::default(),
+            encoder_commands: encoder_commands.clone(),
+            task: None,
+        };
+
+        stream.request_key_frame();
+        stream.request_key_frame();
+
+        assert_eq!(
+            encoder_commands.try_pop(),
+            Some(VideoEncoderCommand::RequestKeyFrame)
+        );
+        assert_eq!(encoder_commands.try_pop(), None);
     }
 
     #[test]

@@ -5,9 +5,9 @@ use eros::Context;
 use crate::kernel::{
     geometry::PixelSize,
     screen_configuration::{
-        RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
-        ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
-        StopScreenStream,
+        RemoteDisplayMode, RequestKeyFrame, ResolutionResult, ScreenResolutionOutcome,
+        ScreenResolutionStatus, ScreenStreamRequest, ScreenStreamRequestId,
+        ScreenStreamsConfigured, SetScreenStreams, StopScreenStream,
     },
     screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
@@ -30,6 +30,7 @@ pub enum ControlMessage {
     SetScreenStreams(SetScreenStreams),
     ScreenStreamsConfigured(ScreenStreamsConfigured),
     StopScreenStream(StopScreenStream),
+    RequestKeyFrame(RequestKeyFrame),
 }
 
 #[derive(BinRead, BinWrite)]
@@ -39,6 +40,7 @@ enum WireControlMessageTag {
     SetScreenStreams = 1,
     ScreenStreamsConfigured = 2,
     StopScreenStream = 3,
+    RequestKeyFrame = 4,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -118,6 +120,11 @@ struct WireScreenStreamRequest {
 
 #[derive(BinRead, BinWrite)]
 struct WireStopScreenStream {
+    screen_id: u8,
+}
+
+#[derive(BinRead, BinWrite)]
+struct WireRequestKeyFrame {
     screen_id: u8,
 }
 
@@ -537,6 +544,27 @@ impl TryFrom<StopScreenStream> for TransportMessage {
     }
 }
 
+impl TryFrom<RequestKeyFrame> for TransportMessage {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(request: RequestKeyFrame) -> eros::Result<Self> {
+        let mut writer = begin_control_message(WireControlMessageTag::RequestKeyFrame)?;
+
+        writer
+            .write_be(&WireRequestKeyFrame {
+                screen_id: request.screen_id.0,
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to encode key-frame request for screen {}",
+                    request.screen_id.0
+                )
+            })?;
+
+        Ok(finish_control_message(writer))
+    }
+}
+
 impl TryFrom<TransportMessage> for ControlMessage {
     type Error = eros::ErrorUnion;
 
@@ -607,6 +635,20 @@ impl TryFrom<TransportMessage> for ControlMessage {
 
                 Self::StopScreenStream(StopScreenStream {
                     screen_id: ScreenId(wire.screen_id),
+                })
+            }
+            WireControlMessageTag::RequestKeyFrame => {
+                let wire = reader
+                    .read_be::<WireRequestKeyFrame>()
+                    .with_context(|| "Failed to decode key-frame request")?;
+
+                Self::RequestKeyFrame(RequestKeyFrame {
+                    screen_id: ScreenId::try_from(wire.screen_id).with_context(|| {
+                        format!(
+                            "Failed to decode key-frame request screen ID {}",
+                            wire.screen_id
+                        )
+                    })?,
                 })
             }
         };

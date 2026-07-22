@@ -22,6 +22,11 @@ pub struct StopScreenStream {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestKeyFrame {
+    pub screen_id: ScreenId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemoteDisplayMode {
     Preserve,
 }

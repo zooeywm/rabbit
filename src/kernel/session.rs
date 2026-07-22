@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use eros::Context as _;
 
 use crate::kernel::{
-    screen_configuration::{ScreenStreamsConfigured, SetScreenStreams, StopScreenStream},
+    screen_configuration::{
+        RequestKeyFrame, ScreenStreamsConfigured, SetScreenStreams, StopScreenStream,
+    },
     screen_manager::ScreenId,
     session_control::{ControlMessage, OutgoingScreenList},
     transport::{
@@ -36,6 +38,7 @@ pub struct ReceivedVideoFrame {
 pub enum SessionMessage {
     Control(ControlMessage),
     Video(ReceivedVideoFrame),
+    KeyFrameRequired(ScreenId),
 }
 
 pub struct Session<T>
@@ -71,6 +74,7 @@ struct RtpVideoStream {
     next_sequence: Option<u16>,
     frame: Option<RtpFrameAssembly>,
     waiting_for_keyframe: bool,
+    keyframe_request_pending: bool,
 }
 
 impl Default for RtpVideoStream {
@@ -79,6 +83,7 @@ impl Default for RtpVideoStream {
             next_sequence: None,
             frame: None,
             waiting_for_keyframe: true,
+            keyframe_request_pending: false,
         }
     }
 }
@@ -96,6 +101,11 @@ struct RtpPacketMetadata {
     timestamp: u32,
     marker: bool,
     keyframe: bool,
+}
+
+struct VideoAssemblyResult {
+    frame: Option<ReceivedVideoFrame>,
+    request_key_frame: bool,
 }
 
 const RTP_FIXED_HEADER_SIZE: usize = 12;
@@ -195,6 +205,13 @@ where
             .with_context(|| format!("Failed to stop screen {} stream", screen_id.0))
     }
 
+    pub async fn request_key_frame(&self, screen_id: ScreenId) -> eros::Result<()> {
+        require_role(self.role, SessionRole::Controller, "request a key frame")?;
+        self.send_control(RequestKeyFrame { screen_id })
+            .await
+            .with_context(|| format!("Failed to request a key frame for screen {}", screen_id.0))
+    }
+
     pub async fn send_screen_streams_configured(
         &self,
         configured: ScreenStreamsConfigured,
@@ -253,9 +270,12 @@ where
                         );
                     }
 
-                    if let Some(frame) =
-                        assemble_video_frame(&mut self.video_streams, screen_id, message.payload)?
-                    {
+                    let assembled =
+                        assemble_video_frame(&mut self.video_streams, screen_id, message.payload)?;
+                    if assembled.request_key_frame {
+                        return Ok(Some(SessionMessage::KeyFrameRequired(screen_id)));
+                    }
+                    if let Some(frame) = assembled.frame {
                         return Ok(Some(SessionMessage::Video(frame)));
                     }
                 }
@@ -268,7 +288,7 @@ fn assemble_video_frame(
     streams: &mut HashMap<ScreenId, RtpVideoStream>,
     screen_id: ScreenId,
     packet: bytes::Bytes,
-) -> eros::Result<Option<ReceivedVideoFrame>> {
+) -> eros::Result<VideoAssemblyResult> {
     let metadata = decode_rtp_metadata(&packet)?;
     let packet_size = packet.len();
     let stream = streams.entry(screen_id).or_default();
@@ -295,10 +315,13 @@ fn assemble_video_frame(
         .as_mut()
         .with_context(|| format!("RTP frame for screen {} is missing", screen_id.0))?;
 
+    let mut request_key_frame = false;
     if !sequence_is_contiguous {
         stream.waiting_for_keyframe = true;
         if !starts_new_frame || !metadata.keyframe {
             frame.valid = false;
+            request_key_frame = true;
+            stream.keyframe_request_pending = true;
         }
     }
     frame.keyframe |= metadata.keyframe;
@@ -316,7 +339,10 @@ fn assemble_video_frame(
     frame.packets.push(packet);
 
     if !metadata.marker {
-        return Ok(None);
+        return Ok(VideoAssemblyResult {
+            frame: None,
+            request_key_frame,
+        });
     }
 
     let frame = stream
@@ -324,19 +350,33 @@ fn assemble_video_frame(
         .take()
         .with_context(|| format!("Completed RTP frame for screen {} is missing", screen_id.0))?;
     if !frame.valid {
-        return Ok(None);
+        return Ok(VideoAssemblyResult {
+            frame: None,
+            request_key_frame,
+        });
     }
     if stream.waiting_for_keyframe {
         if !frame.keyframe {
-            return Ok(None);
+            if !stream.keyframe_request_pending {
+                request_key_frame = true;
+                stream.keyframe_request_pending = true;
+            }
+            return Ok(VideoAssemblyResult {
+                frame: None,
+                request_key_frame,
+            });
         }
         stream.waiting_for_keyframe = false;
+        stream.keyframe_request_pending = false;
     }
 
-    Ok(Some(ReceivedVideoFrame {
-        screen_id,
-        packets: frame.packets,
-    }))
+    Ok(VideoAssemblyResult {
+        frame: Some(ReceivedVideoFrame {
+            screen_id,
+            packets: frame.packets,
+        }),
+        request_key_frame,
+    })
 }
 
 fn decode_rtp_metadata(packet: &bytes::Bytes) -> eros::Result<RtpPacketMetadata> {
@@ -411,6 +451,7 @@ fn validate_received_control(role: SessionRole, message: &ControlMessage) -> ero
             (SessionRole::Controller, "ScreenStreamsConfigured")
         }
         ControlMessage::StopScreenStream(_) => return Ok(()),
+        ControlMessage::RequestKeyFrame(_) => (SessionRole::Host, "RequestKeyFrame"),
     };
 
     if role != expected {
@@ -469,10 +510,12 @@ mod tests {
         assert!(
             assemble_video_frame(&mut frames, screen_id, first.clone())
                 .expect("First RTP packet should be accepted")
+                .frame
                 .is_none()
         );
         let frame = assemble_video_frame(&mut frames, screen_id, last.clone())
             .expect("Last RTP packet should complete the frame")
+            .frame
             .expect("Complete RTP frame should be published");
 
         assert_eq!(frame.screen_id, screen_id);
@@ -487,13 +530,13 @@ mod tests {
         assert!(
             assemble_video_frame(&mut streams, screen_id, rtp_packet(8, 11, false))
                 .expect("First RTP packet should be accepted")
+                .frame
                 .is_none()
         );
-        assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_packet(10, 11, true))
-                .expect("Sequence gap should discard the completed frame")
-                .is_none()
-        );
+        let dropped = assemble_video_frame(&mut streams, screen_id, rtp_packet(10, 11, true))
+            .expect("Sequence gap should discard the completed frame");
+        assert!(dropped.frame.is_none());
+        assert!(dropped.request_key_frame);
         assert!(
             streams
                 .get(&screen_id)
@@ -509,13 +552,25 @@ mod tests {
         assert!(
             assemble_video_frame(&mut streams, screen_id, rtp_packet(8, 11, true))
                 .expect("Initial RTP frame should complete")
+                .frame
                 .is_some()
         );
-        assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(10, 12, true))
-                .expect("Frame with a missing first packet should be discarded")
-                .is_none()
-        );
+        let dropped = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(10, 12, true))
+            .expect("Frame with a missing first packet should be discarded");
+        assert!(dropped.frame.is_none());
+        assert!(dropped.request_key_frame);
+    }
+
+    #[test]
+    fn requests_an_idr_when_the_first_received_frame_is_not_a_key_frame() {
+        let screen_id = ScreenId(7);
+        let mut streams = HashMap::new();
+
+        let received = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(20, 1, true))
+            .expect("Initial dependent frame should be handled");
+
+        assert!(received.frame.is_none());
+        assert!(received.request_key_frame);
     }
 
     #[test]
@@ -526,21 +581,21 @@ mod tests {
         assert!(
             assemble_video_frame(&mut streams, screen_id, rtp_packet(1, 1, true))
                 .expect("Initial IDR should be accepted")
+                .frame
                 .is_some()
         );
-        assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
-                .expect("Sequence gap should be handled")
-                .is_none()
-        );
-        assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(4, 3, true))
-                .expect("Dependent frame should be discarded while waiting for IDR")
-                .is_none()
-        );
+        let gap = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
+            .expect("Sequence gap should be handled");
+        assert!(gap.frame.is_none());
+        assert!(gap.request_key_frame);
+        let dependent = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(4, 3, true))
+            .expect("Dependent frame should be discarded while waiting for IDR");
+        assert!(dependent.frame.is_none());
+        assert!(!dependent.request_key_frame);
         assert!(
             assemble_video_frame(&mut streams, screen_id, rtp_packet(5, 4, true))
                 .expect("Complete IDR should restore the stream")
+                .frame
                 .is_some()
         );
     }
@@ -655,6 +710,37 @@ mod tests {
 
             assert_eq!(stop.screen_id, ScreenId(4));
         }
+    }
+
+    #[test]
+    fn controller_requests_a_key_frame_for_only_the_selected_screen() {
+        let session = SessionSend {
+            id: SessionId(10),
+            role: SessionRole::Controller,
+            send: TestTransportSend {
+                messages: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
+            },
+        };
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime
+            .block_on(session.request_key_frame(ScreenId(5)))
+            .expect("Controller should request a key frame");
+
+        let message = session
+            .send
+            .messages
+            .into_inner()
+            .pop()
+            .expect("Transport should receive the key-frame request");
+        let ControlMessage::RequestKeyFrame(request) =
+            ControlMessage::try_from(message).expect("Key-frame request should decode")
+        else {
+            panic!("Decoded control message should request one key frame");
+        };
+
+        assert_eq!(request.screen_id, ScreenId(5));
     }
 
     #[test]

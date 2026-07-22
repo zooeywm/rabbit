@@ -1,23 +1,31 @@
 use std::{future::Future, marker::PhantomData, rc::Rc};
 
-use crate::kernel::video_encoder::VideoEncoder;
+use crate::kernel::video_encoder::{VideoEncoder, VideoEncoderCommand};
 
 /// Connects one processed screen-frame stream to one long-lived video encoder.
-pub struct ScreenStream<Frames, Encoder, SendPacket> {
+pub struct ScreenStream<Frames, Commands, Encoder, SendPacket> {
     frames: Frames,
+    commands: Commands,
     max_packet_size: usize,
     send_packet: SendPacket,
     encoder: PhantomData<Encoder>,
 }
 
-impl<Frames, Encoder, SendPacket> ScreenStream<Frames, Encoder, SendPacket>
+impl<Frames, Commands, Encoder, SendPacket> ScreenStream<Frames, Commands, Encoder, SendPacket>
 where
     Encoder: VideoEncoder,
     Frames: futures_core::Stream<Item = eros::Result<Rc<Encoder::Input>>> + Unpin,
+    Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
 {
-    pub fn new(frames: Frames, max_packet_size: usize, send_packet: SendPacket) -> Self {
+    pub fn new(
+        frames: Frames,
+        commands: Commands,
+        max_packet_size: usize,
+        send_packet: SendPacket,
+    ) -> Self {
         Self {
             frames,
+            commands,
             max_packet_size,
             send_packet,
             encoder: PhantomData,
@@ -29,7 +37,12 @@ where
         SendPacket: FnMut(Encoder::Packet) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
-        Encoder::run(self.frames, self.max_packet_size, self.send_packet)
+        Encoder::run(
+            self.frames,
+            self.commands,
+            self.max_packet_size,
+            self.send_packet,
+        )
     }
 }
 
@@ -39,7 +52,10 @@ mod tests {
 
     use futures_util::StreamExt as _;
 
-    use crate::kernel::{screen_stream::ScreenStream, video_encoder::VideoEncoder};
+    use crate::kernel::{
+        screen_stream::ScreenStream,
+        video_encoder::{VideoEncoder, VideoEncoderCommand},
+    };
 
     struct ProcessedFrame(u8);
 
@@ -52,29 +68,37 @@ mod tests {
         type Input = ProcessedFrame;
         type Packet = EncodedPacket;
 
-        fn run<Frames, SendPacket, SendFuture>(
+        fn run<Frames, Commands, SendPacket, SendFuture>(
             frames: Frames,
+            commands: Commands,
             _max_packet_size: usize,
             send_packet: SendPacket,
         ) -> impl Future<Output = eros::Result<()>>
         where
             Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
+            Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
             SendPacket: FnMut(Self::Packet) -> SendFuture,
             SendFuture: Future<Output = eros::Result<()>>,
         {
-            drive_empty_encoder(frames, send_packet)
+            drive_empty_encoder(frames, commands, send_packet)
         }
     }
 
-    async fn drive_empty_encoder<Frames, SendPacket, SendFuture>(
+    async fn drive_empty_encoder<Frames, Commands, SendPacket, SendFuture>(
         mut frames: Frames,
+        mut commands: Commands,
         mut send_packet: SendPacket,
     ) -> eros::Result<()>
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<ProcessedFrame>>> + Unpin,
+        Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
         SendPacket: FnMut(EncodedPacket) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
+        assert_eq!(
+            commands.next().await,
+            Some(VideoEncoderCommand::RequestKeyFrame)
+        );
         while let Some(frame) = frames.next().await {
             let frame = frame.expect("Screen stream should contain a processed frame");
             send_packet(EncodedPacket(frame.0)).await?;
@@ -87,10 +111,15 @@ mod tests {
     fn drives_processed_frames_through_the_selected_encoder() {
         let frames = futures_util::stream::iter([Ok(Rc::new(ProcessedFrame(11)))]);
         let packets = std::cell::RefCell::new(Vec::new());
-        let stream = ScreenStream::<_, EmptyEncoder, _>::new(frames, 1_200, |packet| {
-            packets.borrow_mut().push(packet);
-            std::future::ready(Ok(()))
-        });
+        let stream = ScreenStream::<_, _, EmptyEncoder, _>::new(
+            frames,
+            futures_util::stream::iter([VideoEncoderCommand::RequestKeyFrame]),
+            1_200,
+            |packet| {
+                packets.borrow_mut().push(packet);
+                std::future::ready(Ok(()))
+            },
+        );
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime

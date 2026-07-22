@@ -11,7 +11,8 @@ use futures_core::Stream as _;
 use futures_util::future::{Either, select};
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{
-    Cast as _, ElementExt as _, GObjectExtManualGst as _, GstBinExtManual as _, GstObjectExt as _,
+    Cast as _, ElementExt as _, ElementExtManual as _, GObjectExtManualGst as _,
+    GstBinExtManual as _, GstObjectExt as _,
 };
 use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
@@ -21,7 +22,7 @@ use crate::infra::platform::{
     video_encoder::gstreamer::probe::GStreamerVideoProbe,
     video_probe::VideoFrameProbe,
 };
-use crate::kernel::geometry::FrameRate;
+use crate::kernel::{geometry::FrameRate, video_encoder::VideoEncoderCommand};
 
 struct DmaBufLeaseOwner {
     _lease: DmaBufLease,
@@ -536,13 +537,15 @@ pub(crate) struct GStreamerVideoEncoder {
 }
 
 impl GStreamerVideoEncoder {
-    async fn run_inner<Frames, SendPacket, SendFuture>(
+    async fn run_inner<Frames, Commands, SendPacket, SendFuture>(
         mut frames: Frames,
+        mut commands: Commands,
         max_rtp_packet_size: usize,
         mut send_packet: SendPacket,
     ) -> eros::Result<()>
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<GbmFramePipelineFrame>>> + Unpin,
+        Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
         SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
@@ -554,7 +557,9 @@ impl GStreamerVideoEncoder {
             first_frame.with_context(|| "Failed to receive first frame-pipeline output")?,
         )?;
         let mut encoder = Self::new(first_frame, max_rtp_packet_size)?;
-        let result = encoder.drive(&mut frames, &mut send_packet).await;
+        let result = encoder
+            .drive(&mut frames, &mut commands, &mut send_packet)
+            .await;
         let stop = encoder
             .stop()
             .with_context(|| "Failed to stop GStreamer video encoder");
@@ -626,7 +631,7 @@ impl GStreamerVideoEncoder {
                     factory_name
                 )
             })?;
-        configure_low_latency_encoder(&element, input_signature.frame_rate);
+        configure_low_latency_encoder(&element);
         tracing::info!(
             target: "rabbit::video_encoder",
             event = "video_encoder_selected",
@@ -635,6 +640,7 @@ impl GStreamerVideoEncoder {
             frame_rate_denominator = input_signature.frame_rate.denominator(),
             bitrate_kbps = H264_BITRATE_KBPS,
             cpb_size_kbits = H264_CPB_SIZE_KBITS,
+            key_int_max = H264_KEY_INT_MAX,
             "Selected low-latency hardware H.264 encoder"
         );
         let source = create_required_element("appsrc", "video-input")?;
@@ -777,6 +783,22 @@ impl GStreamerVideoEncoder {
         Ok(())
     }
 
+    fn request_key_frame(&self) -> eros::Result<()> {
+        let event = gstreamer_video::DownstreamForceKeyUnitEvent::builder()
+            .all_headers(true)
+            .build();
+        if !self.source.send_event(event) {
+            tracing::warn!(
+                target: "rabbit::video_encoder",
+                event = "video_encoder_key_frame_request_rejected",
+                "Hardware H.264 encoder rejected the preferred force-key-unit request"
+            );
+            eros::bail!("GStreamer H.264 encoder rejected a force-key-unit request");
+        }
+
+        Ok(())
+    }
+
     fn prepare_frame(&self, frame: Rc<GbmFramePipelineFrame>) -> eros::Result<GStreamerVideoFrame> {
         GStreamerVideoFrame::from_pipeline_frame(
             frame,
@@ -910,22 +932,26 @@ impl GStreamerVideoEncoder {
                 .is_ok_and(|format| format == "XR24" || format.starts_with("XR24:"))
     }
 
-    async fn drive<Frames, SendPacket, SendFuture>(
+    async fn drive<Frames, Commands, SendPacket, SendFuture>(
         &mut self,
         frames: &mut Frames,
+        commands: &mut Commands,
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<GbmFramePipelineFrame>>> + Unpin,
+        Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
         SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         enum Event {
             Frame(Option<eros::Result<Rc<GbmFramePipelineFrame>>>),
+            Command(Option<VideoEncoderCommand>),
             Packet(eros::Result<Option<GStreamerRtpPacket>>),
         }
 
         let mut input_open = true;
+        let mut commands_open = true;
 
         loop {
             if !input_open {
@@ -936,7 +962,20 @@ impl GStreamerVideoEncoder {
                 continue;
             }
 
-            let event = {
+            let event = if commands_open {
+                let next_frame = poll_fn(|context| Pin::new(&mut *frames).poll_next(context));
+                let next_command = poll_fn(|context| Pin::new(&mut *commands).poll_next(context));
+                let next_packet = self.receive_packet();
+                futures_util::pin_mut!(next_frame, next_command, next_packet);
+
+                let input = select(next_command, next_frame);
+                futures_util::pin_mut!(input);
+                match select(input, next_packet).await {
+                    Either::Left((Either::Left((command, _)), _)) => Event::Command(command),
+                    Either::Left((Either::Right((frame, _)), _)) => Event::Frame(frame),
+                    Either::Right((packet, _)) => Event::Packet(packet),
+                }
+            } else {
                 let next_frame = poll_fn(|context| Pin::new(&mut *frames).poll_next(context));
                 let next_packet = self.receive_packet();
                 futures_util::pin_mut!(next_frame, next_packet);
@@ -958,6 +997,10 @@ impl GStreamerVideoEncoder {
                     self.finish()?;
                     input_open = false;
                 }
+                Event::Command(Some(VideoEncoderCommand::RequestKeyFrame)) => {
+                    self.request_key_frame()?;
+                }
+                Event::Command(None) => commands_open = false,
                 Event::Packet(packet) => match packet? {
                     Some(packet) => send_packet(packet).await?,
                     None => return Ok(()),
@@ -971,17 +1014,19 @@ impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
     type Input = GbmFramePipelineFrame;
     type Packet = GStreamerRtpPacket;
 
-    fn run<Frames, SendPacket, SendFuture>(
+    fn run<Frames, Commands, SendPacket, SendFuture>(
         frames: Frames,
+        commands: Commands,
         max_packet_size: usize,
         send_packet: SendPacket,
     ) -> impl Future<Output = eros::Result<()>>
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
+        Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
         SendPacket: FnMut(Self::Packet) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
-        Self::run_inner(frames, max_packet_size, send_packet)
+        Self::run_inner(frames, commands, max_packet_size, send_packet)
     }
 }
 
@@ -1094,8 +1139,9 @@ fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gstreamer::Cap
 
 const H264_BITRATE_KBPS: u32 = 50_000;
 const H264_CPB_SIZE_KBITS: u32 = 5_000;
+const H264_KEY_INT_MAX: u32 = 1_024;
 
-fn configure_low_latency_encoder(encoder: &gstreamer::Element, frame_rate: FrameRate) {
+fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
     let is_vaapi = encoder
         .factory()
         .is_some_and(|factory| factory.name().starts_with("va"));
@@ -1112,13 +1158,7 @@ fn configure_low_latency_encoder(encoder: &gstreamer::Element, frame_rate: Frame
     encoder.set_property_from_str("rate-control", "cbr");
     encoder.set_property("bitrate", H264_BITRATE_KBPS);
     encoder.set_property("cpb-size", H264_CPB_SIZE_KBITS);
-    encoder.set_property(
-        "key-int-max",
-        frame_rate
-            .numerator()
-            .div_ceil(frame_rate.denominator())
-            .clamp(1, 1_024),
-    );
+    encoder.set_property("key-int-max", H264_KEY_INT_MAX);
 }
 
 fn h264_rtp_caps() -> gstreamer::Caps {
@@ -1179,8 +1219,8 @@ mod tests {
                 screen_capture::{KmsCaptureLease, KmsFrameReceiver},
                 video_encoder::gstreamer::{
                     GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
-                    configure_low_latency_encoder, create_required_element, dmabuf_caps,
-                    h264_rtp_caps, va_vpp_input_modifier, va_vpp_output_caps,
+                    H264_KEY_INT_MAX, configure_low_latency_encoder, create_required_element,
+                    dmabuf_caps, h264_rtp_caps, va_vpp_input_modifier, va_vpp_output_caps,
                     validate_dmabuf_buffer,
                 },
             },
@@ -1457,8 +1497,11 @@ mod tests {
                 )
                 .expect("Host video frame pipeline should start");
             let frames = TimedFrames::new(frames, run_duration);
-            let encoding =
-                GStreamerVideoEncoder::run_inner(frames, MAX_RTP_PACKET_SIZE, move |packet| {
+            let encoding = GStreamerVideoEncoder::run_inner(
+                frames,
+                futures_util::stream::pending(),
+                MAX_RTP_PACKET_SIZE,
+                move |packet| {
                     assert!(
                         packet.payload.len() <= MAX_RTP_PACKET_SIZE,
                         "Encoded RTP packet should respect the transport packet size"
@@ -1469,7 +1512,8 @@ mod tests {
                     }
 
                     ready(Ok::<(), eros::ErrorUnion>(()))
-                });
+                },
+            );
 
             let result = compio::time::timeout(test_timeout, encoding).await;
             result
@@ -1610,6 +1654,14 @@ mod tests {
         let input_caps = registered_nv12_dmabuf_input_caps();
         let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
             .expect("The hardware H.264 pipeline should be created");
+        assert_eq!(
+            encoder
+                .pipeline
+                .by_name("h264-encoder")
+                .expect("The pipeline should retain its hardware encoder")
+                .property::<u32>("key-int-max"),
+            H264_KEY_INT_MAX
+        );
 
         encoder
             .start()
@@ -1628,6 +1680,25 @@ mod tests {
             .state(gstreamer::ClockTime::from_seconds(5));
         stopped.expect("The hardware H.264 pipeline should finish stopping");
         assert_eq!(current, gstreamer::State::Null);
+    }
+
+    #[test]
+    #[ignore = "run through scripts/test-gstreamer"]
+    fn requests_a_key_frame_from_the_running_hardware_encoder() {
+        gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
+        let input_caps = registered_nv12_dmabuf_input_caps();
+        let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
+            .expect("The hardware H.264 pipeline should be created");
+
+        encoder
+            .start()
+            .expect("The hardware H.264 pipeline should start");
+        encoder
+            .request_key_frame()
+            .expect("The running hardware encoder should accept a force-key-unit request");
+        encoder
+            .stop()
+            .expect("The hardware H.264 pipeline should stop");
     }
 
     #[test]
@@ -1998,10 +2069,7 @@ mod tests {
         filter.set_property("caps", &output_caps);
         let encoder = create_required_element("vah264enc", "vaapi-test-encoder")
             .expect("GStreamer VAAPI H.264 encoder should be available");
-        configure_low_latency_encoder(
-            &encoder,
-            FrameRate::new(120, 1).expect("Test frame rate should be valid"),
-        );
+        configure_low_latency_encoder(&encoder);
         let sink = create_required_element("appsink", "vaapi-test-output")
             .expect("GStreamer appsink should be available")
             .downcast::<gstreamer_app::AppSink>()
