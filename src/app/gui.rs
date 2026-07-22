@@ -24,10 +24,11 @@ use crate::app::{
 use crate::{
     app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
     infra::{
-        DirectConnectionOutcome, GStreamerVideoDecoder, PendingQuicConnectionRequest, QuicEndpoint,
-        QuicTransport, QuicTransportRecv, QuicTransportSend, WorkerReaper, connect_transport,
-        create_frame_pipeline_manager_state, create_screen_capture_manager_state,
-        create_screen_layout_manager_state, receive_request, unsync_queue::UnsyncQueue,
+        ConnectionEndpoint, DirectConnectionOutcome, GStreamerVideoDecoder,
+        PendingConnectionRequest, SessionTransport, SessionTransportRecv, SessionTransportSend,
+        WorkerReaper, connect_transport, create_frame_pipeline_manager_state,
+        create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
+        unsync_queue::UnsyncQueue,
     },
     kernel::{
         connection_request::ConnectionRequest,
@@ -92,8 +93,8 @@ pub(crate) fn run() -> eros::Result<()> {
 pub(crate) struct PendingHostSession {
     peer_address: SocketAddr,
     peer_name: String,
-    send: SessionSend<QuicTransportSend>,
-    recv: SessionRecv<QuicTransportRecv>,
+    send: SessionSend<SessionTransportSend>,
+    recv: SessionRecv<SessionTransportRecv>,
 }
 
 pub(crate) struct RootApplication {
@@ -121,12 +122,12 @@ pub(crate) enum RootMessage {
     ShutdownFinished,
     ConnectDirect(String),
     DirectConnectionFinished(eros::Result<DirectConnectionOutcome>),
-    ConnectionRequest(PendingQuicConnectionRequest),
+    ConnectionRequest(PendingConnectionRequest),
     AcceptConnectionRequest(usize),
     RejectConnectionRequest(usize),
     ConnectionAccepted {
         peer_name: String,
-        result: eros::Result<QuicTransport>,
+        result: eros::Result<SessionTransport>,
     },
     InitialScreenListFinished {
         session: PendingHostSession,
@@ -343,7 +344,7 @@ impl RootApplication {
         &mut self,
         peer_address: SocketAddr,
         peer_name: Option<String>,
-        send: SessionSend<QuicTransportSend>,
+        send: SessionSend<SessionTransportSend>,
         recv: SessionRecv<R>,
         sender: &MessageSender,
     ) -> bool
@@ -484,7 +485,7 @@ impl RootApplication {
         Ok((ip, None))
     }
 
-    fn take_connection_request(&mut self, index: usize) -> Option<PendingQuicConnectionRequest> {
+    fn take_connection_request(&mut self, index: usize) -> Option<PendingConnectionRequest> {
         if index >= self.model.pending_connection_requests.len() {
             return None;
         }
@@ -610,14 +611,15 @@ impl RootApplication {
         );
         let frame_pipeline_manager_state =
             create_frame_pipeline_manager_state(worker_reaper_handle);
-        let quic_endpoint = QuicEndpoint::new()
+        let connection_endpoint = ConnectionEndpoint::new(config.network.transport)
             .await
-            .context("Failed to create the QUIC endpoint")?;
-        let local_address = quic_endpoint.local_address()?;
+            .context("Failed to create the configured connection endpoint")?;
+        let local_address = connection_endpoint.local_address()?;
         let requester_name = format!("{} ({})", config.app_name, local_address.port());
 
         info!(
             event = "listener_started",
+            transport = ?config.network.transport,
             %local_address,
             "Connection listener started"
         );
@@ -627,7 +629,7 @@ impl RootApplication {
             screen_layout_manager_state,
             screen_capture_manager_state,
             frame_pipeline_manager_state,
-            quic_endpoint.clone(),
+            connection_endpoint.clone(),
             worker_reaper,
         );
         app.run().await?;
@@ -648,7 +650,7 @@ impl RootApplication {
             pending_screen_stream_starts: HashSet::new(),
             pending_host_screen_stream_stops: HashSet::new(),
             _connection_listener: compio::runtime::spawn(receive_connection_requests(
-                quic_endpoint,
+                connection_endpoint,
                 sender.clone(),
             )),
             _logger_guard: logger_guard,
@@ -1125,7 +1127,7 @@ impl RootApplication {
                     self.set_connection_status("Connection already in progress");
                     return Ok(true);
                 }
-                let endpoint: &QuicEndpoint = self.model.app.as_ref();
+                let endpoint: &ConnectionEndpoint = self.model.app.as_ref();
                 let endpoint = endpoint.clone();
                 let request = ConnectionRequest {
                     requester_name: self.model.requester_name.clone(),
@@ -1905,7 +1907,7 @@ impl RootApplication {
     }
 }
 
-async fn receive_connection_requests(endpoint: QuicEndpoint, sender: MessageSender) {
+async fn receive_connection_requests(endpoint: ConnectionEndpoint, sender: MessageSender) {
     loop {
         let connection = match endpoint.accept_connection().await {
             Ok(Some(connection)) => connection,

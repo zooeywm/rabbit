@@ -19,7 +19,30 @@ pub struct Config {
     pub app_name: &'static str,
 
     pub logging: LoggingConfig,
+    pub network: NetworkConfig,
     pub video: VideoConfig,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkConfig {
+    pub transport: NetworkTransport,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            transport: NetworkTransport::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkTransport {
+    #[default]
+    Quic,
+    Tcp,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -82,6 +105,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             logging: LoggingConfig::default(),
+            network: NetworkConfig::default(),
             video: VideoConfig::default(),
             project_dirs: None,
             app_name: APP_NAME,
@@ -148,7 +172,20 @@ const fn default_app_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::config::{Config, VideoDisplayPreference};
+    use crate::app::config::{Config, NetworkTransport, VideoDisplayPreference};
+
+    #[test]
+    fn network_transport_defaults_to_quic() {
+        assert_eq!(Config::default().network.transport, NetworkTransport::Quic);
+    }
+
+    #[test]
+    fn network_transport_can_be_configured_as_tcp() {
+        let config = toml::from_str::<Config>("[network]\ntransport = \"tcp\"")
+            .expect("TCP network transport configuration should deserialize");
+
+        assert_eq!(config.network.transport, NetworkTransport::Tcp);
+    }
 
     #[test]
     fn host_and_client_video_probing_are_disabled_by_default() {
@@ -207,3 +244,5 @@ mod tests {
         }
     }
 }
+
+// Focused test: cargo test app::config::tests:: --lib

@@ -8,6 +8,7 @@ pub struct ConnectionRequest {
 pub enum ConnectionResponse {
     Accepted,
     Rejected,
+    SelfConnection,
 }
 
 impl From<ConnectionResponse> for u8 {
@@ -24,6 +25,8 @@ impl TryFrom<u8> for ConnectionResponse {
             Ok(Self::Accepted)
         } else if response == Self::Rejected as u8 {
             Ok(Self::Rejected)
+        } else if response == Self::SelfConnection as u8 {
+            Ok(Self::SelfConnection)
         } else {
             Err(UnknownConnectionResponse(response))
         }

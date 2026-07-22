@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::{
     app::config::Config,
-    infra::{QuicEndpoint, WorkerReaper},
+    infra::{ConnectionEndpoint, WorkerReaper},
     kernel::screen_manager::ScreenLayoutManager,
 };
 
@@ -23,7 +23,7 @@ pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelin
     screen_layout_manager_state: ScreenLayoutManagerState,
     screen_capture_manager_state: ScreenCaptureManagerState,
     frame_pipeline_manager_state: FramePipelineManagerState,
-    quic_endpoint: QuicEndpoint,
+    connection_endpoint: ConnectionEndpoint,
     _worker_reaper: WorkerReaper,
 }
 
@@ -36,7 +36,7 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerSt
         screen_layout_manager_state: ScreenLayoutManagerState,
         screen_capture_manager_state: ScreenCaptureManagerState,
         frame_pipeline_manager_state: FramePipelineManagerState,
-        quic_endpoint: QuicEndpoint,
+        connection_endpoint: ConnectionEndpoint,
         worker_reaper: WorkerReaper,
     ) -> Self {
         Self {
@@ -44,7 +44,7 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerSt
             screen_layout_manager_state,
             screen_capture_manager_state,
             frame_pipeline_manager_state,
-            quic_endpoint,
+            connection_endpoint,
             _worker_reaper: worker_reaper,
         }
     }

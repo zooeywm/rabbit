@@ -1,9 +1,9 @@
 use crate::{
     app::{App, config::Config},
     infra::{
-        GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
-        KmsScreenCaptureManagerState, NiriScreenLayoutManager, NiriScreenLayoutManagerState,
-        QuicEndpoint,
+        ConnectionEndpoint, GbmFramePipelineManager, GbmFramePipelineManagerState,
+        KmsScreenCaptureManager, KmsScreenCaptureManagerState, NiriScreenLayoutManager,
+        NiriScreenLayoutManagerState,
     },
     kernel::{
         frame_pipeline::FramePipelineManager,
@@ -21,11 +21,11 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerSt
 }
 
 impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
-    AsRef<QuicEndpoint>
+    AsRef<ConnectionEndpoint>
     for App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
 {
-    fn as_ref(&self) -> &QuicEndpoint {
-        &self.quic_endpoint
+    fn as_ref(&self) -> &ConnectionEndpoint {
+        &self.connection_endpoint
     }
 }
 
