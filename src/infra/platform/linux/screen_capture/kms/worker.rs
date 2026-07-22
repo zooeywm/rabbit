@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::{
     io,
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use flume::{Receiver, Sender, TryRecvError, TrySendError, bounded};
@@ -64,6 +65,7 @@ impl KmsCaptureLease {
     pub(crate) fn new(
         screen_name: String,
         enable_probing: bool,
+        probe_interval: Duration,
         reaper: WorkerReaperHandle,
         encoder_profiles: Vec<DmaBufProfile>,
     ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
@@ -80,6 +82,7 @@ impl KmsCaptureLease {
                 frame_sender,
                 overflow_frames,
                 enable_probing,
+                probe_interval,
                 encoder_profiles,
             );
         })?;
@@ -162,6 +165,7 @@ fn run_capture_loop(
     frames: Sender<eros::Result<KmsCapturedFrame>>,
     overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
     enable_probing: bool,
+    probe_interval: Duration,
     encoder_profiles: Vec<DmaBufProfile>,
 ) {
     let mut capturer = match KmsCapturer::new(&screen_name, encoder_profiles) {
@@ -176,7 +180,7 @@ fn run_capture_loop(
         return;
     }
 
-    let mut probe_clock = enable_probing.then(VideoProbeClock::new);
+    let mut probe_clock = enable_probing.then(|| VideoProbeClock::new(probe_interval));
 
     loop {
         match commands.try_recv() {
@@ -246,6 +250,8 @@ fn publish_latest_frame(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use flume::bounded;
 
     use crate::{
@@ -263,6 +269,7 @@ mod tests {
         let source = KmsCaptureLease::new(
             "not-a-real-output".to_owned(),
             false,
+            Duration::from_secs(2),
             reaper_handle,
             Vec::new(),
         )

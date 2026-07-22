@@ -99,6 +99,7 @@ impl KmsCapturer {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
 
     use crate::{
         infra::platform::{gpu::GpuContext, screen_capture::kms::KmsCaptureLease},
@@ -112,9 +113,14 @@ mod tests {
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
         let (_reaper, reaper_handle) =
             crate::infra::WorkerReaper::new().expect("Test worker reaper should start");
-        let ScreenCaptureSource { lease, receiver } =
-            KmsCaptureLease::new(screen_name, false, reaper_handle, Vec::new())
-                .expect("KMS capture source should start");
+        let ScreenCaptureSource { lease, receiver } = KmsCaptureLease::new(
+            screen_name,
+            false,
+            Duration::from_secs(2),
+            reaper_handle,
+            Vec::new(),
+        )
+        .expect("KMS capture source should start");
         let (device, frames) = receiver.into_parts();
         let device = device
             .recv()

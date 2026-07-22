@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 mod backend;
@@ -78,6 +79,7 @@ pub(crate) fn install(
     window: &RabbitWindow,
     errors: flume::Sender<GuiIntent>,
     preference: VideoDisplayPreference,
+    probe_interval: Duration,
 ) -> eros::Result<VideoViewPublisher> {
     let (sender, receiver) = flume::bounded(1);
     let publisher = VideoViewPublisher {
@@ -154,6 +156,7 @@ pub(crate) fn install(
                         display,
                         active_stream,
                         preference,
+                        probe_interval,
                         *get_proc_address,
                     );
                     match result {
@@ -260,6 +263,7 @@ fn render_video_frame(
     display: &mut Option<ActiveVideoDisplay>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
     preference: VideoDisplayPreference,
+    probe_interval: Duration,
     get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
 ) -> eros::Result<Option<(SessionId, ScreenId)>> {
     let mut presented = None;
@@ -278,9 +282,16 @@ fn render_video_frame(
                         preference,
                         window.window(),
                         get_proc_address,
+                        probe_interval,
                     )?);
                 }
-                present_video_frame(display, preference, get_proc_address, *frame)?;
+                present_video_frame(
+                    display,
+                    preference,
+                    get_proc_address,
+                    probe_interval,
+                    *frame,
+                )?;
                 if activate_stream(active_stream, session_id, screen_id) {
                     presented = Some((session_id, screen_id));
                 }
@@ -399,15 +410,17 @@ fn create_video_display(
     preference: VideoDisplayPreference,
     window: &slint::Window,
     get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+    probe_interval: Duration,
 ) -> eros::Result<ActiveVideoDisplay> {
     if preference == VideoDisplayPreference::Slint {
         let selection = select_video_display_backend(preference, None)?;
-        let display = ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(get_proc_address)?);
+        let display =
+            ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(get_proc_address, probe_interval)?);
         log_video_display_selection(preference, selection.backend, None);
         return Ok(display);
     }
 
-    match WaylandVideoRenderer::new(window) {
+    match WaylandVideoRenderer::new(window, probe_interval) {
         Ok(renderer) => {
             let selection = select_video_display_backend(preference, None)?;
             log_video_display_selection(preference, selection.backend, None);
@@ -416,7 +429,10 @@ fn create_video_display(
         Err(error) => {
             let reason = format!("{error:?}");
             let selection = select_video_display_backend(preference, Some(reason.clone()))?;
-            let display = ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(get_proc_address)?);
+            let display = ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(
+                get_proc_address,
+                probe_interval,
+            )?);
             log_video_display_selection(
                 preference,
                 selection.backend,
@@ -431,6 +447,7 @@ fn present_video_frame(
     display: &mut Option<ActiveVideoDisplay>,
     preference: VideoDisplayPreference,
     get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+    probe_interval: Duration,
     frame: GStreamerDecodedFrame,
 ) -> eros::Result<()> {
     let error = match display.as_mut() {
@@ -457,7 +474,7 @@ fn present_video_frame(
             .teardown()
             .with_context(|| "Failed to tear down rejected Wayland video display")?;
     }
-    let mut fallback = OpenGlVideoRenderer::new(get_proc_address)
+    let mut fallback = OpenGlVideoRenderer::new(get_proc_address, probe_interval)
         .with_context(|| "Failed to create Slint video display fallback")?;
     fallback.present(frame);
     *display = Some(ActiveVideoDisplay::Slint(fallback));
@@ -598,8 +615,9 @@ mod tests {
             .expect("RABBIT_CLIENT_VIDEO_TEST_SECONDS should be a positive integer");
         assert!(seconds > 0, "Client video test duration should be positive");
 
-        let (gui, publisher, intents) = Gui::new(VideoDisplayPreference::Slint)
-            .expect("Slint video test window should be created");
+        let (gui, publisher, intents) =
+            Gui::new(VideoDisplayPreference::Slint, Duration::from_secs(2))
+                .expect("Slint video test window should be created");
         publisher
             .publish(ViewState {
                 page: ViewPage::StreamRequest,

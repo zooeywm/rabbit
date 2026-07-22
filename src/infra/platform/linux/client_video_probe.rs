@@ -1,10 +1,11 @@
-use std::time::{Duration, Instant};
+use std::{
+    fmt::{self, Display, Formatter},
+    time::{Duration, Instant},
+};
 
 use gstreamer::prelude::{ElementExt as _, PadExtManual as _};
 
 use crate::kernel::screen_manager::ScreenId;
-
-const REPORT_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default)]
 pub(crate) struct ClientVideoProbeClock {
@@ -37,8 +38,9 @@ struct ClientVideoFrameTimestamps {
     render_completed: Option<Instant>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ClientVideoProbeReporter {
+    report_interval: Duration,
     window_started: Option<Instant>,
     frames: u64,
     rtp_packets: u64,
@@ -67,6 +69,14 @@ struct ClientVideoFrameTimings {
     render_queue: Duration,
     render: Duration,
     client_latency: Duration,
+}
+
+struct TwoDecimal(f64);
+
+impl Display for TwoDecimal {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:.2}", self.0)
+    }
 }
 
 impl ClientVideoProbeClock {
@@ -234,6 +244,17 @@ impl ClientVideoFrameProbe {
 }
 
 impl ClientVideoProbeReporter {
+    pub(crate) fn new(report_interval: Duration) -> Self {
+        Self {
+            report_interval,
+            window_started: None,
+            frames: 0,
+            rtp_packets: 0,
+            rtp_bytes: 0,
+            totals: ClientVideoProbeStageTotals::default(),
+        }
+    }
+
     pub(crate) fn record_frame(&mut self, screen_id: ScreenId, probe: ClientVideoFrameProbe) {
         let now = Instant::now();
         let timings = match probe.finish() {
@@ -254,14 +275,14 @@ impl ClientVideoProbeReporter {
             target: "rabbit::client_video_probe",
             screen_id = screen_id.get(),
             frame_id = probe.frame_id,
-            decoder_queue_ms = duration_ms(timings.decoder_queue),
-            decode_ms = duration_ms(timings.decode),
-            presentation_queue_ms = duration_ms(timings.presentation_queue),
-            dma_buf_import_queue_ms = duration_ms(timings.dma_buf_import_queue),
-            dma_buf_import_ms = duration_ms(timings.dma_buf_import),
-            render_queue_ms = duration_ms(timings.render_queue),
-            render_ms = duration_ms(timings.render),
-            client_latency_ms = duration_ms(timings.client_latency),
+            decoder_queue_ms = %TwoDecimal(duration_ms(timings.decoder_queue)),
+            decode_ms = %TwoDecimal(duration_ms(timings.decode)),
+            presentation_queue_ms = %TwoDecimal(duration_ms(timings.presentation_queue)),
+            dma_buf_import_queue_ms = %TwoDecimal(duration_ms(timings.dma_buf_import_queue)),
+            dma_buf_import_ms = %TwoDecimal(duration_ms(timings.dma_buf_import)),
+            render_queue_ms = %TwoDecimal(duration_ms(timings.render_queue)),
+            render_ms = %TwoDecimal(duration_ms(timings.render)),
+            client_latency_ms = %TwoDecimal(duration_ms(timings.client_latency)),
             rtp_packets = probe.rtp_packets,
             rtp_bytes = probe.rtp_bytes,
             "Client video frame rendered"
@@ -275,7 +296,7 @@ impl ClientVideoProbeReporter {
 
         if self
             .window_started
-            .is_some_and(|started| now.duration_since(started) >= REPORT_WINDOW)
+            .is_some_and(|started| now.duration_since(started) >= self.report_interval)
         {
             self.report_window(false);
         }
@@ -300,20 +321,20 @@ impl ClientVideoProbeReporter {
         tracing::info!(
             target: "rabbit::client_video_probe",
             partial,
-            window_ms = duration_ms(window_elapsed),
+            window_ms = %TwoDecimal(duration_ms(window_elapsed)),
             frames,
-            fps = rate(frames, window_elapsed),
-            avg_client_latency_ms = average_ms(self.totals.client_latency, frames),
-            avg_decoder_queue_ms = average_ms(self.totals.decoder_queue, frames),
-            avg_decode_ms = average_ms(self.totals.decode, frames),
-            avg_presentation_queue_ms = average_ms(self.totals.presentation_queue, frames),
-            avg_dma_buf_import_queue_ms = average_ms(
+            fps = %TwoDecimal(rate(frames, window_elapsed)),
+            avg_client_latency_ms = %TwoDecimal(average_ms(self.totals.client_latency, frames)),
+            avg_decoder_queue_ms = %TwoDecimal(average_ms(self.totals.decoder_queue, frames)),
+            avg_decode_ms = %TwoDecimal(average_ms(self.totals.decode, frames)),
+            avg_presentation_queue_ms = %TwoDecimal(average_ms(self.totals.presentation_queue, frames)),
+            avg_dma_buf_import_queue_ms = %TwoDecimal(average_ms(
                 self.totals.dma_buf_import_queue,
                 frames
-            ),
-            avg_dma_buf_import_ms = average_ms(self.totals.dma_buf_import, frames),
-            avg_render_queue_ms = average_ms(self.totals.render_queue, frames),
-            avg_render_ms = average_ms(self.totals.render, frames),
+            )),
+            avg_dma_buf_import_ms = %TwoDecimal(average_ms(self.totals.dma_buf_import, frames)),
+            avg_render_queue_ms = %TwoDecimal(average_ms(self.totals.render_queue, frames)),
+            avg_render_ms = %TwoDecimal(average_ms(self.totals.render, frames)),
             rtp_packets = self.rtp_packets,
             rtp_bytes = self.rtp_bytes,
             "Client video throughput window"
@@ -374,7 +395,7 @@ mod tests {
     use crate::{
         infra::platform::client_video_probe::{
             ClientVideoDecodeProbe, ClientVideoFrameProbe, ClientVideoProbeClock,
-            ClientVideoProbeReporter,
+            ClientVideoProbeReporter, TwoDecimal,
         },
         kernel::screen_manager::ScreenId,
     };
@@ -472,7 +493,7 @@ mod tests {
     #[test]
     fn reporter_accumulates_completed_client_frames() {
         let start = Instant::now() - Duration::from_millis(100);
-        let mut reporter = ClientVideoProbeReporter::default();
+        let mut reporter = ClientVideoProbeReporter::new(Duration::from_secs(2));
 
         reporter.record_frame(ScreenId(2), completed_probe(start));
 
@@ -486,12 +507,24 @@ mod tests {
     #[test]
     fn finishing_a_client_video_probe_window_resets_its_start() {
         let start = Instant::now() - Duration::from_millis(100);
-        let mut reporter = ClientVideoProbeReporter::default();
+        let mut reporter = ClientVideoProbeReporter::new(Duration::from_secs(2));
         reporter.record_frame(ScreenId(2), completed_probe(start));
 
         reporter.finish();
 
         assert!(reporter.window_started.is_none());
+        assert_eq!(reporter.frames, 0);
+    }
+
+    #[test]
+    fn reports_after_the_configured_client_video_interval() {
+        let start = Instant::now() - Duration::from_millis(100);
+        let mut reporter = ClientVideoProbeReporter::new(Duration::from_millis(50));
+        reporter.record_frame(ScreenId(2), completed_probe(start));
+        reporter.window_started = Some(Instant::now() - Duration::from_millis(100));
+
+        reporter.record_frame(ScreenId(2), completed_probe(start));
+
         assert_eq!(reporter.frames, 0);
     }
 
@@ -505,5 +538,10 @@ mod tests {
         probe.timestamps.render_started = Some(start + Duration::from_millis(41));
         probe.timestamps.render_completed = Some(start + Duration::from_millis(58));
         probe
+    }
+
+    #[test]
+    fn formats_client_video_floats_with_two_decimal_places() {
+        assert_eq!(TwoDecimal(115.12956516018339).to_string(), "115.13");
     }
 }

@@ -2,6 +2,7 @@ use std::{
     future::{Future, poll_fn},
     pin::Pin,
     rc::Rc,
+    time::Duration,
 };
 
 use drm::buffer::{DrmFourcc, DrmModifier};
@@ -552,11 +553,14 @@ impl GStreamerVideoEncoder {
         first_frame: GStreamerVideoFrame,
         max_rtp_packet_size: usize,
     ) -> eros::Result<Self> {
-        let enable_probing = first_frame.probe.is_some();
+        let probe_interval = first_frame
+            .probe
+            .as_ref()
+            .map(VideoFrameProbe::report_interval);
         let mut encoder = Self::create(
             first_frame.input_caps(),
             max_rtp_packet_size,
-            enable_probing,
+            probe_interval,
         )?;
         encoder.submit_frame(first_frame)?;
         encoder.start()?;
@@ -567,7 +571,7 @@ impl GStreamerVideoEncoder {
     fn create(
         input_caps: &gstreamer::CapsRef,
         max_rtp_packet_size: usize,
-        enable_probing: bool,
+        probe_interval: Option<Duration>,
     ) -> eros::Result<Self> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
         let rtp_mtu = rtp_mtu(max_rtp_packet_size)?;
@@ -676,11 +680,12 @@ impl GStreamerVideoEncoder {
             gstreamer::Element::link_many(base_elements)
                 .with_context(|| "Failed to link GStreamer H.264 RTP encoding pipeline")?;
         }
-        let probe = if enable_probing {
+        let probe = if let Some(report_interval) = probe_interval {
             Some(GStreamerVideoProbe::new(
                 &source,
                 vpp.as_ref().map(|(vpp, _, _)| vpp),
                 &element,
+                report_interval,
             )?)
         } else {
             None
@@ -1410,6 +1415,7 @@ mod tests {
             let mut deps = HostVideoTestDeps {
                 capture: KmsScreenCaptureManagerState::new(
                     true,
+                    Duration::from_secs(2),
                     reaper_handle.clone(),
                     crate::infra::platform::video_encoder::va_vpp_input_profiles,
                 ),
@@ -1481,7 +1487,7 @@ mod tests {
 
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let input_caps = registered_nv12_dmabuf_input_caps();
-        let encoder = GStreamerVideoEncoder::create(&input_caps, MAX_RTP_PACKET_SIZE, false)
+        let encoder = GStreamerVideoEncoder::create(&input_caps, MAX_RTP_PACKET_SIZE, None)
             .expect("A hardware H.264 encoder element should be created for NV12 DMA-BUF input");
         let factory = encoder
             .pipeline
@@ -1551,7 +1557,7 @@ mod tests {
             .field("drm-format", "P010")
             .build();
 
-        GStreamerVideoEncoder::create(&input_caps, 1_200, false)
+        GStreamerVideoEncoder::create(&input_caps, 1_200, None)
             .expect_err("The first-version encoder should reject P010 input");
     }
 
@@ -1565,7 +1571,7 @@ mod tests {
             .field("drm-format", "NV12")
             .build();
 
-        let error = GStreamerVideoEncoder::create(&input_caps, 27, false)
+        let error = GStreamerVideoEncoder::create(&input_caps, 27, None)
             .expect_err("The RTP payloader should reject packet sizes below 28 bytes");
 
         assert!(error.to_string().contains("at least 28 bytes"));
@@ -1576,7 +1582,7 @@ mod tests {
     fn starts_and_stops_hardware_h264_pipeline() {
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let input_caps = registered_nv12_dmabuf_input_caps();
-        let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, false)
+        let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
             .expect("The hardware H.264 pipeline should be created");
 
         encoder
@@ -1603,7 +1609,7 @@ mod tests {
     fn receives_gstreamer_eos_and_error_messages_asynchronously() {
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let input_caps = registered_nv12_dmabuf_input_caps();
-        let encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, false)
+        let encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
             .expect("The hardware H.264 pipeline should be created");
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
@@ -1643,7 +1649,7 @@ mod tests {
     fn finishes_hardware_h264_pipeline_through_appsrc() {
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let input_caps = registered_nv12_dmabuf_input_caps();
-        let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, false)
+        let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
             .expect("The hardware H.264 pipeline should be created");
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
@@ -1666,7 +1672,7 @@ mod tests {
     fn closes_rtp_output_when_hardware_pipeline_reaches_eos() {
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let input_caps = registered_nv12_dmabuf_input_caps();
-        let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, false)
+        let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
             .expect("The hardware H.264 pipeline should be created");
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
@@ -1745,7 +1751,7 @@ mod tests {
     fn submits_a_dmabuf_video_frame_to_appsrc() {
         gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
         let frame = dmabuf_video_frame();
-        let mut encoder = GStreamerVideoEncoder::create(frame.input_caps(), 1_200, false)
+        let mut encoder = GStreamerVideoEncoder::create(frame.input_caps(), 1_200, None)
             .expect("The hardware H.264 pipeline should be created");
 
         encoder
@@ -1902,7 +1908,7 @@ mod tests {
             let encode = elapsed(completed, encoded);
             let total = elapsed(submitted, encoded);
             println!(
-                "VAAPI frame {frame_index}: cold={}, submit_to_vpp_ms={:.3}, vpp_ms={:.3}, encode_ms={:.3}, total_ms={:.3}",
+                "VAAPI frame {frame_index}: cold={}, submit_to_vpp_ms={:.2}, vpp_ms={:.2}, encode_ms={:.2}, total_ms={:.2}",
                 frame_index == 0,
                 duration_ms(submit_to_vpp),
                 duration_ms(vpp),
@@ -1921,7 +1927,7 @@ mod tests {
             .expect("VAAPI VPP test pipeline should stop");
         let warm_frames = FRAME_COUNT - 1;
         println!(
-            "VAAPI warm average: frames={warm_frames}, vpp_ms={:.3}, encode_ms={:.3}, total_ms={:.3}",
+            "VAAPI warm average: frames={warm_frames}, vpp_ms={:.2}, encode_ms={:.2}, total_ms={:.2}",
             average_ms(warm_vpp, warm_frames),
             average_ms(warm_encode, warm_frames),
             average_ms(warm_total, warm_frames),
@@ -2133,9 +2139,14 @@ mod tests {
     fn host_video_test_source_size(screen_name: &str) -> PixelSize {
         let (_reaper, reaper_handle) =
             WorkerReaper::new().expect("Test worker reaper should start");
-        let ScreenCaptureSource { lease, receiver } =
-            KmsCaptureLease::new(screen_name.to_owned(), false, reaper_handle, Vec::new())
-                .expect("KMS capture source should start");
+        let ScreenCaptureSource { lease, receiver } = KmsCaptureLease::new(
+            screen_name.to_owned(),
+            false,
+            Duration::from_secs(2),
+            reaper_handle,
+            Vec::new(),
+        )
+        .expect("KMS capture source should start");
         let (device, frames) = receiver.into_parts();
         device
             .recv()

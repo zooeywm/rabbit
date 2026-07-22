@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use eros::Context as _;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
 
@@ -58,6 +60,7 @@ pub(crate) struct ViewPublisher {
 impl Gui {
     pub(crate) fn new(
         video_display: VideoDisplayPreference,
+        probe_interval: Duration,
     ) -> eros::Result<(Self, ViewPublisher, flume::Receiver<GuiIntent>)> {
         slint::BackendSelector::new()
             .require_opengl_es_with_version(3, 0)
@@ -149,7 +152,7 @@ impl Gui {
             }
         });
 
-        let video = video_view::install(&window, sender.clone(), video_display)?;
+        let video = video_view::install(&window, sender.clone(), video_display, probe_interval)?;
         let publisher = ViewPublisher {
             window: window.as_weak(),
             video,

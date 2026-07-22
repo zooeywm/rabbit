@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
     rc::Rc,
+    time::Duration,
 };
 
 use eros::Context;
@@ -52,7 +53,8 @@ mod view;
 
 pub(crate) fn run() -> eros::Result<()> {
     let config = Config::new()?;
-    let (gui, publisher, intents) = Gui::new(config.video.display_backend)?;
+    let probe_interval = Duration::from_millis(config.video.probe_interval_ms);
+    let (gui, publisher, intents) = Gui::new(config.video.display_backend, probe_interval)?;
     let thread_publisher = publisher.clone();
     let application_thread = std::thread::Builder::new()
         .name("rabbit-app".to_string())
@@ -234,7 +236,7 @@ impl RootApplication {
         let receiver = input.clone();
         let view = self.view.clone();
         let finished = sender.clone();
-        let enable_probing = self.model.app.config.video.enable_probing;
+        let enable_probing = self.model.app.config.video.enable_client_probing;
         let inputs = Box::pin(futures_util::stream::unfold(
             receiver,
             |receiver| async move {
@@ -593,7 +595,8 @@ impl RootApplication {
         let screen_layout_manager_state = create_screen_layout_manager_state()
             .context("Failed to create the screen layout manager state")?;
         let screen_capture_manager_state = create_screen_capture_manager_state(
-            config.video.enable_probing,
+            config.video.enable_host_probing,
+            Duration::from_millis(config.video.probe_interval_ms),
             worker_reaper_handle.clone(),
         );
         let frame_pipeline_manager_state =

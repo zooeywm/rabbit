@@ -1,6 +1,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     os::fd::AsFd as _,
+    time::Duration,
 };
 
 use eros::Context as _;
@@ -153,7 +154,7 @@ pub(crate) struct WaylandVideoRenderer {
 }
 
 impl WaylandVideoRenderer {
-    pub(crate) fn new(window: &slint::Window) -> eros::Result<Self> {
+    pub(crate) fn new(window: &slint::Window, probe_interval: Duration) -> eros::Result<Self> {
         let window_handle = window.window_handle();
         let display_handle = window_handle
             .display_handle()
@@ -248,7 +249,7 @@ impl WaylandVideoRenderer {
             current_frame_size: None,
             pending_frame: None,
             submitted: VecDeque::new(),
-            probe_reporter: ClientVideoProbeReporter::default(),
+            probe_reporter: ClientVideoProbeReporter::new(probe_interval),
         })
     }
 

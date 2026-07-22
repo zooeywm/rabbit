@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use gstreamer::prelude::{ElementExt as _, PadExtManual as _};
@@ -42,6 +42,7 @@ impl GStreamerVideoProbe {
         source: &gstreamer_app::AppSrc,
         vpp: Option<&gstreamer::Element>,
         encoder: &gstreamer::Element,
+        report_interval: Duration,
     ) -> eros::Result<Self> {
         let (events, receiver) = flume::unbounded();
         install_pad_probes(source, vpp, encoder, events)?;
@@ -54,7 +55,7 @@ impl GStreamerVideoProbe {
             encoded_probe_order: VecDeque::new(),
             encoder_completed_by_pts: HashMap::new(),
             pending_rtp_frames: HashMap::new(),
-            reporter: VideoProbeReporter::default(),
+            reporter: VideoProbeReporter::new(report_interval),
         })
     }
 

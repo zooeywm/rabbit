@@ -10,6 +10,8 @@ mod video_encoder;
 mod video_probe;
 mod video_renderer;
 
+use std::time::Duration;
+
 pub(crate) use frame_pipeline::{GbmFramePipelineManager, GbmFramePipelineManagerState};
 pub(crate) use screen_capture::{KmsScreenCaptureManager, KmsScreenCaptureManagerState};
 pub(crate) use screen_layout::{
@@ -22,10 +24,12 @@ pub(crate) use video_renderer::{OpenGlVideoRenderer, WaylandVideoRenderer, Wayla
 /// Negotiates the Linux capture output requested by the selected encoder stack.
 pub(crate) fn create_screen_capture_manager_state(
     enable_probing: bool,
+    probe_interval: Duration,
     worker_reaper: crate::infra::WorkerReaperHandle,
 ) -> KmsScreenCaptureManagerState {
     KmsScreenCaptureManagerState::new(
         enable_probing,
+        probe_interval,
         worker_reaper,
         video_encoder::va_vpp_input_profiles,
     )

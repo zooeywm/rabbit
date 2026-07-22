@@ -4,6 +4,7 @@ use std::{
     os::fd::AsRawFd as _,
     ptr,
     rc::Rc,
+    time::Duration,
 };
 
 use drm::buffer::DrmModifier;
@@ -103,7 +104,10 @@ struct GlState {
 }
 
 impl OpenGlVideoRenderer {
-    pub(crate) fn new(get_proc_address: &dyn Fn(&CStr) -> *const c_void) -> eros::Result<Self> {
+    pub(crate) fn new(
+        get_proc_address: &dyn Fn(&CStr) -> *const c_void,
+        probe_interval: Duration,
+    ) -> eros::Result<Self> {
         let egl = unsafe { egl::DynamicInstance::<egl::EGL1_5>::load_required() }
             .with_context(|| "Failed to load EGL 1.5 for video rendering")?;
         let display = egl
@@ -160,7 +164,7 @@ impl OpenGlVideoRenderer {
             viewport: None,
             pending_frame: None,
             current_frame: None,
-            probe_reporter: ClientVideoProbeReporter::default(),
+            probe_reporter: ClientVideoProbeReporter::new(probe_interval),
             thread_affinity: PhantomData,
         })
     }

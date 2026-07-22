@@ -29,11 +29,24 @@ pub struct LoggingConfig {
     pub file_level: LogLevel,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct VideoConfig {
-    pub enable_probing: bool,
+    pub enable_host_probing: bool,
+    pub enable_client_probing: bool,
+    pub probe_interval_ms: u64,
     pub display_backend: VideoDisplayPreference,
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            enable_host_probing: false,
+            enable_client_probing: false,
+            probe_interval_ms: 2_000,
+            display_backend: VideoDisplayPreference::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -138,16 +151,37 @@ mod tests {
     use crate::app::config::{Config, VideoDisplayPreference};
 
     #[test]
-    fn video_probing_is_disabled_by_default() {
-        assert!(!Config::default().video.enable_probing);
+    fn host_and_client_video_probing_are_disabled_by_default() {
+        let video = Config::default().video;
+
+        assert!(!video.enable_host_probing);
+        assert!(!video.enable_client_probing);
     }
 
     #[test]
-    fn video_probing_can_be_enabled_from_config() {
-        let config = toml::from_str::<Config>("[video]\nenable_probing = true")
+    fn host_and_client_video_probing_can_be_configured_independently() {
+        for (host, client) in [(true, false), (false, true)] {
+            let config = toml::from_str::<Config>(&format!(
+                "[video]\nenable_host_probing = {host}\nenable_client_probing = {client}"
+            ))
             .expect("Video probing configuration should deserialize");
 
-        assert!(config.video.enable_probing);
+            assert_eq!(config.video.enable_host_probing, host);
+            assert_eq!(config.video.enable_client_probing, client);
+        }
+    }
+
+    #[test]
+    fn video_probe_interval_defaults_to_two_seconds() {
+        assert_eq!(Config::default().video.probe_interval_ms, 2_000);
+    }
+
+    #[test]
+    fn video_probe_interval_can_be_configured_in_milliseconds() {
+        let config = toml::from_str::<Config>("[video]\nprobe_interval_ms = 750")
+            .expect("Video probe interval configuration should deserialize");
+
+        assert_eq!(config.video.probe_interval_ms, 750);
     }
 
     #[test]
