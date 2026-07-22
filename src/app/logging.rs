@@ -1,12 +1,10 @@
-mod file_writer;
+mod logger_thread;
 
-use std::{
-    fs::{OpenOptions, create_dir_all},
-    io,
-};
+use std::fs::{OpenOptions, create_dir_all};
 
 use eros::Context;
 use time::{OffsetDateTime, macros::format_description};
+use tracing::Level;
 use tracing_subscriber::{
     Layer,
     filter::LevelFilter,
@@ -17,10 +15,10 @@ use tracing_subscriber::{
 
 use crate::app::{
     config::{Config, LogLevel},
-    logging::file_writer::start_logger,
+    logging::logger_thread::start_logger,
 };
 
-pub(crate) use crate::app::logging::file_writer::LoggerGuard;
+pub(crate) use crate::app::logging::logger_thread::LoggerGuard;
 
 struct LocalTimeWithOffset;
 
@@ -65,26 +63,54 @@ pub(crate) fn init_logging(config: &Config) -> eros::Result<LoggerGuard> {
         .append(true)
         .open(&log_file_path)
         .context("Failed open log file")?;
-    let (file_writer, logger_guard) =
-        start_logger(log_file).context("Failed to start Logger thread")?;
+    let (log_writer, logger_guard) = start_logger(
+        log_file,
+        tracing_level(config.logging.file_level),
+        tracing_level(config.logging.console_level),
+    )
+    .context("Failed to start Logger thread")?;
 
     tracing_subscriber::registry()
         .with(
             fmt::layer()
                 .with_timer(LocalTimeWithOffset)
-                .with_writer(io::stderr)
-                .with_filter(level_filter(config.logging.console_level)),
-        )
-        .with(
-            fmt::layer()
-                .with_timer(LocalTimeWithOffset)
-                .with_ansi(false)
-                .with_writer(move || file_writer.make_writer())
-                .with_filter(level_filter(config.logging.file_level)),
+                .with_ansi(true)
+                .with_writer(log_writer)
+                .with_filter(most_verbose_filter(
+                    config.logging.file_level,
+                    config.logging.console_level,
+                )),
         )
         .try_init()
         .context("Failed init logging")?;
     Ok(logger_guard)
+}
+
+fn tracing_level(level: LogLevel) -> Level {
+    match level {
+        LogLevel::Trace => Level::TRACE,
+        LogLevel::Debug => Level::DEBUG,
+        LogLevel::Info => Level::INFO,
+        LogLevel::Warn => Level::WARN,
+        LogLevel::Error => Level::ERROR,
+    }
+}
+
+fn most_verbose_filter(left: LogLevel, right: LogLevel) -> LevelFilter {
+    let rank = |level| match level {
+        LogLevel::Error => 0,
+        LogLevel::Warn => 1,
+        LogLevel::Info => 2,
+        LogLevel::Debug => 3,
+        LogLevel::Trace => 4,
+    };
+    let most_verbose = if rank(left) >= rank(right) {
+        left
+    } else {
+        right
+    };
+
+    level_filter(most_verbose)
 }
 
 fn level_filter(level: LogLevel) -> LevelFilter {

@@ -1053,6 +1053,7 @@ fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gstreamer::Cap
         .field("width", width)
         .field("height", height)
         .field("framerate", framerate)
+        .field("colorimetry", "bt709")
         .build())
 }
 
@@ -1144,7 +1145,7 @@ mod tests {
                 video_encoder::gstreamer::{
                     GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
                     configure_low_latency_encoder, create_required_element, h264_rtp_caps,
-                    va_vpp_input_modifier, validate_dmabuf_buffer,
+                    va_vpp_input_modifier, va_vpp_output_caps, validate_dmabuf_buffer,
                 },
             },
         },
@@ -1267,6 +1268,39 @@ mod tests {
         ) -> eros::Result<ScreenCaptureSource<Self::Lease, Self::Receiver>> {
             KmsScreenCaptureManager::inj_ref_mut(self).acquire(screen_id)
         }
+    }
+
+    #[test]
+    fn va_vpp_output_is_bt709_limited_range() {
+        gstreamer::init().expect("GStreamer should initialize before constructing VPP caps");
+        let input = gstreamer::Caps::builder("video/x-raw")
+            .features(["memory:DMABuf"])
+            .field("format", "DMA_DRM")
+            .field("drm-format", "XR24")
+            .field("width", 1920_i32)
+            .field("height", 1080_i32)
+            .field("framerate", gstreamer::Fraction::new(120, 1))
+            .build();
+
+        let output = va_vpp_output_caps(&input)
+            .expect("Fixed XRGB input caps should produce fixed VA VPP output caps");
+        let structure = output
+            .structure(0)
+            .expect("VA VPP output caps should contain one structure");
+        let colorimetry = structure
+            .get::<&str>("colorimetry")
+            .expect("VA VPP output caps should declare colorimetry")
+            .parse::<gstreamer_video::VideoColorimetry>()
+            .expect("BT.709 colorimetry should parse");
+
+        assert_eq!(
+            colorimetry.range(),
+            gstreamer_video::VideoColorRange::Range16_235
+        );
+        assert_eq!(
+            colorimetry.matrix(),
+            gstreamer_video::VideoColorMatrix::Bt709
+        );
     }
 
     #[test]
