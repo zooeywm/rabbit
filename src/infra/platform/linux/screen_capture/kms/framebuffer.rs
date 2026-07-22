@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use drm::{
     buffer::{DrmModifier, Handle},
-    control::Device as _,
+    control::{Device as _, PlaneType},
 };
 
 use crate::{
@@ -87,11 +87,19 @@ impl KmsOutput {
                         error,
                     }),
                 },
-                Err(errors) => issues.extend(errors.into_iter().map(|error| KmsPlaneIssue {
-                    plane_id: active_plane.id,
-                    plane_type: Some(active_plane.plane_type),
-                    error,
-                })),
+                Err(errors) => {
+                    if primary_framebuffer_handle_is_unavailable(active_plane.plane_type, &errors) {
+                        eros::bail!(
+                            "KMS GETFB2 did not expose framebuffer handles for primary plane {:?}; screen capture requires DRM master or CAP_SYS_ADMIN",
+                            active_plane.id
+                        );
+                    }
+                    issues.extend(errors.into_iter().map(|error| KmsPlaneIssue {
+                        plane_id: active_plane.id,
+                        plane_type: Some(active_plane.plane_type),
+                        error,
+                    }));
+                }
             }
         }
         self.retain_active_framebuffers(&active_framebuffers);
@@ -329,5 +337,54 @@ impl KmsOutput {
         }
 
         Ok(())
+    }
+}
+
+fn primary_framebuffer_handle_is_unavailable(
+    plane_type: PlaneType,
+    errors: &[KmsPlaneCaptureError],
+) -> bool {
+    plane_type == PlaneType::Primary
+        && errors
+            .iter()
+            .any(|error| matches!(error, KmsPlaneCaptureError::MissingBufferHandle { .. }))
+}
+
+#[cfg(test)]
+mod tests {
+    use drm::control::PlaneType;
+
+    use crate::infra::platform::screen_capture::kms::{
+        framebuffer::primary_framebuffer_handle_is_unavailable, types::KmsPlaneCaptureError,
+    };
+
+    #[test]
+    fn missing_primary_framebuffer_handle_is_fatal() {
+        let missing_handle = [KmsPlaneCaptureError::MissingBufferHandle { plane_index: 0 }];
+
+        assert!(primary_framebuffer_handle_is_unavailable(
+            PlaneType::Primary,
+            &missing_handle
+        ));
+        assert!(!primary_framebuffer_handle_is_unavailable(
+            PlaneType::Overlay,
+            &missing_handle
+        ));
+        assert!(!primary_framebuffer_handle_is_unavailable(
+            PlaneType::Cursor,
+            &missing_handle
+        ));
+    }
+
+    #[test]
+    fn other_primary_export_errors_remain_plane_issues() {
+        let other_error = [KmsPlaneCaptureError::CloneCachedBuffer {
+            reason: "test failure".to_owned(),
+        }];
+
+        assert!(!primary_framebuffer_handle_is_unavailable(
+            PlaneType::Primary,
+            &other_error
+        ));
     }
 }
