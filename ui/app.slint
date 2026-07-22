@@ -390,7 +390,7 @@ export component RabbitWindow inherits Window {
     min-width: 720px;
     min-height: 480px;
     max-width: 100000px;
-    background: #f7f8fa;
+    background: root.video-fill-window-active ? #17191c : #f7f8fa;
 
     in property <AppPage> page: AppPage.connect;
     in property <NavigationSection> section: NavigationSection.remote-devices;
@@ -402,10 +402,21 @@ export component RabbitWindow inherits Window {
     in property <bool> local-server-online;
     in property <string> stream-title;
     in property <string> stream-resolution;
-    out property <length> video-viewport-x: streaming-page.absolute-position.x;
-    out property <length> video-viewport-y: streaming-page.absolute-position.y + 44px;
-    out property <length> video-viewport-width: streaming-page.width;
-    out property <length> video-viewport-height: max(0px, streaming-page.height - 44px);
+    property <bool> video-fill-window: false;
+    property <bool> video-fill-window-active:
+        root.page == AppPage.streaming && root.video-fill-window;
+    out property <length> video-viewport-x: root.video-fill-window-active
+        ? 0px
+        : streaming-page.absolute-position.x;
+    out property <length> video-viewport-y: root.video-fill-window-active
+        ? 0px
+        : streaming-page.absolute-position.y + 44px;
+    out property <length> video-viewport-width: root.video-fill-window-active
+        ? root.width
+        : streaming-page.width;
+    out property <length> video-viewport-height: root.video-fill-window-active
+        ? root.height
+        : max(0px, streaming-page.height - 44px);
     out property <bool> video-viewport-visible: root.page == AppPage.streaming;
     in property <[ConnectionRequestItem]> connection-requests;
     in property <[ConnectedDeviceItem]> connected-devices;
@@ -427,6 +438,7 @@ export component RabbitWindow inherits Window {
         spacing: 0px;
 
         Sidebar {
+            visible: !root.video-fill-window-active;
             local-port: root.local-port;
             local-server-online: root.local-server-online;
             active-section: root.section;
@@ -437,18 +449,19 @@ export component RabbitWindow inherits Window {
             min-width: 0px;
             horizontal-stretch: 1;
             vertical-stretch: 1;
-            background: #f7f8fa;
+            background: root.video-fill-window-active ? #17191c : #f7f8fa;
 
             VerticalLayout {
                 width: 100%;
                 height: 100%;
-                padding-left: 34px;
-                padding-right: 34px;
-                padding-top: 30px;
-                padding-bottom: 30px;
-                spacing: 10px;
+                padding-left: root.video-fill-window-active ? 0px : 34px;
+                padding-right: root.video-fill-window-active ? 0px : 34px;
+                padding-top: root.video-fill-window-active ? 0px : 30px;
+                padding-bottom: root.video-fill-window-active ? 0px : 30px;
+                spacing: root.video-fill-window-active ? 0px : 10px;
 
                 PageHeader {
+                    visible: !root.video-fill-window-active;
                     title: root.page-title;
                     subtitle: root.page-subtitle;
                 }
@@ -870,9 +883,10 @@ export component RabbitWindow inherits Window {
                     visible: root.page == AppPage.streaming;
                     width: content-area.width;
                     height: content-area.height;
-                    spacing: 10px;
+                    spacing: root.video-fill-window-active ? 0px : 10px;
 
                     HorizontalLayout {
+                        visible: !root.video-fill-window-active;
                         height: 34px;
                         spacing: 8px;
 
@@ -896,6 +910,11 @@ export component RabbitWindow inherits Window {
                         }
 
                         Button {
+                            text: "Fill window";
+                            clicked => { root.video-fill-window = true; }
+                        }
+
+                        Button {
                             text: "Stop screen";
                             clicked => { root.stop-stream(); }
                         }
@@ -904,6 +923,7 @@ export component RabbitWindow inherits Window {
                     video-surface := VideoDisplaySurface {
                         width: 100%;
                         vertical-stretch: 1;
+                        border-radius: root.video-fill-window-active ? 0px : 10px;
                     }
                 }
 
