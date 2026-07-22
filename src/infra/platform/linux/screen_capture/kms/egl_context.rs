@@ -640,6 +640,12 @@ impl EglContext {
         self.export_readiness_fence("frame-pipeline conversion")
     }
 
+    pub(crate) fn flush_frame_pipeline(&self) -> eros::Result<()> {
+        self.gl
+            .flush()
+            .with_context(|| "Failed to flush frame-pipeline conversion")
+    }
+
     fn export_readiness_fence(&self, operation: &str) -> eros::Result<OwnedFd> {
         let sync = unsafe {
             self.instance

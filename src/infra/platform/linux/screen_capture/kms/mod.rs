@@ -23,9 +23,11 @@ mod worker;
 #[cfg(test)]
 pub(crate) use crate::infra::platform::screen_capture::kms::worker::empty_kms_frame;
 pub(crate) use crate::infra::platform::screen_capture::kms::worker::{
-    KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver,
+    KmsCaptureLease, KmsCapturedFrame, KmsCapturedSource, KmsCompositionFallback, KmsFrameReceiver,
 };
+pub(crate) use composition::KmsCompositionTransform;
 pub(crate) use egl_context::{EglContext, EglDmaBufImage};
+pub(crate) use types::{KmsFramebufferPlane, KmsPlaneIssue};
 
 #[derive(Debug, kudi::DepInj)]
 #[target(KmsScreenCaptureManager)]

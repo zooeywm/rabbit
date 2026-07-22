@@ -14,7 +14,10 @@ use crate::{
         dma_buf::{DmaBufFrame, DmaBufPool},
         frame_pipeline::{GbmFramePipelineFrame, SharedFramePipelineError},
         gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
-        screen_capture::{EglDmaBufImage, KmsCapturedFrame, KmsFrameReceiver},
+        screen_capture::{
+            EglDmaBufImage, KmsCapturedFrame, KmsCapturedSource, KmsCompositionFallback,
+            KmsCompositionTransform, KmsFrameReceiver, KmsFramebufferPlane, KmsPlaneIssue,
+        },
         video_encoder::{VaDmaBufAllocator, hardware_h264_encoder_for, va_vpp_input_modifiers},
     },
     kernel::{frame_pipeline::FramePipelineParameters, screen_manager::ScreenId},
@@ -101,6 +104,31 @@ enum FrameOutputStrategy {
 struct GpuScreen {
     device: Option<Receiver<eros::Result<GpuDevice>>>,
     frames: Receiver<eros::Result<KmsCapturedFrame>>,
+    composition_fallback: KmsCompositionFallback,
+    composition: GpuComposition,
+}
+
+#[derive(Debug)]
+struct GpuComposition {
+    size: Option<crate::kernel::geometry::PixelSize>,
+    pool: DmaBufPool,
+    selected: bool,
+    pool_exhaustion_warned: bool,
+    fallback_requested: bool,
+}
+
+const COMPOSITION_POOL_CAPACITY: usize = 3;
+
+impl GpuComposition {
+    fn new() -> Self {
+        Self {
+            size: None,
+            pool: DmaBufPool::new(COMPOSITION_POOL_CAPACITY),
+            selected: false,
+            pool_exhaustion_warned: false,
+            fallback_requested: false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -231,12 +259,14 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
     loop {
         match wait_for_event(&commands, &screens) {
             GpuWorkerEvent::Command(Ok(GpuWorkerCommand::RegisterScreen { screen_id, frames })) => {
-                let (device, frames) = frames.into_parts();
+                let (device, frames, composition_fallback) = frames.into_parts();
                 screens.insert(
                     screen_id,
                     GpuScreen {
                         device: Some(device),
                         frames,
+                        composition_fallback,
+                        composition: GpuComposition::new(),
                     },
                 );
             }
@@ -328,7 +358,10 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                     continue;
                 };
 
-                process_screen_frame(&gpu.context, screen_id, *frame, &mut pipelines);
+                let Some(screen) = screens.get_mut(&screen_id) else {
+                    continue;
+                };
+                process_screen_frame(&gpu.context, screen_id, *frame, screen, &mut pipelines);
             }
             GpuWorkerEvent::Frame(screen_id, Ok(Err(error))) => {
                 screens.remove(&screen_id);
@@ -392,10 +425,18 @@ fn wait_for_event(
 fn process_screen_frame(
     context: &GpuContext,
     screen_id: ScreenId,
-    mut frame: KmsCapturedFrame,
+    frame: KmsCapturedFrame,
+    screen: &mut GpuScreen,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
 ) {
-    for issue in &frame.issues {
+    let KmsCapturedFrame {
+        source,
+        mut issues,
+        frame_rate,
+        mut probe,
+    } = frame;
+
+    for issue in &issues {
         tracing::warn!(
             target: "rabbit::screen_capture::kms",
             screen_id = screen_id.0,
@@ -406,30 +447,224 @@ fn process_screen_frame(
         );
     }
 
-    if let Some(probe) = &mut frame.probe {
+    if let Some(probe) = &mut probe {
         probe.mark_gpu_received();
     }
 
-    let frame = match publish_single_pipeline_passthrough(context, screen_id, frame, pipelines) {
-        None => return,
-        Some(frame) => frame,
+    let fused = matches!(&source, KmsCapturedSource::PlaneSet { .. });
+    let source = match source {
+        KmsCapturedSource::Composed(buffer) => buffer,
+        KmsCapturedSource::PlaneSet {
+            output_size,
+            planes,
+        } => {
+            match compose_plane_set(
+                context,
+                screen_id,
+                output_size,
+                &planes,
+                &mut issues,
+                &mut screen.composition,
+            ) {
+                Ok(Some(buffer)) => buffer,
+                Ok(None) => return,
+                Err(error) => {
+                    request_composition_fallback(screen_id, error, screen);
+                    return;
+                }
+            }
+        }
     };
+    let frame = KmsCapturedFrame {
+        source: KmsCapturedSource::Composed(source),
+        issues,
+        frame_rate,
+        probe,
+    };
+
+    let frame =
+        match publish_single_pipeline_passthrough(context, screen_id, frame, pipelines, !fused) {
+            None => return,
+            Some(frame) => frame,
+        };
 
     let mut frame = frame;
     let source = match prepare_pipeline_source(context, screen_id, &mut frame) {
         Ok(source) => source,
         Err(error) => {
+            if fused {
+                if let KmsCapturedSource::Composed(buffer) = &frame.source {
+                    buffer.invalidate_lease();
+                }
+                request_composition_fallback(screen_id, error, screen);
+                return;
+            }
             let failure = SharedFramePipelineError::from(error);
-            route_screen_frame(screen_id, frame, pipelines, |_, _| {
+            route_screen_frame(screen_id, &frame, pipelines, |_, _| {
                 Err(eros::error!(failure.clone()))
             });
             return;
         }
     };
 
-    route_screen_frame(screen_id, frame, pipelines, |parameters, frame| {
-        process_pipeline_frame(context, &source, parameters, frame)
+    route_screen_frame(screen_id, &frame, pipelines, |parameters, frame| {
+        process_pipeline_frame(context, &source, parameters, frame, fused)
     });
+
+    if fused && let KmsCapturedSource::Composed(buffer) = &frame.source {
+        match context.egl().finish_composition() {
+            Ok(fence) => buffer.set_release_fence(fence),
+            Err(error) => {
+                buffer.invalidate_lease();
+                request_composition_fallback(screen_id, error, screen);
+            }
+        }
+    }
+}
+
+fn request_composition_fallback(
+    screen_id: ScreenId,
+    error: eros::ErrorUnion,
+    screen: &mut GpuScreen,
+) {
+    if screen.composition.fallback_requested {
+        return;
+    }
+
+    tracing::warn!(
+        target: "rabbit::frame_pipeline",
+        screen_id = screen_id.0,
+        error = ?error,
+        "Fused KMS composition is unavailable; requesting the KMS pre-composition fallback"
+    );
+    screen.composition.fallback_requested = true;
+    screen.composition_fallback.request();
+}
+
+fn compose_plane_set(
+    context: &GpuContext,
+    screen_id: ScreenId,
+    output_size: crate::kernel::geometry::PixelSize,
+    planes: &[KmsFramebufferPlane],
+    issues: &mut Vec<KmsPlaneIssue>,
+    composition: &mut GpuComposition,
+) -> eros::Result<Option<DmaBufFrame>> {
+    if composition.size != Some(output_size) {
+        composition.size = Some(output_size);
+        composition.pool = DmaBufPool::new(COMPOSITION_POOL_CAPACITY);
+        composition.pool_exhaustion_warned = false;
+    }
+
+    let frame = composition.pool.acquire(
+        || {
+            context.allocate_dma_buf(
+                output_size,
+                Format::Xrgb8888,
+                gbm::BufferObjectFlags::RENDERING,
+            )
+        },
+        |fence| {
+            context
+                .egl()
+                .wait_on_native_fence(fence)
+                .with_context(|| "Failed to enqueue fused KMS composition-target reuse fence")
+        },
+    )?;
+    let Some(frame) = frame else {
+        if !composition.pool_exhaustion_warned {
+            tracing::warn!(
+                target: "rabbit::frame_pipeline",
+                screen_id = screen_id.0,
+                capacity = COMPOSITION_POOL_CAPACITY,
+                "Fused KMS composition pool exhausted; dropping source frames until a target is released"
+            );
+            composition.pool_exhaustion_warned = true;
+        }
+        return Ok(None);
+    };
+
+    let result = compose_plane_set_into(context, screen_id, output_size, planes, issues, &frame);
+    if let Err(error) = result {
+        frame.invalidate_lease();
+        return Err(error);
+    }
+
+    if !composition.selected {
+        tracing::info!(
+            target: "rabbit::frame_pipeline",
+            screen_id = screen_id.0,
+            width = output_size.width,
+            height = output_size.height,
+            plane_count = planes.len(),
+            strategy = "gpu_fused_kms_composition",
+            "Selected KMS composition strategy"
+        );
+        composition.selected = true;
+    }
+
+    Ok(Some(frame))
+}
+
+fn compose_plane_set_into(
+    context: &GpuContext,
+    screen_id: ScreenId,
+    output_size: crate::kernel::geometry::PixelSize,
+    planes: &[KmsFramebufferPlane],
+    issues: &mut Vec<KmsPlaneIssue>,
+    frame: &DmaBufFrame,
+) -> eros::Result<()> {
+    let image = context
+        .egl()
+        .import_composition_target(frame)
+        .with_context(|| "Failed to import the fused KMS composition target")?;
+    let target = context
+        .egl()
+        .create_composition_target(&image)
+        .with_context(|| "Failed to bind the fused KMS composition target")?;
+    context
+        .egl()
+        .clear_composition_target(&target)
+        .with_context(|| "Failed to clear the fused KMS composition target")?;
+    context.egl().retain_cached_plane_images(planes);
+
+    for plane in planes {
+        let texture = match context.egl().create_cached_plane_texture(plane) {
+            Ok(texture) => texture,
+            Err(error) => {
+                tracing::warn!(
+                    target: "rabbit::screen_capture::kms",
+                    screen_id = screen_id.0,
+                    plane_id = ?plane.id,
+                    plane_type = ?plane.plane_type,
+                    error = ?error,
+                    "Skipped a KMS plane during fused GPU composition"
+                );
+                issues.push(KmsPlaneIssue {
+                    plane_id: plane.id,
+                    plane_type: Some(plane.plane_type),
+                    error,
+                });
+                continue;
+            }
+        };
+        let transform = KmsCompositionTransform::new(
+            output_size,
+            plane.buffer.size,
+            plane.placement,
+            plane.cursor_hotspot,
+        );
+        context
+            .egl()
+            .compose_plane(&target, &texture, &transform, plane.blend)
+            .with_context(|| {
+                format!(
+                    "Failed to compose KMS plane {:?} on the GPU worker",
+                    plane.id
+                )
+            })?;
+    }
+
+    Ok(())
 }
 
 fn publish_single_pipeline_passthrough(
@@ -437,7 +672,11 @@ fn publish_single_pipeline_passthrough(
     screen_id: ScreenId,
     mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
+    allow_passthrough: bool,
 ) -> Option<KmsCapturedFrame> {
+    let KmsCapturedSource::Composed(buffer) = &frame.source else {
+        return Some(frame);
+    };
     let mut matching = pipelines
         .iter()
         .filter(|(_, pipeline)| pipeline.screen_id == screen_id)
@@ -452,13 +691,16 @@ fn publish_single_pipeline_passthrough(
     let Some(pipeline) = pipelines.get_mut(&pipeline_id) else {
         return Some(frame);
     };
-    if pipeline.parameters.frame_size != frame.buffer.size
-        || frame.buffer.format != Format::Xrgb8888
-        || frame.buffer.planes.len() != 1
+    if !allow_passthrough {
+        return Some(frame);
+    }
+    if pipeline.parameters.frame_size != buffer.size
+        || buffer.format != Format::Xrgb8888
+        || buffer.planes.len() != 1
     {
         return Some(frame);
     }
-    let modifier = frame.buffer.planes[0].modifier;
+    let modifier = buffer.planes[0].modifier;
 
     match pipeline.output_strategy {
         None => {
@@ -476,7 +718,7 @@ fn publish_single_pipeline_passthrough(
                 return Some(frame);
             }
 
-            if let Err(error) = hardware_h264_encoder_for(&frame.buffer) {
+            if let Err(error) = hardware_h264_encoder_for(buffer) {
                 tracing::warn!(
                     target: "rabbit::frame_pipeline",
                     screen_id = screen_id.0,
@@ -490,8 +732,8 @@ fn publish_single_pipeline_passthrough(
             tracing::info!(
                 target: "rabbit::frame_pipeline",
                 screen_id = screen_id.0,
-                width = frame.buffer.size.width,
-                height = frame.buffer.size.height,
+                width = buffer.size.width,
+                height = buffer.size.height,
                 strategy = FrameOutputStrategy::PassthroughXrgb(modifier).name(),
                 "Selected frame-pipeline output strategy"
             );
@@ -520,8 +762,11 @@ fn publish_single_pipeline_passthrough(
         probe.mark_gpu_submitted();
         probe
     });
+    let KmsCapturedSource::Composed(buffer) = frame.source else {
+        return Some(frame);
+    };
     pipeline.outputs.publish(Ok(GbmFramePipelineFrame {
-        buffer: frame.buffer,
+        buffer,
         frame_rate: frame.frame_rate,
         probe,
     }));
@@ -534,37 +779,37 @@ fn prepare_pipeline_source<'context>(
     screen_id: ScreenId,
     frame: &mut KmsCapturedFrame,
 ) -> eros::Result<EglDmaBufImage<'context>> {
-    if frame.buffer.format != Format::Xrgb8888 {
+    let KmsCapturedSource::Composed(buffer) = &mut frame.source else {
+        eros::bail!("A raw KMS plane-set reached composed-source preparation");
+    };
+    if buffer.format != Format::Xrgb8888 {
         eros::bail!(
             "First-version frame pipeline requires an XRGB8888 source for screen {}, got {:?}",
             screen_id.0,
-            frame.buffer.format
+            buffer.format
         );
     }
 
-    if let Some(fence) = frame.buffer.readiness_fence.take() {
+    if let Some(fence) = buffer.readiness_fence.take() {
         context.egl().wait_on_native_fence(fence).with_context(|| {
             format!(
                 "Failed to wait for screen {} {:?} source readiness",
-                screen_id.0, frame.buffer.format
+                screen_id.0, buffer.format
             )
         })?;
     }
 
-    context
-        .egl()
-        .import_dma_buf_frame(&frame.buffer)
-        .with_context(|| {
-            format!(
-                "Failed to import screen {} {:?} source frame",
-                screen_id.0, frame.buffer.format
-            )
-        })
+    context.egl().import_dma_buf_frame(buffer).with_context(|| {
+        format!(
+            "Failed to import screen {} {:?} source frame",
+            screen_id.0, buffer.format
+        )
+    })
 }
 
 fn route_screen_frame(
     screen_id: ScreenId,
-    frame: KmsCapturedFrame,
+    frame: &KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
     mut process: impl FnMut(
         &mut GpuPipeline,
@@ -578,7 +823,9 @@ fn route_screen_frame(
 
         let output = process(pipeline, &frame);
         if output.is_err() {
-            frame.buffer.invalidate_lease();
+            if let KmsCapturedSource::Composed(buffer) = &frame.source {
+                buffer.invalidate_lease();
+            }
         }
         let succeeded = output.is_ok();
         if let Some(output) = output.transpose() {
@@ -593,6 +840,7 @@ fn process_pipeline_frame(
     source: &EglDmaBufImage<'_>,
     pipeline: &mut GpuPipeline,
     frame: &KmsCapturedFrame,
+    defer_source_release: bool,
 ) -> eros::Result<Option<GbmFramePipelineFrame>> {
     let parameters = pipeline.parameters;
     validate_nv12_size(parameters.frame_size)?;
@@ -677,18 +925,34 @@ fn process_pipeline_frame(
                 .with_context(|| "Failed to copy the source frame to the VAAPI XRGB output")?;
         }
     }
+    if matches!(strategy, FrameOutputStrategy::VaDirectNv12) && defer_source_release {
+        context.egl().flush_frame_pipeline()?;
+        return Ok(Some(GbmFramePipelineFrame {
+            buffer,
+            frame_rate: frame.frame_rate,
+            probe: frame.probe.clone().map(|mut probe| {
+                probe.mark_gpu_submitted();
+                probe
+            }),
+        }));
+    }
+
     let completion_fence = context
         .egl()
         .finish_frame_pipeline()
         .with_context(|| "Failed to export frame-pipeline output readiness")?;
     if matches!(strategy, FrameOutputStrategy::VaDirectNv12) {
-        frame.buffer.set_release_fence(completion_fence);
+        if let KmsCapturedSource::Composed(source) = &frame.source {
+            source.set_release_fence(completion_fence);
+        }
     } else {
-        frame.buffer.set_release_fence(
-            completion_fence
-                .try_clone()
-                .with_context(|| "Failed to duplicate the source-frame release fence")?,
-        );
+        if let KmsCapturedSource::Composed(source) = &frame.source {
+            source.set_release_fence(
+                completion_fence
+                    .try_clone()
+                    .with_context(|| "Failed to duplicate the source-frame release fence")?,
+            );
+        }
         buffer.readiness_fence = Some(completion_fence);
     }
 
@@ -952,7 +1216,7 @@ mod tests {
         infra::platform::{
             dma_buf::DmaBufPool,
             frame_pipeline::worker::{
-                FramePipelineId, GpuPipeline, GpuScreen, GpuWorker, GpuWorkerEvent,
+                FramePipelineId, GpuComposition, GpuPipeline, GpuScreen, GpuWorker, GpuWorkerEvent,
                 GpuWorkerNotification, LatestSender, OUTPUT_POOL_CAPACITY, gpu_mismatch,
                 route_screen_frame, validate_nv12_size, wait_for_event,
             },
@@ -996,12 +1260,14 @@ mod tests {
     fn worker_event_loop_receives_screen_gpu_identity_before_frames() {
         let (_command_sender, command_receiver) = unbounded();
         let (_frame_sender, receiver) = KmsFrameReceiver::channel();
-        let (device, frames) = receiver.into_parts();
+        let (device, frames, composition_fallback) = receiver.into_parts();
         let screens = HashMap::from([(
             ScreenId(3),
             GpuScreen {
                 device: Some(device),
                 frames,
+                composition_fallback,
+                composition: GpuComposition::new(),
             },
         )]);
 
@@ -1096,15 +1362,13 @@ mod tests {
             ),
         ]);
 
-        route_screen_frame(
-            ScreenId(2),
-            empty_kms_frame(PixelSize {
-                width: 2560,
-                height: 1440,
-            }),
-            &mut pipelines,
-            |_, _| Err(eros::error!("test processing failure")),
-        );
+        let frame = empty_kms_frame(PixelSize {
+            width: 2560,
+            height: 1440,
+        });
+        route_screen_frame(ScreenId(2), &frame, &mut pipelines, |_, _| {
+            Err(eros::error!("test processing failure"))
+        });
 
         let error = matching_frames
             .recv()

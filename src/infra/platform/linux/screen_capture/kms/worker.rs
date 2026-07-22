@@ -13,7 +13,10 @@ use crate::{
     infra::platform::{
         dma_buf::{DmaBufFrame, DmaBufProfile},
         gpu::GpuDevice,
-        screen_capture::kms::{capture::KmsCapturer, types::KmsPlaneIssue},
+        screen_capture::kms::{
+            capture::{KmsCaptureOutput, KmsCapturer},
+            types::{KmsFramebufferPlane, KmsPlaneIssue},
+        },
         video_probe::{VideoFrameProbe, VideoProbeClock},
     },
     kernel::{geometry::FrameRate, screen_capture::ScreenCaptureSource},
@@ -21,16 +24,25 @@ use crate::{
 
 #[derive(Debug)]
 pub(crate) struct KmsCapturedFrame {
-    pub(crate) buffer: DmaBufFrame,
+    pub(crate) source: KmsCapturedSource,
     pub(crate) issues: Vec<KmsPlaneIssue>,
     pub(crate) frame_rate: FrameRate,
     pub(crate) probe: Option<VideoFrameProbe>,
 }
 
+#[derive(Debug)]
+pub(crate) enum KmsCapturedSource {
+    PlaneSet {
+        output_size: crate::kernel::geometry::PixelSize,
+        planes: Vec<KmsFramebufferPlane>,
+    },
+    Composed(DmaBufFrame),
+}
+
 #[cfg(test)]
 pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCapturedFrame {
     KmsCapturedFrame {
-        buffer: DmaBufFrame {
+        source: KmsCapturedSource::Composed(DmaBufFrame {
             size,
             format: drm::buffer::DrmFourcc::Xrgb8888,
             objects: Vec::new(),
@@ -38,7 +50,7 @@ pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCa
             readiness_fence: None,
             lease: None,
             va_backing: None,
-        },
+        }),
         issues: Vec::new(),
         frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
         probe: None,
@@ -46,6 +58,7 @@ pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCa
 }
 
 enum KmsCaptureCommand {
+    UseComposedFallback,
     Shutdown,
 }
 
@@ -60,6 +73,12 @@ pub(crate) struct KmsCaptureLease {
 pub(crate) struct KmsFrameReceiver {
     device: Receiver<eros::Result<GpuDevice>>,
     frames: Receiver<eros::Result<KmsCapturedFrame>>,
+    commands: Sender<KmsCaptureCommand>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct KmsCompositionFallback {
+    commands: Sender<KmsCaptureCommand>,
 }
 
 impl KmsCaptureLease {
@@ -90,11 +109,15 @@ impl KmsCaptureLease {
 
         Ok(ScreenCaptureSource {
             lease: Self {
-                commands,
+                commands: commands.clone(),
                 thread: Some(thread),
                 reaper: Some(reaper),
             },
-            receiver: KmsFrameReceiver { device, frames },
+            receiver: KmsFrameReceiver {
+                device,
+                frames,
+                commands: commands.clone(),
+            },
         })
     }
 
@@ -116,8 +139,15 @@ impl KmsFrameReceiver {
     ) -> (
         Receiver<eros::Result<GpuDevice>>,
         Receiver<eros::Result<KmsCapturedFrame>>,
+        KmsCompositionFallback,
     ) {
-        (self.device, self.frames)
+        (
+            self.device,
+            self.frames,
+            KmsCompositionFallback {
+                commands: self.commands,
+            },
+        )
     }
 
     #[cfg(test)]
@@ -131,11 +161,19 @@ impl KmsFrameReceiver {
     ) -> (Sender<eros::Result<KmsCapturedFrame>>, Self) {
         let (device_sender, device) = bounded(1);
         let (sender, frames) = bounded(1);
+        let (commands, _) = bounded(1);
         device_sender
             .send(Ok(gpu_device))
             .expect("Test GPU device should be sent");
 
-        (sender, Self { device, frames })
+        (
+            sender,
+            Self {
+                device,
+                frames,
+                commands,
+            },
+        )
     }
 
     #[cfg(test)]
@@ -143,6 +181,14 @@ impl KmsFrameReceiver {
         let (_, receiver) = Self::channel();
 
         receiver
+    }
+}
+
+impl KmsCompositionFallback {
+    pub(crate) fn request(&self) {
+        let _ = self
+            .commands
+            .try_send(KmsCaptureCommand::UseComposedFallback);
     }
 }
 
@@ -182,33 +228,29 @@ fn run_capture_loop(
     }
 
     let mut probe_clock = enable_probing.then(|| VideoProbeClock::new(probe_interval));
+    let mut use_composed_fallback = false;
 
     loop {
-        match commands.try_recv() {
-            Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
-            Err(TryRecvError::Empty) => {}
+        loop {
+            match commands.try_recv() {
+                Ok(KmsCaptureCommand::UseComposedFallback) => use_composed_fallback = true,
+                Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
+                Err(TryRecvError::Empty) => break,
+            }
         }
 
         let frame = if let Some(clock) = &mut probe_clock {
-            match capturer.capture_with_timing() {
-                Ok((Some(frame), timing)) => Ok(Some(KmsCapturedFrame {
-                    buffer: frame.buffer,
-                    issues: frame.issues,
-                    frame_rate: frame.frame_rate,
-                    probe: Some(clock.frame(timing)),
-                })),
+            match capturer.capture_with_timing(use_composed_fallback) {
+                Ok((Some(frame), timing)) => {
+                    Ok(Some(captured_frame(frame, Some(clock.frame(timing)))))
+                }
                 Ok((None, _)) => Ok(None),
                 Err(error) => Err(error),
             }
         } else {
-            capturer.capture().map(|frame| {
-                frame.map(|frame| KmsCapturedFrame {
-                    buffer: frame.buffer,
-                    issues: frame.issues,
-                    frame_rate: frame.frame_rate,
-                    probe: None,
-                })
-            })
+            capturer
+                .capture(use_composed_fallback)
+                .map(|frame| frame.map(|frame| captured_frame(frame, None)))
         };
         let capture_failed = frame.is_err();
 
@@ -224,6 +266,26 @@ fn run_capture_loop(
     }
 }
 
+fn captured_frame(frame: KmsCaptureOutput, probe: Option<VideoFrameProbe>) -> KmsCapturedFrame {
+    match frame {
+        KmsCaptureOutput::PlaneSet(frame) => KmsCapturedFrame {
+            source: KmsCapturedSource::PlaneSet {
+                output_size: frame.output_size,
+                planes: frame.planes,
+            },
+            issues: frame.issues,
+            frame_rate: frame.frame_rate,
+            probe,
+        },
+        KmsCaptureOutput::Composed(frame) => KmsCapturedFrame {
+            source: KmsCapturedSource::Composed(frame.buffer),
+            issues: frame.issues,
+            frame_rate: frame.frame_rate,
+            probe,
+        },
+    }
+}
+
 fn publish_latest_frame(
     sender: &Sender<eros::Result<KmsCapturedFrame>>,
     receiver: &Receiver<eros::Result<KmsCapturedFrame>>,
@@ -236,8 +298,10 @@ fn publish_latest_frame(
                 item = returned_item;
                 match receiver.try_recv() {
                     Ok(Ok(mut frame)) => {
-                        if let Some(fence) = frame.buffer.readiness_fence.take() {
-                            frame.buffer.set_release_fence(fence);
+                        if let KmsCapturedSource::Composed(buffer) = &mut frame.source
+                            && let Some(fence) = buffer.readiness_fence.take()
+                        {
+                            buffer.set_release_fence(fence);
                         }
                     }
                     Ok(Err(_)) | Err(TryRecvError::Empty) => {}
@@ -257,7 +321,8 @@ mod tests {
 
     use crate::{
         infra::platform::screen_capture::kms::worker::{
-            KmsCaptureLease, empty_kms_frame, publish_latest_frame,
+            KmsCaptureCommand, KmsCaptureLease, KmsCapturedSource, KmsCompositionFallback,
+            empty_kms_frame, publish_latest_frame,
         },
         kernel::geometry::PixelSize,
     };
@@ -307,6 +372,24 @@ mod tests {
             .try_recv()
             .expect("Latest KMS frame should remain queued")
             .expect("Latest KMS frame should be successful");
-        assert_eq!(frame.buffer.size, latest_size);
+        let KmsCapturedSource::Composed(buffer) = frame.source else {
+            panic!("Test frame should use the composed source variant");
+        };
+        assert_eq!(buffer.size, latest_size);
+    }
+
+    #[test]
+    fn gpu_worker_can_request_the_composed_fallback() {
+        let (commands, receiver) = bounded(1);
+        let fallback = KmsCompositionFallback { commands };
+
+        fallback.request();
+
+        assert!(matches!(
+            receiver
+                .try_recv()
+                .expect("Fallback command should be queued"),
+            KmsCaptureCommand::UseComposedFallback
+        ));
     }
 }

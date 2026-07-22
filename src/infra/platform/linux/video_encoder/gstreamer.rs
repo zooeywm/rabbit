@@ -2173,7 +2173,7 @@ mod tests {
             Vec::new(),
         )
         .expect("KMS capture source should start");
-        let (device, frames) = receiver.into_parts();
+        let (device, frames, _fallback) = receiver.into_parts();
         device
             .recv()
             .expect("KMS capture worker should report its GPU")
@@ -2182,7 +2182,15 @@ mod tests {
             .recv()
             .expect("KMS capture worker should remain connected")
             .expect("KMS capture worker should publish one frame");
-        let size = frame.buffer.size;
+        let size = match frame.source {
+            crate::infra::platform::screen_capture::KmsCapturedSource::PlaneSet {
+                output_size,
+                ..
+            } => output_size,
+            crate::infra::platform::screen_capture::KmsCapturedSource::Composed(buffer) => {
+                buffer.size
+            }
+        };
         drop(lease);
 
         size

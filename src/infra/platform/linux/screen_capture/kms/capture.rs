@@ -7,7 +7,9 @@ use crate::{
         dma_buf::{DmaBufFrame, DmaBufProfile},
         gpu::GpuDevice,
         screen_capture::kms::{
-            gbm_allocator::GbmFrameAllocator, output::KmsOutput, types::KmsPlaneIssue,
+            gbm_allocator::GbmFrameAllocator,
+            output::KmsOutput,
+            types::{KmsFramebufferSnapshot, KmsPlaneIssue},
         },
         video_probe::VideoCaptureTiming,
     },
@@ -19,6 +21,11 @@ pub(crate) struct KmsCapturer {
     output: KmsOutput,
     allocator: GbmFrameAllocator,
     gpu_device: GpuDevice,
+}
+
+pub(super) enum KmsCaptureOutput {
+    PlaneSet(KmsFramebufferSnapshot),
+    Composed(CapturedFrame<DmaBufFrame, KmsPlaneIssue>),
 }
 
 impl KmsCapturer {
@@ -45,9 +52,10 @@ impl KmsCapturer {
 
     pub(crate) fn capture(
         &mut self,
-    ) -> eros::Result<Option<CapturedFrame<DmaBufFrame, KmsPlaneIssue>>> {
+        use_composed_fallback: bool,
+    ) -> eros::Result<Option<KmsCaptureOutput>> {
         self.wait_for_vblank()?;
-        self.capture_current_frame()
+        self.capture_current_frame(use_composed_fallback)
     }
 
     fn wait_for_vblank(&self) -> eros::Result<()> {
@@ -60,7 +68,8 @@ impl KmsCapturer {
 
     fn capture_current_frame(
         &mut self,
-    ) -> eros::Result<Option<CapturedFrame<DmaBufFrame, KmsPlaneIssue>>> {
+        use_composed_fallback: bool,
+    ) -> eros::Result<Option<KmsCaptureOutput>> {
         let Some(snapshot) = self
             .output
             .snapshot_framebuffers()
@@ -69,21 +78,24 @@ impl KmsCapturer {
             return Ok(None);
         };
 
+        if !use_composed_fallback {
+            return Ok(Some(KmsCaptureOutput::PlaneSet(snapshot)));
+        }
+
         self.allocator
             .compose(snapshot)
             .with_context(|| "Failed to compose KMS framebuffers")
+            .map(|frame| frame.map(KmsCaptureOutput::Composed))
     }
 
     pub(crate) fn capture_with_timing(
         &mut self,
-    ) -> eros::Result<(
-        Option<CapturedFrame<DmaBufFrame, KmsPlaneIssue>>,
-        VideoCaptureTiming,
-    )> {
+        use_composed_fallback: bool,
+    ) -> eros::Result<(Option<KmsCaptureOutput>, VideoCaptureTiming)> {
         let vblank_wait_started = Instant::now();
         self.wait_for_vblank()?;
         let capture_started = Instant::now();
-        let frame = self.capture_current_frame()?;
+        let frame = self.capture_current_frame(use_composed_fallback)?;
         let capture_completed = Instant::now();
 
         Ok((
@@ -108,7 +120,7 @@ mod tests {
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
-    fn captures_one_composed_frame() {
+    fn captures_one_raw_plane_set() {
         let screen_name = std::env::var("RABBIT_KMS_SCREEN")
             .expect("RABBIT_KMS_SCREEN must name the DRM connector to capture");
         let (_reaper, reaper_handle) =
@@ -121,12 +133,12 @@ mod tests {
             Vec::new(),
         )
         .expect("KMS capture source should start");
-        let (device, frames) = receiver.into_parts();
+        let (device, frames, _fallback) = receiver.into_parts();
         let device = device
             .recv()
             .expect("KMS capture worker should report its GPU")
             .expect("KMS capture GPU discovery should succeed");
-        let mut frame = frames
+        let frame = frames
             .recv()
             .expect("KMS capture worker should remain connected")
             .expect("KMS capture worker should publish one frame");
@@ -134,56 +146,21 @@ mod tests {
         for issue in &frame.issues {
             eprintln!("{issue}");
         }
-        eprintln!("Captured KMS frame: {:#?}", frame.buffer);
+        let crate::infra::platform::screen_capture::KmsCapturedSource::PlaneSet {
+            output_size,
+            planes,
+        } = frame.source
+        else {
+            panic!("KMS capture should publish the raw plane-set fast path");
+        };
+        eprintln!("Captured KMS plane set: {planes:#?}");
 
-        assert!(frame.buffer.size.width > 0);
-        assert!(frame.buffer.size.height > 0);
-        assert!(!frame.buffer.objects.is_empty());
-        assert!(frame.buffer.objects.iter().all(|object| object.size > 0));
-        assert!(!frame.buffer.planes.is_empty());
-        assert!(frame.buffer.readiness_fence.is_some());
+        assert!(output_size.width > 0);
+        assert!(output_size.height > 0);
+        assert!(!planes.is_empty());
+        assert!(planes.iter().all(|plane| !plane.buffer.objects.is_empty()));
 
-        let context = GpuContext::new(&device).expect("Pipeline GPU context should initialize");
-        let fence = frame
-            .buffer
-            .readiness_fence
-            .take()
-            .expect("Composed KMS frame should carry a readiness fence");
-        context
-            .egl()
-            .wait_on_native_fence(fence)
-            .expect("Pipeline GPU context should enqueue the source readiness wait");
-        let image = context
-            .egl()
-            .import_dma_buf_frame(&frame.buffer)
-            .expect("Pipeline GPU context should import the composed KMS frame");
-        let texture = context
-            .egl()
-            .create_dma_buf_texture(&image)
-            .expect("Pipeline GPU context should bind the composed KMS frame as a texture");
-        let (mut output, _) = context
-            .select_nv12_output(frame.buffer.size)
-            .expect("Pipeline GPU context should allocate an NV12 output");
-        let output_image = context
-            .egl()
-            .import_nv12_target(&output)
-            .expect("Pipeline GPU context should import the NV12 output");
-        let output_target = context
-            .egl()
-            .create_nv12_target(&output_image)
-            .expect("Pipeline GPU context should bind the NV12 output targets");
-        context
-            .egl()
-            .convert_to_nv12(&texture, &output_target)
-            .expect("Pipeline GPU context should convert the composed frame to NV12");
-        output.readiness_fence = Some(
-            context
-                .egl()
-                .finish_frame_pipeline()
-                .expect("Pipeline GPU context should export NV12 output readiness"),
-        );
-
-        assert!(output.readiness_fence.is_some());
+        let _context = GpuContext::new(&device).expect("Pipeline GPU context should initialize");
 
         drop(lease);
     }
