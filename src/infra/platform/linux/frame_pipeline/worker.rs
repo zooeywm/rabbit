@@ -403,7 +403,7 @@ fn process_screen_frame(
         probe.mark_gpu_received();
     }
 
-    let frame = match publish_single_pipeline_passthrough(screen_id, frame, pipelines) {
+    let frame = match publish_single_pipeline_passthrough(context, screen_id, frame, pipelines) {
         None => return,
         Some(frame) => frame,
     };
@@ -426,6 +426,7 @@ fn process_screen_frame(
 }
 
 fn publish_single_pipeline_passthrough(
+    context: &GpuContext,
     screen_id: ScreenId,
     mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
@@ -454,8 +455,23 @@ fn publish_single_pipeline_passthrough(
 
     match pipeline.output_strategy {
         None => {
+            if let Some((_buffer, strategy)) =
+                select_direct_nv12_output(context, pipeline.parameters.frame_size)
+            {
+                pipeline.output_strategy = Some(strategy);
+                tracing::info!(
+                    target: "rabbit::frame_pipeline",
+                    screen_id = screen_id.0,
+                    width = pipeline.parameters.frame_size.width,
+                    height = pipeline.parameters.frame_size.height,
+                    strategy = strategy.name(),
+                    "Selected frame-pipeline output strategy"
+                );
+                return Some(frame);
+            }
+
             if let Err(error) = hardware_h264_encoder_for(&frame.buffer) {
-                tracing::debug!(
+                tracing::warn!(
                     target: "rabbit::frame_pipeline",
                     screen_id = screen_id.0,
                     modifier = ?modifier,
@@ -678,47 +694,8 @@ fn select_output(
     crate::infra::platform::dma_buf::DmaBufFrame,
     FrameOutputStrategy,
 )> {
-    for strategy in Nv12OutputStrategy::ALL {
-        if !context.supports_nv12_output(strategy) {
-            continue;
-        }
-
-        let buffer = match context.allocate_nv12_output(size, strategy) {
-            Ok(buffer) => buffer,
-            Err(error) => {
-                tracing::debug!(
-                    target: "rabbit::frame_pipeline",
-                    strategy = strategy.name(),
-                    error = ?error,
-                    "Failed to allocate direct NV12 output candidate"
-                );
-                continue;
-            }
-        };
-        let renderable = context
-            .egl()
-            .import_nv12_target(&buffer)
-            .and_then(|image| context.egl().create_nv12_target(&image));
-        if let Err(error) = renderable {
-            tracing::debug!(
-                target: "rabbit::frame_pipeline",
-                strategy = strategy.name(),
-                error = ?error,
-                "EGL rejected direct NV12 output candidate"
-            );
-            continue;
-        }
-        if let Err(error) = hardware_h264_encoder_for(&buffer) {
-            tracing::debug!(
-                target: "rabbit::frame_pipeline",
-                strategy = strategy.name(),
-                error = ?error,
-                "Hardware H.264 encoder rejected direct NV12 output candidate"
-            );
-            continue;
-        }
-
-        return Ok((buffer, FrameOutputStrategy::DirectNv12(strategy)));
+    if let Some(output) = select_direct_nv12_output(context, size) {
+        return Ok(output);
     }
 
     for modifier in va_vpp_input_modifiers(Format::Xrgb8888)
@@ -728,7 +705,7 @@ fn select_output(
         let buffer = match allocate_output(context, size, strategy) {
             Ok(buffer) => buffer,
             Err(error) => {
-                tracing::debug!(
+                tracing::warn!(
                     target: "rabbit::frame_pipeline",
                     modifier = ?modifier,
                     error = ?error,
@@ -742,7 +719,7 @@ fn select_output(
             .import_composition_target(&buffer)
             .and_then(|image| context.egl().create_composition_target(&image));
         if let Err(error) = renderable {
-            tracing::debug!(
+            tracing::warn!(
                 target: "rabbit::frame_pipeline",
                 modifier = ?modifier,
                 error = ?error,
@@ -751,7 +728,7 @@ fn select_output(
             continue;
         }
         if let Err(error) = hardware_h264_encoder_for(&buffer) {
-            tracing::debug!(
+            tracing::warn!(
                 target: "rabbit::frame_pipeline",
                 modifier = ?modifier,
                 error = ?error,
@@ -764,6 +741,64 @@ fn select_output(
     }
 
     eros::bail!("No VAAPI XRGB DMA-BUF output candidate is usable")
+}
+
+fn select_direct_nv12_output(
+    context: &GpuContext,
+    size: crate::kernel::geometry::PixelSize,
+) -> Option<(
+    crate::infra::platform::dma_buf::DmaBufFrame,
+    FrameOutputStrategy,
+)> {
+    for strategy in Nv12OutputStrategy::ALL {
+        if !context.supports_nv12_output(strategy) {
+            tracing::warn!(
+                target: "rabbit::frame_pipeline",
+                strategy = strategy.name(),
+                "Direct NV12 output candidate is unsupported"
+            );
+            continue;
+        }
+
+        let buffer = match context.allocate_nv12_output(size, strategy) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                tracing::warn!(
+                    target: "rabbit::frame_pipeline",
+                    strategy = strategy.name(),
+                    error = ?error,
+                    "Failed to allocate direct NV12 output candidate"
+                );
+                continue;
+            }
+        };
+        let renderable = context
+            .egl()
+            .import_nv12_target(&buffer)
+            .and_then(|image| context.egl().create_nv12_target(&image));
+        if let Err(error) = renderable {
+            tracing::warn!(
+                target: "rabbit::frame_pipeline",
+                strategy = strategy.name(),
+                error = ?error,
+                "EGL rejected direct NV12 output candidate"
+            );
+            continue;
+        }
+        if let Err(error) = hardware_h264_encoder_for(&buffer) {
+            tracing::warn!(
+                target: "rabbit::frame_pipeline",
+                strategy = strategy.name(),
+                error = ?error,
+                "Hardware H.264 encoder rejected direct NV12 output candidate"
+            );
+            continue;
+        }
+
+        return Some((buffer, FrameOutputStrategy::DirectNv12(strategy)));
+    }
+
+    None
 }
 
 fn allocate_output(
@@ -822,6 +857,7 @@ impl<T> LatestSender<T> {
     }
 }
 
+// Focused test: cargo test infra::platform::frame_pipeline::worker::tests --lib
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, path::PathBuf};
