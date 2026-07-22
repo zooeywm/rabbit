@@ -35,6 +35,9 @@ impl AsMut<[u8]> for DmaBufLeaseOwner {
 }
 
 mod probe;
+mod va_surface;
+
+pub(crate) use va_surface::VaDmaBufAllocator;
 
 #[derive(Debug)]
 pub(crate) struct GStreamerVideoFrame {
@@ -42,6 +45,7 @@ pub(crate) struct GStreamerVideoFrame {
     input_caps: gstreamer::Caps,
     input_signature: DmaBufInputSignature,
     probe: Option<VideoFrameProbe>,
+    va_context: Option<gstreamer::Context>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,26 +210,43 @@ impl GStreamerVideoFrame {
             Some((caps, _)) => caps.to_owned(),
             None => dmabuf_caps(frame, modifier, Some(source.frame_rate))?,
         };
-        let allocator = gstreamer_allocators::DmaBufAllocator::new();
-        let mut buffer = gstreamer::Buffer::new();
+        let va_context = frame
+            .va_backing
+            .as_ref()
+            .map(|backing| backing.context.clone());
+        let mut buffer = match &frame.va_backing {
+            Some(backing) => backing
+                .buffer
+                .copy_region(gstreamer::BufferCopyFlags::MEMORY, ..)
+                .with_context(|| "Failed to reference the VA DMA-BUF input memory")?,
+            None => {
+                let allocator = gstreamer_allocators::DmaBufAllocator::new();
+                let mut buffer = gstreamer::Buffer::new();
+                let Some(buffer_mut) = buffer.get_mut() else {
+                    eros::bail!("New GStreamer DMA-BUF input buffer is unexpectedly shared");
+                };
+                for (object_index, object) in frame.objects.iter().enumerate() {
+                    let fd = object.fd.try_clone().with_context(|| {
+                        format!(
+                            "Failed to duplicate DMA-BUF object {} for GStreamer",
+                            object_index
+                        )
+                    })?;
+                    let memory =
+                        unsafe { allocator.alloc_dmabuf(fd, object.size) }.with_context(|| {
+                            format!(
+                                "Failed to wrap DMA-BUF object {} as GStreamer memory",
+                                object_index
+                            )
+                        })?;
+                    buffer_mut.append_memory(memory);
+                }
+                buffer
+            }
+        };
         let Some(buffer_mut) = buffer.get_mut() else {
             eros::bail!("New GStreamer DMA-BUF input buffer is unexpectedly shared");
         };
-        for (object_index, object) in frame.objects.iter().enumerate() {
-            let fd = object.fd.try_clone().with_context(|| {
-                format!(
-                    "Failed to duplicate DMA-BUF object {} for GStreamer",
-                    object_index
-                )
-            })?;
-            let memory = unsafe { allocator.alloc_dmabuf(fd, object.size) }.with_context(|| {
-                format!(
-                    "Failed to wrap DMA-BUF object {} as GStreamer memory",
-                    object_index
-                )
-            })?;
-            buffer_mut.append_memory(memory);
-        }
         gstreamer_video::VideoMeta::add_full(
             buffer_mut,
             gstreamer_video::VideoFrameFlags::empty(),
@@ -259,6 +280,7 @@ impl GStreamerVideoFrame {
             input_caps,
             input_signature,
             probe,
+            va_context,
         })
     }
 
@@ -562,6 +584,9 @@ impl GStreamerVideoEncoder {
             max_rtp_packet_size,
             probe_interval,
         )?;
+        if let Some(context) = &first_frame.va_context {
+            encoder.pipeline.set_context(context);
+        }
         encoder.submit_frame(first_frame)?;
         encoder.start()?;
 
@@ -1363,6 +1388,7 @@ mod tests {
             planes: Vec::new(),
             readiness_fence: None,
             lease: None,
+            va_backing: None,
         }
     }
 
@@ -2243,6 +2269,7 @@ mod tests {
                 ],
                 readiness_fence: None,
                 lease,
+                va_backing: None,
             },
             frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
             probe: None,

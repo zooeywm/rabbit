@@ -11,11 +11,11 @@ use gbm::{Format, Modifier};
 use crate::{
     infra::WorkerReaperHandle,
     infra::platform::{
-        dma_buf::DmaBufPool,
+        dma_buf::{DmaBufFrame, DmaBufPool},
         frame_pipeline::{GbmFramePipelineFrame, SharedFramePipelineError},
         gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
         screen_capture::{EglDmaBufImage, KmsCapturedFrame, KmsFrameReceiver},
-        video_encoder::{hardware_h264_encoder_for, va_vpp_input_modifiers},
+        video_encoder::{VaDmaBufAllocator, hardware_h264_encoder_for, va_vpp_input_modifiers},
     },
     kernel::{frame_pipeline::FramePipelineParameters, screen_manager::ScreenId},
 };
@@ -83,13 +83,17 @@ struct GpuPipeline {
     outputs: LatestSender<eros::Result<GbmFramePipelineFrame>>,
     output_strategy: Option<FrameOutputStrategy>,
     output_pool: DmaBufPool,
+    output_pool_exhaustion_warned: bool,
+    first_output: Option<DmaBufFrame>,
+    va_nv12_allocator: Option<VaDmaBufAllocator>,
 }
 
-const OUTPUT_POOL_CAPACITY: usize = 3;
+const OUTPUT_POOL_CAPACITY: usize = 6;
 
 #[derive(Debug, Clone, Copy)]
 enum FrameOutputStrategy {
     PassthroughXrgb(Modifier),
+    VaDirectNv12,
     DirectNv12(Nv12OutputStrategy),
     VaapiXrgb(Modifier),
 }
@@ -253,6 +257,9 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                         outputs,
                         output_strategy: None,
                         output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
+                        output_pool_exhaustion_warned: false,
+                        first_output: None,
+                        va_nv12_allocator: None,
                     },
                 );
             }
@@ -455,9 +462,8 @@ fn publish_single_pipeline_passthrough(
 
     match pipeline.output_strategy {
         None => {
-            if let Some((_buffer, strategy)) =
-                select_direct_nv12_output(context, pipeline.parameters.frame_size)
-            {
+            if let Some((buffer, strategy)) = select_direct_nv12_output(context, pipeline) {
+                pipeline.first_output = Some(buffer);
                 pipeline.output_strategy = Some(strategy);
                 tracing::info!(
                     target: "rabbit::frame_pipeline",
@@ -501,7 +507,11 @@ fn publish_single_pipeline_passthrough(
             pipelines.remove(&pipeline_id);
             return None;
         }
-        Some(FrameOutputStrategy::DirectNv12(_) | FrameOutputStrategy::VaapiXrgb(_)) => {
+        Some(
+            FrameOutputStrategy::VaDirectNv12
+            | FrameOutputStrategy::DirectNv12(_)
+            | FrameOutputStrategy::VaapiXrgb(_),
+        ) => {
             return Some(frame);
         }
     }
@@ -590,11 +600,11 @@ fn process_pipeline_frame(
         .egl()
         .create_dma_buf_texture(source)
         .with_context(|| "Failed to bind the frame-pipeline source texture")?;
-    let mut first = None;
+    let mut first = pipeline.first_output.take();
     let strategy = match pipeline.output_strategy {
         Some(strategy) => strategy,
         None => {
-            let (buffer, strategy) = select_output(context, parameters.frame_size)?;
+            let (buffer, strategy) = select_output(context, pipeline)?;
             first = Some(buffer);
             pipeline.output_strategy = Some(strategy);
             tracing::info!(
@@ -608,10 +618,11 @@ fn process_pipeline_frame(
             strategy
         }
     };
+    let va_nv12_allocator = pipeline.va_nv12_allocator.as_ref();
     let buffer = pipeline.output_pool.acquire(
         || match first.take() {
             Some(buffer) => Ok(buffer),
-            None => allocate_output(context, parameters.frame_size, strategy),
+            None => allocate_output(context, parameters.frame_size, strategy, va_nv12_allocator),
         },
         |fence| {
             context
@@ -621,13 +632,23 @@ fn process_pipeline_frame(
         },
     )?;
     let Some(mut buffer) = buffer else {
+        if !pipeline.output_pool_exhaustion_warned {
+            tracing::warn!(
+                target: "rabbit::frame_pipeline",
+                screen_id = pipeline.screen_id.0,
+                strategy = strategy.name(),
+                capacity = OUTPUT_POOL_CAPACITY,
+                "Frame-pipeline output pool exhausted; dropping source frames until an output surface is released"
+            );
+            pipeline.output_pool_exhaustion_warned = true;
+        }
         return Ok(None);
     };
     match strategy {
         FrameOutputStrategy::PassthroughXrgb(_) => {
             eros::bail!("XRGB pass-through reached the GPU processing path")
         }
-        FrameOutputStrategy::DirectNv12(_) => {
+        FrameOutputStrategy::VaDirectNv12 | FrameOutputStrategy::DirectNv12(_) => {
             let target_image = context
                 .egl()
                 .import_nv12_target(&buffer)
@@ -656,16 +677,20 @@ fn process_pipeline_frame(
                 .with_context(|| "Failed to copy the source frame to the VAAPI XRGB output")?;
         }
     }
-    let readiness_fence = context
+    let completion_fence = context
         .egl()
         .finish_frame_pipeline()
         .with_context(|| "Failed to export frame-pipeline output readiness")?;
-    frame.buffer.set_release_fence(
-        readiness_fence
-            .try_clone()
-            .with_context(|| "Failed to duplicate the source-frame release fence")?,
-    );
-    buffer.readiness_fence = Some(readiness_fence);
+    if matches!(strategy, FrameOutputStrategy::VaDirectNv12) {
+        frame.buffer.set_release_fence(completion_fence);
+    } else {
+        frame.buffer.set_release_fence(
+            completion_fence
+                .try_clone()
+                .with_context(|| "Failed to duplicate the source-frame release fence")?,
+        );
+        buffer.readiness_fence = Some(completion_fence);
+    }
 
     Ok(Some(GbmFramePipelineFrame {
         buffer,
@@ -681,6 +706,7 @@ impl FrameOutputStrategy {
     fn name(self) -> &'static str {
         match self {
             Self::PassthroughXrgb(_) => "kms_xrgb_passthrough",
+            Self::VaDirectNv12 => "va_direct_nv12",
             Self::DirectNv12(strategy) => strategy.name(),
             Self::VaapiXrgb(_) => "vaapi_xrgb",
         }
@@ -689,20 +715,22 @@ impl FrameOutputStrategy {
 
 fn select_output(
     context: &GpuContext,
-    size: crate::kernel::geometry::PixelSize,
+    pipeline: &mut GpuPipeline,
 ) -> eros::Result<(
     crate::infra::platform::dma_buf::DmaBufFrame,
     FrameOutputStrategy,
 )> {
-    if let Some(output) = select_direct_nv12_output(context, size) {
+    if let Some(output) = select_direct_nv12_output(context, pipeline) {
         return Ok(output);
     }
+
+    let size = pipeline.parameters.frame_size;
 
     for modifier in va_vpp_input_modifiers(Format::Xrgb8888)
         .with_context(|| "Failed to find VAAPI-compatible XRGB DMA-BUF modifiers")?
     {
         let strategy = FrameOutputStrategy::VaapiXrgb(modifier);
-        let buffer = match allocate_output(context, size, strategy) {
+        let buffer = match allocate_output(context, size, strategy, None) {
             Ok(buffer) => buffer,
             Err(error) => {
                 tracing::warn!(
@@ -745,11 +773,63 @@ fn select_output(
 
 fn select_direct_nv12_output(
     context: &GpuContext,
-    size: crate::kernel::geometry::PixelSize,
+    pipeline: &mut GpuPipeline,
 ) -> Option<(
     crate::infra::platform::dma_buf::DmaBufFrame,
     FrameOutputStrategy,
 )> {
+    let size = pipeline.parameters.frame_size;
+    let va_allocator = match VaDmaBufAllocator::new(context.render_node_path(), size) {
+        Ok(allocator) => Some(allocator),
+        Err(error) => {
+            tracing::warn!(
+                target: "rabbit::frame_pipeline",
+                strategy = FrameOutputStrategy::VaDirectNv12.name(),
+                error = ?error,
+                "Failed to initialize VA DirectNV12 output candidate"
+            );
+            None
+        }
+    };
+    if let Some(va_allocator) = va_allocator {
+        let buffer = match va_allocator.allocate() {
+            Ok(buffer) => Some(buffer),
+            Err(error) => {
+                tracing::warn!(
+                    target: "rabbit::frame_pipeline",
+                    strategy = FrameOutputStrategy::VaDirectNv12.name(),
+                    error = ?error,
+                    "Failed to allocate VA DirectNV12 output candidate"
+                );
+                None
+            }
+        };
+        if let Some(buffer) = buffer {
+            let renderable = context
+                .egl()
+                .import_nv12_target(&buffer)
+                .and_then(|image| context.egl().create_nv12_target(&image));
+            if let Err(error) = renderable {
+                tracing::warn!(
+                    target: "rabbit::frame_pipeline",
+                    strategy = FrameOutputStrategy::VaDirectNv12.name(),
+                    error = ?error,
+                    "EGL rejected VA DirectNV12 output candidate"
+                );
+            } else if let Err(error) = hardware_h264_encoder_for(&buffer) {
+                tracing::warn!(
+                    target: "rabbit::frame_pipeline",
+                    strategy = FrameOutputStrategy::VaDirectNv12.name(),
+                    error = ?error,
+                    "Hardware H.264 encoder rejected VA DirectNV12 output candidate"
+                );
+            } else {
+                pipeline.va_nv12_allocator = Some(va_allocator);
+                return Some((buffer, FrameOutputStrategy::VaDirectNv12));
+            }
+        }
+    }
+
     for strategy in Nv12OutputStrategy::ALL {
         if !context.supports_nv12_output(strategy) {
             tracing::warn!(
@@ -805,11 +885,15 @@ fn allocate_output(
     context: &GpuContext,
     size: crate::kernel::geometry::PixelSize,
     strategy: FrameOutputStrategy,
+    va_nv12_allocator: Option<&VaDmaBufAllocator>,
 ) -> eros::Result<crate::infra::platform::dma_buf::DmaBufFrame> {
     match strategy {
         FrameOutputStrategy::PassthroughXrgb(_) => {
             eros::bail!("XRGB pass-through does not allocate a frame-pipeline output")
         }
+        FrameOutputStrategy::VaDirectNv12 => va_nv12_allocator
+            .with_context(|| "VA DirectNV12 strategy has no allocator")?
+            .allocate(),
         FrameOutputStrategy::DirectNv12(strategy) => context.allocate_nv12_output(size, strategy),
         FrameOutputStrategy::VaapiXrgb(modifier) => context.allocate_dma_buf_with_modifier(
             size,
@@ -989,6 +1073,9 @@ mod tests {
                     },
                     output_strategy: None,
                     output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
+                    output_pool_exhaustion_warned: false,
+                    first_output: None,
+                    va_nv12_allocator: None,
                 },
             ),
             (
@@ -1002,6 +1089,9 @@ mod tests {
                     },
                     output_strategy: None,
                     output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
+                    output_pool_exhaustion_warned: false,
+                    first_output: None,
+                    va_nv12_allocator: None,
                 },
             ),
         ]);

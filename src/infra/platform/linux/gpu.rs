@@ -36,6 +36,7 @@ impl From<PathBuf> for GpuDevice {
 pub(crate) struct GpuContext {
     egl: EglContext,
     device: Device<OwnedFd>,
+    render_node_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,11 +82,19 @@ impl GpuContext {
             )
         })?;
 
-        Ok(Self { egl, device })
+        Ok(Self {
+            egl,
+            device,
+            render_node_path: render_node_path.to_owned(),
+        })
     }
 
     pub(crate) fn egl(&self) -> &EglContext {
         &self.egl
+    }
+
+    pub(crate) fn render_node_path(&self) -> &Path {
+        &self.render_node_path
     }
 
     pub(crate) fn allocate_dma_buf(
@@ -189,6 +198,7 @@ impl GpuContext {
             planes,
             readiness_fence: None,
             lease: None,
+            va_backing: None,
         })
     }
 
@@ -289,6 +299,7 @@ impl GpuContext {
             planes: vec![luma.planes[0], chroma_plane],
             readiness_fence: None,
             lease: None,
+            va_backing: None,
         })
     }
 }
@@ -296,190 +307,22 @@ impl GpuContext {
 #[cfg(test)]
 mod tests {
     use std::{
-        ffi::{CString, c_void},
-        os::{
-            fd::{BorrowedFd, OwnedFd},
-            unix::ffi::OsStrExt as _,
-        },
+        fs::File,
+        os::unix::fs::MetadataExt as _,
         path::{Path, PathBuf},
-        ptr::NonNull,
+        time::Duration,
     };
 
+    use compio::runtime::fd::PollFd;
     use eros::Context as _;
     use gbm::Format;
-    use gstreamer::glib::translate::{FromGlibPtrFull as _, ToGlibPtr as _, from_glib};
 
     use crate::infra::platform::{
         dma_buf::{DmaBufFrame, DmaBufObject, DmaBufPlane},
         gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
-        video_encoder::{hardware_h264_encoder_for, va_vpp_input_modifier},
+        video_encoder::{VaDmaBufAllocator, hardware_h264_encoder_for, va_vpp_input_modifier},
     };
     use crate::kernel::geometry::PixelSize;
-
-    const VA_SURFACE_ATTRIB_USAGE_HINT_ENCODER: u32 = 0x0000_0002;
-
-    #[link(name = "gstva-1.0")]
-    unsafe extern "C" {
-        fn gst_va_display_drm_new_from_path(path: *const std::ffi::c_char) -> *mut c_void;
-        fn gst_va_dmabuf_allocator_new(display: *mut c_void) -> *mut gstreamer::ffi::GstAllocator;
-        fn gst_va_dmabuf_get_modifier_for_format(
-            display: *mut c_void,
-            format: gstreamer_video::ffi::GstVideoFormat,
-            usage_hint: u32,
-        ) -> u64;
-        fn gst_va_dmabuf_allocator_set_format(
-            allocator: *mut gstreamer::ffi::GstAllocator,
-            info: *mut gstreamer_video::ffi::GstVideoInfoDmaDrm,
-            usage_hint: u32,
-        ) -> gstreamer::glib::ffi::gboolean;
-        fn gst_va_dmabuf_allocator_setup_buffer(
-            allocator: *mut gstreamer::ffi::GstAllocator,
-            buffer: *mut gstreamer::ffi::GstBuffer,
-        ) -> gstreamer::glib::ffi::gboolean;
-    }
-
-    struct VaDisplay(NonNull<c_void>);
-
-    impl Drop for VaDisplay {
-        fn drop(&mut self) {
-            unsafe {
-                gstreamer::glib::gobject_ffi::g_object_unref(self.0.as_ptr().cast());
-            }
-        }
-    }
-
-    struct VaDmaBufSurface {
-        frame: DmaBufFrame,
-        _owner: gstreamer::Buffer,
-        _allocator: gstreamer::Allocator,
-        _display: VaDisplay,
-    }
-
-    fn allocate_va_nv12_surface(
-        render_node: &Path,
-        size: PixelSize,
-    ) -> eros::Result<VaDmaBufSurface> {
-        gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
-        let render_node = CString::new(render_node.as_os_str().as_bytes())
-            .with_context(|| "VA render-node path contains a NUL byte")?;
-        let display =
-            NonNull::new(unsafe { gst_va_display_drm_new_from_path(render_node.as_ptr()) })
-                .with_context(|| "Failed to create a GStreamer VA display")?;
-        let display = VaDisplay(display);
-        let allocator = NonNull::new(unsafe { gst_va_dmabuf_allocator_new(display.0.as_ptr()) })
-            .with_context(|| "Failed to create a GStreamer VA DMA-BUF allocator")?;
-        let allocator = unsafe { gstreamer::Allocator::from_glib_full(allocator.as_ptr()) };
-        let usage_hint = VA_SURFACE_ATTRIB_USAGE_HINT_ENCODER;
-        let modifier = unsafe {
-            gst_va_dmabuf_get_modifier_for_format(
-                display.0.as_ptr(),
-                gstreamer_video::ffi::GST_VIDEO_FORMAT_NV12,
-                usage_hint,
-            )
-        };
-        let video_info = gstreamer_video::VideoInfo::builder(
-            gstreamer_video::VideoFormat::Nv12,
-            size.width,
-            size.height,
-        )
-        .build()
-        .with_context(|| "Failed to describe the VA NV12 surface")?;
-        let mut drm_info =
-            gstreamer_video::VideoInfoDmaDrm::new(video_info, Format::Nv12 as u32, modifier);
-        let configured: bool = unsafe {
-            from_glib(gst_va_dmabuf_allocator_set_format(
-                allocator.to_glib_none().0,
-                (&mut drm_info as *mut gstreamer_video::VideoInfoDmaDrm)
-                    .cast::<gstreamer_video::ffi::GstVideoInfoDmaDrm>(),
-                usage_hint,
-            ))
-        };
-        if !configured {
-            eros::bail!(
-                "Failed to configure the GStreamer VA DMA-BUF allocator for modifier {:?} and usage hint 0x{:08X}",
-                drm::buffer::DrmModifier::from(modifier),
-                usage_hint
-            );
-        }
-
-        let mut owner = gstreamer::Buffer::new();
-        let allocated: bool = unsafe {
-            from_glib(gst_va_dmabuf_allocator_setup_buffer(
-                allocator.to_glib_none().0,
-                owner
-                    .get_mut()
-                    .with_context(|| "New VA DMA-BUF buffer is unexpectedly shared")?
-                    .as_mut_ptr(),
-            ))
-        };
-        if !allocated {
-            eros::bail!("Failed to allocate a GStreamer VA DMA-BUF surface");
-        }
-        if owner.n_memory() == 0 {
-            eros::bail!("GStreamer VA DMA-BUF surface has no memory objects");
-        }
-
-        let mut objects = Vec::with_capacity(owner.n_memory());
-        for (object_index, memory) in owner.iter_memories().enumerate() {
-            let dma_buf = memory
-                .downcast_memory_ref::<gstreamer_allocators::DmaBufMemory>()
-                .with_context(|| format!("VA surface memory {object_index} is not a DMA-BUF"))?;
-            let borrowed = unsafe { BorrowedFd::borrow_raw(dma_buf.fd()) };
-            let fd: OwnedFd = borrowed.try_clone_to_owned().with_context(|| {
-                format!("Failed to duplicate VA surface DMA-BUF object {object_index}")
-            })?;
-            objects.push(DmaBufObject::try_from(fd).with_context(|| {
-                format!("Failed to inspect VA surface DMA-BUF object {object_index}")
-            })?);
-        }
-
-        let modifier = drm::buffer::DrmModifier::from(drm_info.modifier());
-        let mut planes = Vec::with_capacity(drm_info.n_planes() as usize);
-        for (plane_index, (&offset, &stride)) in
-            drm_info.offset().iter().zip(drm_info.stride()).enumerate()
-        {
-            let (memory_range, skip) = owner
-                .find_memory(offset..offset.saturating_add(1))
-                .with_context(|| {
-                    format!("Failed to locate VA surface plane {plane_index} memory")
-                })?;
-            if memory_range.len() != 1 {
-                eros::bail!(
-                    "VA surface plane {} spans {} memory objects",
-                    plane_index,
-                    memory_range.len()
-                );
-            }
-            let memory = owner.peek_memory(memory_range.start);
-            let object_offset = memory
-                .offset()
-                .checked_add(skip)
-                .with_context(|| "VA surface plane offset exceeds usize")?;
-            planes.push(DmaBufPlane {
-                object_index: memory_range.start,
-                offset: u32::try_from(object_offset)
-                    .with_context(|| "VA surface plane offset exceeds u32")?,
-                stride: u32::try_from(stride)
-                    .with_context(|| "VA surface plane stride is negative")?,
-                modifier,
-            });
-        }
-
-        Ok(VaDmaBufSurface {
-            frame: DmaBufFrame {
-                size,
-                format: Format::try_from(drm_info.fourcc())
-                    .with_context(|| "VA surface has an unknown DRM fourcc")?,
-                objects,
-                planes,
-                readiness_fence: None,
-                lease: None,
-            },
-            _owner: owner,
-            _allocator: allocator,
-            _display: display,
-        })
-    }
 
     #[test]
     fn render_node_path_is_the_gpu_identity() {
@@ -583,13 +426,43 @@ mod tests {
             .create_dma_buf_texture(&source_image)
             .expect("OpenGL should bind the XRGB probe source texture");
 
-        let mut surface = allocate_va_nv12_surface(&render_node, size)
+        let allocator = VaDmaBufAllocator::new(&render_node, size)
+            .expect("VAAPI should initialize an encoder-compatible NV12 allocator");
+        let mut frame = allocator
+            .allocate()
             .expect("VAAPI should allocate an encoder-compatible NV12 surface");
-        assert_eq!(surface.frame.format, Format::Nv12);
-        assert_eq!(surface.frame.planes.len(), 2);
+        let other_frames = [
+            allocator
+                .allocate()
+                .expect("VAAPI should allocate a second NV12 surface"),
+            allocator
+                .allocate()
+                .expect("VAAPI should allocate a third NV12 surface"),
+        ];
+        let surface_inode = |frame: &DmaBufFrame| {
+            File::from(
+                frame.objects[0]
+                    .fd
+                    .try_clone()
+                    .expect("VA surface DMA-BUF fd should duplicate"),
+            )
+            .metadata()
+            .expect("VA surface DMA-BUF should expose metadata")
+            .ino()
+        };
+        let surface_inodes = [
+            surface_inode(&frame),
+            surface_inode(&other_frames[0]),
+            surface_inode(&other_frames[1]),
+        ];
+        assert_ne!(surface_inodes[0], surface_inodes[1]);
+        assert_ne!(surface_inodes[0], surface_inodes[2]);
+        assert_ne!(surface_inodes[1], surface_inodes[2]);
+        assert_eq!(frame.format, Format::Nv12);
+        assert_eq!(frame.planes.len(), 2);
         let target_image = context
             .egl()
-            .import_nv12_target(&surface.frame)
+            .import_nv12_target(&frame)
             .expect("EGL should import the VA NV12 surface");
         let target = context
             .egl()
@@ -599,20 +472,37 @@ mod tests {
             .egl()
             .convert_to_nv12(&source_texture, &target)
             .expect("OpenGL should write the VA NV12 surface");
-        surface.frame.readiness_fence = Some(
+        frame.readiness_fence = Some(
             context
                 .egl()
                 .finish_frame_pipeline()
                 .expect("OpenGL should export VA surface readiness"),
         );
-        let encoder = hardware_h264_encoder_for(&surface.frame)
+        let fence = frame
+            .readiness_fence
+            .take()
+            .expect("VA surface should retain its OpenGL readiness fence");
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+        runtime.block_on(async {
+            compio::time::timeout(Duration::from_secs(2), async {
+                PollFd::new(fence)
+                    .expect("VA surface readiness fence should register")
+                    .read_ready()
+                    .await
+                    .with_context(|| "Failed to wait for VA surface readiness fence")
+            })
+            .await
+            .expect("VA surface readiness fence should signal within two seconds")
+            .expect("VA surface readiness fence should signal successfully");
+        });
+        let encoder = hardware_h264_encoder_for(&frame)
             .expect("A hardware H.264 encoder should accept the VA NV12 surface");
 
         println!(
             "VA surface probe: encoder={encoder}, modifier={:?}, objects={}, planes={}",
-            surface.frame.planes[0].modifier,
-            surface.frame.objects.len(),
-            surface.frame.planes.len()
+            frame.planes[0].modifier,
+            frame.objects.len(),
+            frame.planes.len()
         );
     }
 
@@ -669,6 +559,7 @@ mod tests {
             ],
             readiness_fence: None,
             lease: None,
+            va_backing: None,
         };
         println!(
             "EGL export probe: luma={:?}, chroma={:?}, modifier={:?}",

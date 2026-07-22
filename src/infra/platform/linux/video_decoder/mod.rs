@@ -524,6 +524,7 @@ impl GStreamerDecodedFrame {
                 planes,
                 readiness_fence: None,
                 lease: None,
+                va_backing: None,
             },
             probe,
             _owner: owner,

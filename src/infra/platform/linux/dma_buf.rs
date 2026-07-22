@@ -67,6 +67,13 @@ pub(crate) struct DmaBufFrame {
     pub(crate) planes: Vec<DmaBufPlane>,
     pub(crate) readiness_fence: Option<OwnedFd>,
     pub(crate) lease: Option<DmaBufLease>,
+    pub(crate) va_backing: Option<DmaBufVaBacking>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DmaBufVaBacking {
+    pub(crate) buffer: gstreamer::Buffer,
+    pub(crate) context: gstreamer::Context,
 }
 
 #[derive(Debug)]
@@ -113,6 +120,7 @@ impl DmaBufFrame {
             planes: self.planes.clone(),
             readiness_fence: None,
             lease: None,
+            va_backing: self.va_backing.clone(),
         })
     }
 
@@ -136,6 +144,7 @@ impl DmaBufFrame {
             planes: self.planes.clone(),
             readiness_fence: None,
             lease: Some(lease),
+            va_backing: self.va_backing.clone(),
         })
     }
 
@@ -363,6 +372,7 @@ mod tests {
             planes: Vec::new(),
             readiness_fence: None,
             lease: None,
+            va_backing: None,
         }
     }
 }

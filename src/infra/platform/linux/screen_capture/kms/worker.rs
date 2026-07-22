@@ -37,6 +37,7 @@ pub(crate) fn empty_kms_frame(size: crate::kernel::geometry::PixelSize) -> KmsCa
             planes: Vec::new(),
             readiness_fence: None,
             lease: None,
+            va_backing: None,
         },
         issues: Vec::new(),
         frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),

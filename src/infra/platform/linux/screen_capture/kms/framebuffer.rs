@@ -193,6 +193,7 @@ impl KmsOutput {
             planes,
             readiness_fence: None,
             lease: None,
+            va_backing: None,
         };
         let buffer = match cached.try_clone() {
             Ok(buffer) => buffer,
