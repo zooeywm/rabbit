@@ -309,6 +309,11 @@ fn dmabuf_caps(
     } else {
         gstreamer_video::dma_drm_fourcc_to_string(frame.format as u32, modifier.into()).to_string()
     };
+    let colorimetry = match frame.format {
+        DrmFourcc::Nv12 => "bt709",
+        DrmFourcc::Xrgb8888 => "sRGB",
+        format => eros::bail!("Unsupported DMA-BUF colorimetry for format: {:?}", format),
+    };
 
     let frame_rate = match frame_rate {
         Some(frame_rate) => gstreamer::Fraction::new(
@@ -328,7 +333,7 @@ fn dmabuf_caps(
         .field("height", height)
         .field("framerate", frame_rate)
         .field("interlace-mode", "progressive")
-        .field("colorimetry", "bt709")
+        .field("colorimetry", colorimetry)
         .build())
 }
 
@@ -1144,8 +1149,9 @@ mod tests {
                 screen_capture::{KmsCaptureLease, KmsFrameReceiver},
                 video_encoder::gstreamer::{
                     GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
-                    configure_low_latency_encoder, create_required_element, h264_rtp_caps,
-                    va_vpp_input_modifier, va_vpp_output_caps, validate_dmabuf_buffer,
+                    configure_low_latency_encoder, create_required_element, dmabuf_caps,
+                    h264_rtp_caps, va_vpp_input_modifier, va_vpp_output_caps,
+                    validate_dmabuf_buffer,
                 },
             },
         },
@@ -1271,6 +1277,44 @@ mod tests {
     }
 
     #[test]
+    fn dma_buf_caps_distinguish_full_range_rgb_from_limited_range_nv12() {
+        gstreamer::init().expect("GStreamer should initialize before constructing DMA-BUF caps");
+
+        let rgb = dmabuf_caps(
+            &colorimetry_test_frame(DrmFourcc::Xrgb8888),
+            DrmModifier::Invalid,
+            Some(FrameRate::new(120, 1).expect("Test frame rate should be valid")),
+        )
+        .expect("XRGB DMA-BUF caps should be constructed");
+        let nv12 = dmabuf_caps(
+            &colorimetry_test_frame(DrmFourcc::Nv12),
+            DrmModifier::Invalid,
+            Some(FrameRate::new(120, 1).expect("Test frame rate should be valid")),
+        )
+        .expect("NV12 DMA-BUF caps should be constructed");
+
+        let rgb_colorimetry = caps_colorimetry(&rgb);
+        assert_eq!(
+            rgb_colorimetry.range(),
+            gstreamer_video::VideoColorRange::Range0_255
+        );
+        assert_eq!(
+            rgb_colorimetry.matrix(),
+            gstreamer_video::VideoColorMatrix::Rgb
+        );
+
+        let nv12_colorimetry = caps_colorimetry(&nv12);
+        assert_eq!(
+            nv12_colorimetry.range(),
+            gstreamer_video::VideoColorRange::Range16_235
+        );
+        assert_eq!(
+            nv12_colorimetry.matrix(),
+            gstreamer_video::VideoColorMatrix::Bt709
+        );
+    }
+
+    #[test]
     fn va_vpp_output_is_bt709_limited_range() {
         gstreamer::init().expect("GStreamer should initialize before constructing VPP caps");
         let input = gstreamer::Caps::builder("video/x-raw")
@@ -1301,6 +1345,29 @@ mod tests {
             colorimetry.matrix(),
             gstreamer_video::VideoColorMatrix::Bt709
         );
+    }
+
+    fn colorimetry_test_frame(format: DrmFourcc) -> DmaBufFrame {
+        DmaBufFrame {
+            size: PixelSize {
+                width: 1920,
+                height: 1080,
+            },
+            format,
+            objects: Vec::new(),
+            planes: Vec::new(),
+            readiness_fence: None,
+            lease: None,
+        }
+    }
+
+    fn caps_colorimetry(caps: &gstreamer::CapsRef) -> gstreamer_video::VideoColorimetry {
+        caps.structure(0)
+            .expect("Video caps should contain one structure")
+            .get::<&str>("colorimetry")
+            .expect("Video caps should declare colorimetry")
+            .parse()
+            .expect("Video colorimetry should parse")
     }
 
     #[test]
