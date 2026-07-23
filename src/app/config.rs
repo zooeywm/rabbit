@@ -23,18 +23,10 @@ pub struct Config {
     pub video: VideoConfig,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct NetworkConfig {
     pub transport: NetworkTransport,
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            transport: NetworkTransport::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -912,11 +912,11 @@ fn route_screen_frame(
             return true;
         }
 
-        let output = process(pipeline, &frame);
-        if output.is_err() {
-            if let KmsCapturedSource::Composed(buffer) = &frame.source {
-                buffer.invalidate_lease();
-            }
+        let output = process(pipeline, frame);
+        if output.is_err()
+            && let KmsCapturedSource::Composed(buffer) = &frame.source
+        {
+            buffer.invalidate_lease();
         }
         let succeeded = output.is_ok();
         if let Some(output) = output.transpose() {

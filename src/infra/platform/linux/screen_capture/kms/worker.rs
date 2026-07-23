@@ -62,6 +62,17 @@ enum KmsCaptureCommand {
     Shutdown,
 }
 
+struct KmsCaptureLoop {
+    screen_name: String,
+    commands: Receiver<KmsCaptureCommand>,
+    device: Sender<eros::Result<GpuDevice>>,
+    frames: Sender<eros::Result<KmsCapturedFrame>>,
+    overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
+    enable_probing: bool,
+    probe_interval: Duration,
+    encoder_profiles: Vec<DmaBufProfile>,
+}
+
 #[derive(Debug)]
 pub(crate) struct KmsCaptureLease {
     commands: Sender<KmsCaptureCommand>,
@@ -95,16 +106,16 @@ impl KmsCaptureLease {
         let overflow_frames = frames.clone();
         let thread_name = format!("rabbit-kms-{screen_name}");
         let thread = thread::Builder::new().name(thread_name).spawn(move || {
-            run_capture_loop(
+            run_capture_loop(KmsCaptureLoop {
                 screen_name,
-                command_receiver,
-                device_sender,
-                frame_sender,
+                commands: command_receiver,
+                device: device_sender,
+                frames: frame_sender,
                 overflow_frames,
                 enable_probing,
                 probe_interval,
                 encoder_profiles,
-            );
+            });
         })?;
 
         Ok(ScreenCaptureSource {
@@ -205,16 +216,17 @@ impl Drop for KmsCaptureLease {
     }
 }
 
-fn run_capture_loop(
-    screen_name: String,
-    commands: Receiver<KmsCaptureCommand>,
-    device: Sender<eros::Result<GpuDevice>>,
-    frames: Sender<eros::Result<KmsCapturedFrame>>,
-    overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
-    enable_probing: bool,
-    probe_interval: Duration,
-    encoder_profiles: Vec<DmaBufProfile>,
-) {
+fn run_capture_loop(capture_loop: KmsCaptureLoop) {
+    let KmsCaptureLoop {
+        screen_name,
+        commands,
+        device,
+        frames,
+        overflow_frames,
+        enable_probing,
+        probe_interval,
+        encoder_profiles,
+    } = capture_loop;
     let mut capturer = match KmsCapturer::new(&screen_name, encoder_profiles) {
         Ok(capturer) => capturer,
         Err(error) => {

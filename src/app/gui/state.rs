@@ -453,8 +453,8 @@ mod tests {
 
     #[test]
     fn direct_target_accepts_hostname_with_port() {
-        let target = DirectTarget::parse("test.io:23944")
-            .expect("Hostname direct target should parse");
+        let target =
+            DirectTarget::parse("test.io:23944").expect("Hostname direct target should parse");
 
         assert_eq!(target.host(), "test.io");
         assert_eq!(target.port(), Some(23944));

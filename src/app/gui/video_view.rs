@@ -41,8 +41,8 @@ enum VideoViewCommand {
 }
 
 enum ActiveVideoDisplay {
-    Wayland(WaylandVideoRenderer),
-    Slint(OpenGlVideoRenderer),
+    Wayland(Box<WaylandVideoRenderer>),
+    Slint(Box<OpenGlVideoRenderer>),
 }
 
 impl ActiveVideoDisplay {
@@ -414,8 +414,10 @@ fn create_video_display(
 ) -> eros::Result<ActiveVideoDisplay> {
     if preference == VideoDisplayPreference::Slint {
         let selection = select_video_display_backend(preference, None)?;
-        let display =
-            ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(get_proc_address, probe_interval)?);
+        let display = ActiveVideoDisplay::Slint(Box::new(OpenGlVideoRenderer::new(
+            get_proc_address,
+            probe_interval,
+        )?));
         log_video_display_selection(preference, selection.backend, None);
         return Ok(display);
     }
@@ -424,15 +426,15 @@ fn create_video_display(
         Ok(renderer) => {
             let selection = select_video_display_backend(preference, None)?;
             log_video_display_selection(preference, selection.backend, None);
-            Ok(ActiveVideoDisplay::Wayland(renderer))
+            Ok(ActiveVideoDisplay::Wayland(Box::new(renderer)))
         }
         Err(error) => {
             let reason = format!("{error:?}");
             let selection = select_video_display_backend(preference, Some(reason.clone()))?;
-            let display = ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(
+            let display = ActiveVideoDisplay::Slint(Box::new(OpenGlVideoRenderer::new(
                 get_proc_address,
                 probe_interval,
-            )?);
+            )?));
             log_video_display_selection(
                 preference,
                 selection.backend,
@@ -477,7 +479,7 @@ fn present_video_frame(
     let mut fallback = OpenGlVideoRenderer::new(get_proc_address, probe_interval)
         .with_context(|| "Failed to create Slint video display fallback")?;
     fallback.present(frame);
-    *display = Some(ActiveVideoDisplay::Slint(fallback));
+    *display = Some(ActiveVideoDisplay::Slint(Box::new(fallback)));
     let selection = select_video_display_backend(preference, Some(reason))?;
     log_video_display_selection(
         preference,

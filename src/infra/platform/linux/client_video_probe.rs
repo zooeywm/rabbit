@@ -188,10 +188,6 @@ impl ClientVideoFrameProbe {
         self.timestamps.decoder_entered = Some(Instant::now());
     }
 
-    pub(crate) fn frame_id(&self) -> u64 {
-        self.frame_id
-    }
-
     pub(crate) fn mark_decoder_completed(&mut self) {
         self.timestamps.decoder_completed = Some(Instant::now());
     }
