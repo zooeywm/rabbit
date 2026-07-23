@@ -1,5 +1,7 @@
 use std::{future::Future, rc::Rc};
 
+use crate::kernel::geometry::FrameRate;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoEncoderCommand {
     RequestKeyFrame,
@@ -13,6 +15,7 @@ pub trait VideoEncoder {
     fn run<Frames, Commands, SendPacket, SendFuture>(
         frames: Frames,
         commands: Commands,
+        frame_rate: FrameRate,
         max_packet_size: usize,
         send_packet: SendPacket,
     ) -> impl Future<Output = eros::Result<()>>
@@ -23,13 +26,17 @@ pub trait VideoEncoder {
         SendFuture: Future<Output = eros::Result<()>>;
 }
 
+// Focused test: cargo test kernel::video_encoder::tests --lib
 #[cfg(test)]
 mod tests {
     use std::{future::Future, rc::Rc};
 
     use futures_util::StreamExt as _;
 
-    use crate::kernel::video_encoder::{VideoEncoder, VideoEncoderCommand};
+    use crate::kernel::{
+        geometry::FrameRate,
+        video_encoder::{VideoEncoder, VideoEncoderCommand},
+    };
 
     struct NonCloneFrame(u8);
 
@@ -45,6 +52,7 @@ mod tests {
         fn run<Frames, Commands, SendPacket, SendFuture>(
             frames: Frames,
             commands: Commands,
+            _frame_rate: FrameRate,
             _max_packet_size: usize,
             send_packet: SendPacket,
         ) -> impl Future<Output = eros::Result<()>>
@@ -91,6 +99,7 @@ mod tests {
             .block_on(EmptyVideoEncoder::run(
                 frames,
                 futures_util::stream::iter([VideoEncoderCommand::RequestKeyFrame]),
+                FrameRate::new(120, 1).expect("Test frame rate should be valid"),
                 1_200,
                 |packet| {
                     packets.borrow_mut().push(packet);

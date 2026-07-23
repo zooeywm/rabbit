@@ -104,13 +104,15 @@ impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
 
     fn try_from(source: Rc<GbmFramePipelineFrame>) -> Result<Self, Self::Error> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
-        Self::from_pipeline_frame(source, None)
+        let frame_rate = source.frame_rate;
+        Self::from_pipeline_frame(source, frame_rate, None)
     }
 }
 
 impl GStreamerVideoFrame {
     fn from_pipeline_frame(
         source: Rc<GbmFramePipelineFrame>,
+        frame_rate: FrameRate,
         expected: Option<(&gstreamer::CapsRef, DmaBufInputSignature)>,
     ) -> eros::Result<Self> {
         let frame = &source.buffer;
@@ -149,7 +151,7 @@ impl GStreamerVideoFrame {
             size: frame.size,
             format: frame.format,
             modifier,
-            frame_rate: source.frame_rate,
+            frame_rate,
         };
         if let Some((_, expected_signature)) = expected
             && input_signature != expected_signature
@@ -209,7 +211,7 @@ impl GStreamerVideoFrame {
 
         let input_caps = match expected {
             Some((caps, _)) => caps.to_owned(),
-            None => dmabuf_caps(frame, modifier, Some(source.frame_rate))?,
+            None => dmabuf_caps(frame, modifier, Some(frame_rate))?,
         };
         let va_context = frame
             .va_backing
@@ -533,6 +535,7 @@ pub(crate) struct GStreamerVideoEncoder {
     terminal_messages: flume::Receiver<gstreamer::Message>,
     input_caps: gstreamer::Caps,
     input_signature: DmaBufInputSignature,
+    source_frame_rate: FrameRate,
     probe: Option<GStreamerVideoProbe>,
 }
 
@@ -540,6 +543,7 @@ impl GStreamerVideoEncoder {
     async fn run_inner<Frames, Commands, SendPacket, SendFuture>(
         mut frames: Frames,
         mut commands: Commands,
+        frame_rate: FrameRate,
         max_rtp_packet_size: usize,
         mut send_packet: SendPacket,
     ) -> eros::Result<()>
@@ -553,10 +557,11 @@ impl GStreamerVideoEncoder {
         else {
             return Ok(());
         };
-        let first_frame = GStreamerVideoFrame::try_from(
-            first_frame.with_context(|| "Failed to receive first frame-pipeline output")?,
-        )?;
-        let mut encoder = Self::new(first_frame, max_rtp_packet_size)?;
+        let first_frame =
+            first_frame.with_context(|| "Failed to receive first frame-pipeline output")?;
+        let source_frame_rate = first_frame.frame_rate;
+        let first_frame = GStreamerVideoFrame::from_pipeline_frame(first_frame, frame_rate, None)?;
+        let mut encoder = Self::new(first_frame, source_frame_rate, max_rtp_packet_size)?;
         let result = encoder
             .drive(&mut frames, &mut commands, &mut send_packet)
             .await;
@@ -578,6 +583,7 @@ impl GStreamerVideoEncoder {
 
     pub(crate) fn new(
         first_frame: GStreamerVideoFrame,
+        source_frame_rate: FrameRate,
         max_rtp_packet_size: usize,
     ) -> eros::Result<Self> {
         let probe_interval = first_frame
@@ -589,6 +595,7 @@ impl GStreamerVideoEncoder {
             max_rtp_packet_size,
             probe_interval,
         )?;
+        encoder.source_frame_rate = source_frame_rate;
         if let Some(context) = &first_frame.va_context {
             encoder.pipeline.set_context(context);
         }
@@ -730,6 +737,7 @@ impl GStreamerVideoEncoder {
             terminal_messages,
             input_caps,
             input_signature,
+            source_frame_rate: input_signature.frame_rate,
             probe,
         })
     }
@@ -800,8 +808,16 @@ impl GStreamerVideoEncoder {
     }
 
     fn prepare_frame(&self, frame: Rc<GbmFramePipelineFrame>) -> eros::Result<GStreamerVideoFrame> {
+        if frame.frame_rate != self.source_frame_rate {
+            eros::bail!(
+                "Frame-pipeline source frame rate changed from {:?} to {:?}",
+                self.source_frame_rate,
+                frame.frame_rate
+            );
+        }
         GStreamerVideoFrame::from_pipeline_frame(
             frame,
+            self.input_signature.frame_rate,
             Some((self.input_caps.as_ref(), self.input_signature)),
         )
     }
@@ -1017,6 +1033,7 @@ impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
     fn run<Frames, Commands, SendPacket, SendFuture>(
         frames: Frames,
         commands: Commands,
+        frame_rate: FrameRate,
         max_packet_size: usize,
         send_packet: SendPacket,
     ) -> impl Future<Output = eros::Result<()>>
@@ -1026,7 +1043,7 @@ impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
         SendPacket: FnMut(Self::Packet) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
-        Self::run_inner(frames, commands, max_packet_size, send_packet)
+        Self::run_inner(frames, commands, frame_rate, max_packet_size, send_packet)
     }
 }
 
@@ -1500,6 +1517,7 @@ mod tests {
             let encoding = GStreamerVideoEncoder::run_inner(
                 frames,
                 futures_util::stream::pending(),
+                FrameRate::new(120, 1).expect("Host video test frame rate should be valid"),
                 MAX_RTP_PACKET_SIZE,
                 move |packet| {
                     assert!(
@@ -1831,7 +1849,8 @@ mod tests {
         gstreamer::init().expect("GStreamer should initialize before constructing a frame");
         let frame = dmabuf_video_frame();
         let input_caps = frame.input_caps().to_owned();
-        let mut encoder = GStreamerVideoEncoder::new(frame, 1_200)
+        let source_frame_rate = frame.input_signature.frame_rate;
+        let mut encoder = GStreamerVideoEncoder::new(frame, source_frame_rate, 1_200)
             .expect("The first frame should create and start its hardware encoder");
         let (started, current, _) = encoder
             .pipeline

@@ -32,7 +32,12 @@ pub(crate) enum GuiIntent {
         index: usize,
         accept: bool,
     },
-    OpenRemoteScreen(usize),
+    OpenRemoteScreen {
+        index: usize,
+        width: String,
+        height: String,
+        frame_rate: String,
+    },
     DisconnectRemoteSession,
     StopHostedScreenStream(usize),
     DisconnectDevice(usize),
@@ -100,11 +105,19 @@ impl Gui {
         }
         {
             let sender = sender.clone();
-            window.on_open_screen(move |index| {
+            window.on_open_screen(move |index, width, height, frame_rate| {
                 let Ok(index) = usize::try_from(index) else {
                     return;
                 };
-                send_intent(&sender, GuiIntent::OpenRemoteScreen(index));
+                send_intent(
+                    &sender,
+                    GuiIntent::OpenRemoteScreen {
+                        index,
+                        width: width.to_string(),
+                        height: height.to_string(),
+                        frame_rate: frame_rate.to_string(),
+                    },
+                );
             });
         }
         {
@@ -239,6 +252,7 @@ fn apply_view_state(window: &RabbitWindow, state: ViewState) {
     window.set_page_title(state.page_title.into());
     window.set_page_subtitle(state.page_subtitle.into());
     window.set_status_text(state.status_text.into());
+    window.set_stream_settings_error(state.stream_settings_error.into());
     window.set_local_protocol(state.local_protocol.into());
     window.set_local_port(state.local_port.into());
     window.set_local_server_online(state.local_server_online);

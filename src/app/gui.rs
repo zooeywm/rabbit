@@ -10,7 +10,7 @@ use crate::app::{
             ConnectedDeviceView, ConnectionRequestView, DirectConnectionCompletion,
             DirectConnectionState, DirectTarget, HostedScreenStreamView, RemoteScreenView,
             ScreenStreamState, ScreenStreamTarget, ViewPage, ViewState, WorkspaceSection,
-            format_frame_rate,
+            format_frame_rate, parse_stream_settings,
         },
         view::{Gui, GuiIntent, ViewPublisher},
     },
@@ -29,7 +29,7 @@ use crate::{
     kernel::{
         connection_request::ConnectionRequest,
         frame_pipeline::{FramePipelineManager, FramePipelineParameters},
-        geometry::PixelSize,
+        geometry::{FrameRate, PixelSize},
         screen_configuration::{
             RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
             ScreenStreamRequest, ScreenStreamRequestId, ScreenStreamsConfigured, SetScreenStreams,
@@ -104,6 +104,7 @@ pub(crate) struct RootApplication {
     listener_online: bool,
     active_section: WorkspaceSection,
     status_message: String,
+    stream_settings_error: String,
     direct_connection: DirectConnectionState,
     screen_stream: ScreenStreamState,
     video_decoder: Option<RunningVideoDecoder>,
@@ -140,7 +141,7 @@ pub(crate) enum RootMessage {
     VideoRendererFailed(String),
     ScreenStreamConfigurationFinished {
         session_id: SessionId,
-        streams: Vec<(ScreenId, FramePipelineParameters)>,
+        streams: Vec<(ScreenId, FramePipelineParameters, FrameRate)>,
         result: eros::Result<()>,
     },
     ScreenStreamRequestFinished {
@@ -168,7 +169,12 @@ pub(crate) enum RootMessage {
     SessionClosed(SessionId),
     SessionFailed(SessionId, eros::ErrorUnion),
     ScreenStreamFinished(SessionId, ScreenId, u64, eros::Result<()>),
-    OpenRemoteScreen(usize),
+    OpenRemoteScreen {
+        selected_index: usize,
+        width: String,
+        height: String,
+        frame_rate: String,
+    },
     DisconnectRemoteSession,
     StopHostedScreenStream(usize),
     DisconnectDevice(usize),
@@ -290,7 +296,7 @@ impl RootApplication {
         request: SetScreenStreams,
     ) -> (
         ScreenStreamsConfigured,
-        Vec<(ScreenId, FramePipelineParameters)>,
+        Vec<(ScreenId, FramePipelineParameters, FrameRate)>,
     ) {
         let SetScreenStreams {
             request_id,
@@ -308,6 +314,7 @@ impl RootApplication {
                                 FramePipelineParameters {
                                     frame_size: desired_stream.frame_size,
                                 },
+                                desired_stream.frame_rate,
                             ));
                             ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
                                 requested: desired_stream.frame_size,
@@ -386,6 +393,7 @@ impl RootApplication {
         session_id: SessionId,
         screen_id: ScreenId,
         parameters: FramePipelineParameters,
+        frame_rate: FrameRate,
         sender: &MessageSender,
     ) -> eros::Result<()> {
         let frames = FramePipelineManager::subscribe(&mut self.model.app, &screen_id, parameters)?;
@@ -415,6 +423,7 @@ impl RootApplication {
                 session_send,
                 task_cancellation,
                 task_encoder_commands,
+                frame_rate,
             )
             .await;
             task_sender.post(RootMessage::ScreenStreamFinished(
@@ -629,6 +638,7 @@ impl RootApplication {
             listener_online: true,
             active_section: WorkspaceSection::default(),
             status_message: String::new(),
+            stream_settings_error: String::new(),
             direct_connection: DirectConnectionState::default(),
             screen_stream: ScreenStreamState::default(),
             video_decoder: None,
@@ -683,7 +693,17 @@ impl RootApplication {
                         RootMessage::RejectConnectionRequest(index)
                     }
                 }
-                GuiIntent::OpenRemoteScreen(index) => RootMessage::OpenRemoteScreen(index),
+                GuiIntent::OpenRemoteScreen {
+                    index,
+                    width,
+                    height,
+                    frame_rate,
+                } => RootMessage::OpenRemoteScreen {
+                    selected_index: index,
+                    width,
+                    height,
+                    frame_rate,
+                },
                 GuiIntent::DisconnectRemoteSession => RootMessage::DisconnectRemoteSession,
                 GuiIntent::StopHostedScreenStream(index) => {
                     RootMessage::StopHostedScreenStream(index)
@@ -941,6 +961,7 @@ impl RootApplication {
             page_title,
             page_subtitle,
             status_text,
+            stream_settings_error: self.stream_settings_error.clone(),
             local_protocol: self.local_protocol.to_string(),
             local_port: self.local_port.to_string(),
             local_server_online: self.listener_online,
@@ -1311,7 +1332,7 @@ impl RootApplication {
                         };
                         let session_send = Rc::clone(&session.send);
                         self.pending_screen_stream_starts
-                            .extend(streams.iter().map(|(screen_id, _)| (id, *screen_id)));
+                            .extend(streams.iter().map(|(screen_id, _, _)| (id, *screen_id)));
                         let configuration_sender = sender.clone();
 
                         compio::runtime::spawn(async move {
@@ -1578,16 +1599,16 @@ impl RootApplication {
                 }
 
                 let mut changed = false;
-                for (screen_id, parameters) in streams {
+                for (screen_id, parameters, frame_rate) in streams {
                     if !self
                         .pending_screen_stream_starts
                         .remove(&(session_id, screen_id))
                     {
                         continue;
                     }
-                    if let Err(error) =
-                        self.replace_screen_stream(session_id, screen_id, parameters, sender)
-                    {
+                    if let Err(error) = self.replace_screen_stream(
+                        session_id, screen_id, parameters, frame_rate, sender,
+                    ) {
                         error!(
                             session_id = session_id.0,
                             screen_id = screen_id.0,
@@ -1705,31 +1726,41 @@ impl RootApplication {
 
                 Ok(true)
             }
-            RootMessage::OpenRemoteScreen(selected_index) => {
-                let previous = self.model.selected_remote_screen;
+            RootMessage::OpenRemoteScreen {
+                selected_index,
+                width,
+                height,
+                frame_rate,
+            } => {
+                let (frame_size, frame_rate) =
+                    match parse_stream_settings(&width, &height, &frame_rate) {
+                        Ok(settings) => settings,
+                        Err(error) => {
+                            self.stream_settings_error = error.to_string();
+                            return Ok(true);
+                        }
+                    };
+                self.stream_settings_error.clear();
                 let selected = self
                     .model
                     .remote_screen_entries
                     .get(selected_index)
                     .copied();
 
-                if selected == previous {
-                    return Ok(false);
-                }
                 self.stop_video_decoder()?;
                 self.model.selected_remote_screen = selected;
 
                 if let Some((session_id, screen_id)) = selected {
-                    let Some((screen_name, frame_size)) = self
-                        .model
-                        .remote_screens
-                        .get(&session_id)
-                        .and_then(|screens| {
-                            screens
-                                .iter()
-                                .find(|screen| screen.id == screen_id)
-                                .map(|screen| (screen.name.clone(), screen.resolution))
-                        })
+                    let Some(screen_name) =
+                        self.model
+                            .remote_screens
+                            .get(&session_id)
+                            .and_then(|screens| {
+                                screens
+                                    .iter()
+                                    .find(|screen| screen.id == screen_id)
+                                    .map(|screen| screen.name.clone())
+                            })
                     else {
                         warn!(
                             session_id = session_id.0,
@@ -1758,6 +1789,7 @@ impl RootApplication {
                         screen_id,
                         screen_name,
                         frame_size,
+                        frame_rate,
                     });
                     let request = SetScreenStreams {
                         request_id,
@@ -1765,6 +1797,7 @@ impl RootApplication {
                             screen_id,
                             remote_display: RemoteDisplayMode::Preserve,
                             frame_size,
+                            frame_rate,
                         }],
                     };
 

@@ -1,11 +1,15 @@
 use std::{future::Future, marker::PhantomData, rc::Rc};
 
-use crate::kernel::video_encoder::{VideoEncoder, VideoEncoderCommand};
+use crate::kernel::{
+    geometry::FrameRate,
+    video_encoder::{VideoEncoder, VideoEncoderCommand},
+};
 
 /// Connects one processed screen-frame stream to one long-lived video encoder.
 pub struct ScreenStream<Frames, Commands, Encoder, SendPacket> {
     frames: Frames,
     commands: Commands,
+    frame_rate: FrameRate,
     max_packet_size: usize,
     send_packet: SendPacket,
     encoder: PhantomData<Encoder>,
@@ -20,12 +24,14 @@ where
     pub fn new(
         frames: Frames,
         commands: Commands,
+        frame_rate: FrameRate,
         max_packet_size: usize,
         send_packet: SendPacket,
     ) -> Self {
         Self {
             frames,
             commands,
+            frame_rate,
             max_packet_size,
             send_packet,
             encoder: PhantomData,
@@ -40,12 +46,14 @@ where
         Encoder::run(
             self.frames,
             self.commands,
+            self.frame_rate,
             self.max_packet_size,
             self.send_packet,
         )
     }
 }
 
+// Focused test: cargo test kernel::screen_stream::tests --lib
 #[cfg(test)]
 mod tests {
     use std::{future::Future, rc::Rc};
@@ -53,6 +61,7 @@ mod tests {
     use futures_util::StreamExt as _;
 
     use crate::kernel::{
+        geometry::FrameRate,
         screen_stream::ScreenStream,
         video_encoder::{VideoEncoder, VideoEncoderCommand},
     };
@@ -71,6 +80,7 @@ mod tests {
         fn run<Frames, Commands, SendPacket, SendFuture>(
             frames: Frames,
             commands: Commands,
+            _frame_rate: FrameRate,
             _max_packet_size: usize,
             send_packet: SendPacket,
         ) -> impl Future<Output = eros::Result<()>>
@@ -114,6 +124,7 @@ mod tests {
         let stream = ScreenStream::<_, _, EmptyEncoder, _>::new(
             frames,
             futures_util::stream::iter([VideoEncoderCommand::RequestKeyFrame]),
+            FrameRate::new(120, 1).expect("Test frame rate should be valid"),
             1_200,
             |packet| {
                 packets.borrow_mut().push(packet);

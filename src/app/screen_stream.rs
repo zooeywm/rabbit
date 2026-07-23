@@ -10,6 +10,7 @@ use eros::Context as _;
 use crate::{
     infra::unsync_queue::UnsyncQueue,
     kernel::{
+        geometry::FrameRate,
         screen_manager::ScreenId,
         screen_stream::ScreenStream,
         session::{SessionSend, VideoMessage},
@@ -24,6 +25,7 @@ pub(crate) async fn run_host_screen_stream<Frames, Send, Encoder>(
     session: Rc<SessionSend<Send>>,
     cancellation: UnsyncQueue<()>,
     encoder_commands: UnsyncQueue<VideoEncoderCommand>,
+    frame_rate: FrameRate,
 ) -> eros::Result<()>
 where
     Encoder: VideoEncoder,
@@ -49,6 +51,7 @@ where
             cancellation,
         },
         commands,
+        frame_rate,
         max_packet_size,
         move |packet: Encoder::Packet| {
             let session = Rc::clone(&session);

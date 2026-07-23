@@ -1,4 +1,7 @@
-use crate::kernel::{geometry::PixelSize, screen_manager::ScreenId};
+use crate::kernel::{
+    geometry::{FrameRate, PixelSize},
+    screen_manager::ScreenId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScreenStreamRequestId(pub u32);
@@ -14,6 +17,7 @@ pub struct ScreenStreamRequest {
     pub screen_id: ScreenId,
     pub remote_display: RemoteDisplayMode,
     pub frame_size: PixelSize,
+    pub frame_rate: FrameRate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

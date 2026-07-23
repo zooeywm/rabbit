@@ -149,6 +149,7 @@ pub(crate) struct ScreenStreamTarget {
     pub(crate) screen_id: ScreenId,
     pub(crate) screen_name: String,
     pub(crate) frame_size: PixelSize,
+    pub(crate) frame_rate: FrameRate,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -314,6 +315,63 @@ pub(crate) fn format_frame_rate(frame_rate: FrameRate) -> String {
         .to_string()
 }
 
+pub(crate) fn parse_stream_settings(
+    width: &str,
+    height: &str,
+    frame_rate: &str,
+) -> eros::Result<(PixelSize, FrameRate)> {
+    let width = width
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("Invalid stream width {width:?}"))?;
+    let height = height
+        .trim()
+        .parse::<u32>()
+        .with_context(|| format!("Invalid stream height {height:?}"))?;
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        eros::bail!(
+            "Stream resolution must use positive even dimensions, got {} × {}",
+            width,
+            height
+        );
+    }
+
+    let frame_rate = parse_frame_rate(frame_rate)?;
+    Ok((PixelSize { width, height }, frame_rate))
+}
+
+fn parse_frame_rate(value: &str) -> eros::Result<FrameRate> {
+    let value = value.trim();
+    let (whole, fractional) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty() || fractional.contains('.') || fractional.len() > 3 {
+        eros::bail!("Invalid stream frame rate {:?}", value);
+    }
+    let whole = whole
+        .parse::<u32>()
+        .with_context(|| format!("Invalid stream frame rate {value:?}"))?;
+    let denominator = match fractional.len() {
+        0 => 1,
+        1 => 10,
+        2 => 100,
+        3 => 1_000,
+        _ => eros::bail!("Invalid stream frame rate {:?}", value),
+    };
+    let fractional = if fractional.is_empty() {
+        0
+    } else {
+        fractional
+            .parse::<u32>()
+            .with_context(|| format!("Invalid stream frame rate {value:?}"))?
+    };
+    let numerator = whole
+        .checked_mul(denominator)
+        .and_then(|whole| whole.checked_add(fractional))
+        .with_context(|| format!("Stream frame rate {value:?} is too large"))?;
+
+    Ok(FrameRate::new(numerator, denominator)
+        .with_context(|| format!("Stream frame rate must be positive, got {value:?}"))?)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ViewState {
     pub(crate) section: WorkspaceSection,
@@ -321,6 +379,7 @@ pub(crate) struct ViewState {
     pub(crate) page_title: String,
     pub(crate) page_subtitle: String,
     pub(crate) status_text: String,
+    pub(crate) stream_settings_error: String,
     pub(crate) local_protocol: String,
     pub(crate) local_port: String,
     pub(crate) local_server_online: bool,
@@ -339,7 +398,7 @@ mod tests {
 
     use crate::app::gui::state::{
         DirectConnectionCompletion, DirectConnectionState, DirectTarget, ScreenStreamState,
-        ScreenStreamTarget, format_frame_rate,
+        ScreenStreamTarget, format_frame_rate, parse_stream_settings,
     };
     use crate::kernel::{
         geometry::{FrameRate, PixelSize},
@@ -415,6 +474,28 @@ mod tests {
     }
 
     #[test]
+    fn stream_settings_parse_even_resolution_and_decimal_frame_rate() {
+        let (size, frame_rate) = parse_stream_settings("2560", "1440", "143.855")
+            .expect("Valid stream settings should parse");
+
+        assert_eq!(
+            size,
+            PixelSize {
+                width: 2560,
+                height: 1440
+            }
+        );
+        assert_eq!(frame_rate.numerator(), 143_855);
+        assert_eq!(frame_rate.denominator(), 1_000);
+    }
+
+    #[test]
+    fn stream_settings_reject_odd_resolution_and_zero_frame_rate() {
+        assert!(parse_stream_settings("1919", "1080", "60").is_err());
+        assert!(parse_stream_settings("1920", "1080", "0").is_err());
+    }
+
+    #[test]
     fn screen_stream_progresses_from_request_to_first_video_frame() {
         let target = ScreenStreamTarget {
             request_id: ScreenStreamRequestId(7),
@@ -425,6 +506,7 @@ mod tests {
                 width: 1920,
                 height: 1200,
             },
+            frame_rate: FrameRate::new(120, 1).expect("Test frame rate should be valid"),
         };
         let mut state = ScreenStreamState::default();
         state.begin(target.clone());

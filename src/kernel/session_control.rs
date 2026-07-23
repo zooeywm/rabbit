@@ -125,6 +125,7 @@ struct WireScreenStreamRequest {
     screen_id: u8,
     remote_display: WireRemoteDisplayMode,
     frame_size: WirePixelSize,
+    frame_rate: WireFrameRate,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -340,6 +341,15 @@ impl TryFrom<WireScreenStreamRequest> for ScreenStreamRequest {
     type Error = eros::ErrorUnion;
 
     fn try_from(request: WireScreenStreamRequest) -> eros::Result<Self> {
+        let frame_rate =
+            FrameRate::new(request.frame_rate.numerator, request.frame_rate.denominator)
+                .with_context(|| {
+                    format!(
+                        "Failed to decode SetScreenStreams frame rate for screen {}",
+                        request.screen_id
+                    )
+                })?;
+
         Ok(Self {
             screen_id: ScreenId::try_from(request.screen_id).with_context(|| {
                 format!(
@@ -349,6 +359,7 @@ impl TryFrom<WireScreenStreamRequest> for ScreenStreamRequest {
             })?,
             remote_display: request.remote_display.into(),
             frame_size: request.frame_size.into(),
+            frame_rate,
         })
     }
 }
@@ -359,6 +370,7 @@ impl From<ScreenStreamRequest> for WireScreenStreamRequest {
             screen_id: request.screen_id.0,
             remote_display: request.remote_display.into(),
             frame_size: request.frame_size.into(),
+            frame_rate: request.frame_rate.into(),
         }
     }
 }
@@ -730,6 +742,9 @@ fn write_screen_info(writer: &mut Cursor<Vec<u8>>, screen: &Screen) -> eros::Res
 mod tests {
     use crate::kernel::{
         geometry::{FrameRate, PixelSize},
+        screen_configuration::{
+            RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
+        },
         screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
         session_control::{
             ControlMessage, OutgoingScreenList, ScreenInfo, WireFrameRate, WirePixelSize,
@@ -806,5 +821,33 @@ mod tests {
             format!("{error:?}").contains("Failed to decode ScreenInfo 3 frame rate"),
             "Invalid frame rate error should identify the ScreenInfo boundary: {error:?}"
         );
+    }
+
+    #[test]
+    fn screen_stream_request_round_trip_preserves_client_settings() {
+        let expected = ScreenStreamRequest {
+            screen_id: ScreenId(4),
+            remote_display: RemoteDisplayMode::Preserve,
+            frame_size: PixelSize {
+                width: 1920,
+                height: 1080,
+            },
+            frame_rate: FrameRate::new(59_940, 1_000)
+                .expect("Test stream frame rate should be valid"),
+        };
+        let message = TransportMessage::try_from(SetScreenStreams {
+            request_id: ScreenStreamRequestId(9),
+            desired_streams: vec![expected],
+        })
+        .expect("Screen stream request should encode");
+
+        let ControlMessage::SetScreenStreams(decoded) =
+            ControlMessage::try_from(message).expect("Screen stream request should decode")
+        else {
+            panic!("Decoded control message should be a screen stream request");
+        };
+
+        assert_eq!(decoded.request_id, ScreenStreamRequestId(9));
+        assert_eq!(decoded.desired_streams, vec![expected]);
     }
 }

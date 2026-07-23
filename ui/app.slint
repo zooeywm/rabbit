@@ -402,6 +402,7 @@ export component RabbitWindow inherits Window {
     in property <string> page-title: "Connect to a device";
     in property <string> page-subtitle: "Enter the server IP address, hostname, or either with a port";
     in property <string> status-text;
+    in property <string> stream-settings-error;
     in property <string> local-protocol;
     in property <string> local-port;
     in property <bool> local-server-online;
@@ -432,7 +433,7 @@ export component RabbitWindow inherits Window {
     callback video-frame-available();
     callback select-section(NavigationSection);
     callback decide-request(int, bool);
-    callback open-screen(int);
+    callback open-screen(int, string, string, string);
     callback disconnect-remote-session();
     callback stop-hosted-screen-stream(int);
     callback disconnect-device(int);
@@ -876,7 +877,7 @@ export component RabbitWindow inherits Window {
                                         height: 34px;
                                         spacing: 8px;
 
-                                        LineEdit {
+                                        width-input := LineEdit {
                                             text: screen.selected-width;
                                             input-type: InputType.number;
                                             horizontal-stretch: 1;
@@ -891,7 +892,7 @@ export component RabbitWindow inherits Window {
                                             vertical-alignment: center;
                                         }
 
-                                        LineEdit {
+                                        height-input := LineEdit {
                                             text: screen.selected-height;
                                             input-type: InputType.number;
                                             horizontal-stretch: 1;
@@ -905,7 +906,7 @@ export component RabbitWindow inherits Window {
                                         vertical-alignment: center;
                                     }
 
-                                    LineEdit {
+                                    frame-rate-input := LineEdit {
                                         text: screen.selected-frame-rate;
                                         input-type: InputType.decimal;
                                     }
@@ -924,12 +925,37 @@ export component RabbitWindow inherits Window {
                                         }
 
                                         TouchArea {
-                                            clicked => { root.open-screen(index); }
+                                            clicked => {
+                                                root.open-screen(
+                                                    index,
+                                                    width-input.text,
+                                                    height-input.text,
+                                                    frame-rate-input.text,
+                                                );
+                                            }
                                         }
                                     }
                                 }
                             }
 
+                            }
+
+                            if root.stream-settings-error != "": Rectangle {
+                                height: 42px;
+                                background: #fff1f2;
+                                border-color: #ffd7da;
+                                border-width: 1px;
+                                border-radius: 7px;
+
+                                Text {
+                                    x: 14px;
+                                    width: parent.width - 28px;
+                                    text: root.stream-settings-error;
+                                    color: #c73c47;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                    vertical-alignment: center;
+                                }
                             }
 
                             if root.remote-screens.length > 0: Rectangle {
