@@ -38,7 +38,9 @@ jobs:
 
       - name: Apply fixes
         run: |
-          python3 - <<'PY'
+          set +e
+          (
+            python3 - <<'PY'
           from pathlib import Path
 
           workflow = Path('.github/workflows/agent-fix-clippy.yml').read_text()
@@ -51,8 +53,22 @@ jobs:
           )
           Path('/tmp/fix_clippy.py').write_text(body + '\n')
           PY
-          python3 /tmp/fix_clippy.py
-          cargo fmt --all
+            python3 /tmp/fix_clippy.py
+            cargo fmt --all
+          ) > apply-fixes.log 2>&1
+          status=$?
+          cat apply-fixes.log
+          exit "$status"
+
+      - name: Upload apply diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-cleanup-diagnostics
+          path: |
+            apply-fixes.log
+            /tmp/fix_clippy.py
+          if-no-files-found: warn
 
       - name: Verify clippy
         run: cargo clippy -- -D warnings
@@ -61,6 +77,7 @@ jobs:
         run: |
           git rm .agent-trigger
           git rm .agent-run-trigger
+          git rm clippy-cleanup-trigger.txt
           git rm .github/workflows/agent-fix-clippy.yml
           git rm .github/workflows/agent-run-clippy-fix.yml
           git config user.name "OpenAI"
