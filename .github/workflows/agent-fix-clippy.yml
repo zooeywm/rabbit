@@ -1,0 +1,433 @@
+name: Agent Clippy Cleanup
+
+on:
+  push:
+    branches:
+      - agent/fix-clippy
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libssl-dev libdrm-dev libgbm-dev libegl1-mesa-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libfontconfig1-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-xkb-dev
+
+      - name: Apply fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}: {old[:80]!r}")
+              file.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/infra/platform/linux/client_video_probe.rs",
+              """    pub(crate) fn frame_id(&self) -> u64 {
+                  self.frame_id
+              }
+
+          """,
+              "",
+          )
+
+          replace_once(
+              "src/app/config.rs",
+              "#[derive(Serialize, Deserialize)]\n#[serde(default)]\npub struct NetworkConfig {",
+              "#[derive(Serialize, Deserialize, Default)]\n#[serde(default)]\npub struct NetworkConfig {",
+          )
+          replace_once(
+              "src/app/config.rs",
+              """impl Default for NetworkConfig {
+                  fn default() -> Self {
+                      Self {
+                          transport: NetworkTransport::default(),
+                      }
+                  }
+              }
+
+          """,
+              "",
+          )
+
+          replace_once(
+              "src/app/gui/video_view.rs",
+              "    Slint(OpenGlVideoRenderer),",
+              "    Slint(Box<OpenGlVideoRenderer>),",
+          )
+          replace_once(
+              "src/app/gui/video_view.rs",
+              """        let display =
+                      ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(get_proc_address, probe_interval)?);
+          """,
+              """        let display = ActiveVideoDisplay::Slint(Box::new(OpenGlVideoRenderer::new(
+                      get_proc_address,
+                      probe_interval,
+                  )?));
+          """,
+          )
+          replace_once(
+              "src/app/gui/video_view.rs",
+              """            let display = ActiveVideoDisplay::Slint(OpenGlVideoRenderer::new(
+                          get_proc_address,
+                          probe_interval,
+                      )?);
+          """,
+              """            let display = ActiveVideoDisplay::Slint(Box::new(OpenGlVideoRenderer::new(
+                          get_proc_address,
+                          probe_interval,
+                      )?));
+          """,
+          )
+          replace_once(
+              "src/app/gui/video_view.rs",
+              "    *display = Some(ActiveVideoDisplay::Slint(fallback));",
+              "    *display = Some(ActiveVideoDisplay::Slint(Box::new(fallback)));",
+          )
+
+          replace_once(
+              "src/infra/platform/linux/frame_pipeline/worker.rs",
+              """        let output = process(pipeline, &frame);
+                  if output.is_err() {
+                      if let KmsCapturedSource::Composed(buffer) = &frame.source {
+                          buffer.invalidate_lease();
+                      }
+                  }
+          """,
+              """        let output = process(pipeline, frame);
+                  if output.is_err()
+                      && let KmsCapturedSource::Composed(buffer) = &frame.source
+                  {
+                      buffer.invalidate_lease();
+                  }
+          """,
+          )
+
+          replace_once(
+              "src/infra/platform/linux/frame_pipeline.rs",
+              """    fn subscribe(
+                  self: &Rc<Self>,
+                  key: FramePipelineSourceKey,
+                  sources: &Rc<RefCell<HashMap<FramePipelineSourceKey, Weak<FramePipelineSource>>>>,
+                  captured_screens: &Rc<RefCell<HashMap<ScreenId, Rc<CapturedScreenSource>>>>,
+                  worker: &Rc<RefCell<Option<GpuWorker>>>,
+                  frame_rate_demands: &Rc<RefCell<HashMap<ScreenId, HashMap<u64, FrameRate>>>>,
+                  frame_rate_demand_id: u64,
+                  frame_rate: FrameRate,
+              ) -> GbmFramePipelineSubscription {
+                  GbmFramePipelineSubscription {
+                      key,
+                      source: Rc::clone(self),
+                      frames: self.frames.borrow_mut().subscribe(),
+                      sources: Rc::downgrade(sources),
+                      captured_screens: Rc::downgrade(captured_screens),
+                      worker: Rc::downgrade(worker),
+                      frame_rate_demands: Rc::downgrade(frame_rate_demands),
+                      frame_rate_demand_id,
+                      frame_rate_gate: SubscriptionFrameRateGate::new(frame_rate),
+                  }
+              }
+          """,
+              """    fn subscribe(
+                  self: &Rc<Self>,
+                  key: FramePipelineSourceKey,
+                  state: &GbmFramePipelineManagerState,
+                  frame_rate_demand_id: u64,
+                  frame_rate: FrameRate,
+              ) -> GbmFramePipelineSubscription {
+                  GbmFramePipelineSubscription {
+                      key,
+                      source: Rc::clone(self),
+                      frames: self.frames.borrow_mut().subscribe(),
+                      sources: Rc::downgrade(&state.sources),
+                      captured_screens: Rc::downgrade(&state.captured_screens),
+                      worker: Rc::downgrade(&state.worker),
+                      frame_rate_demands: Rc::downgrade(&state.frame_rate_demands),
+                      frame_rate_demand_id,
+                      frame_rate_gate: SubscriptionFrameRateGate::new(frame_rate),
+                  }
+              }
+          """,
+          )
+          replace_once(
+              "src/infra/platform/linux/frame_pipeline.rs",
+              """        Ok(Some(source.subscribe(
+                      key,
+                      &self.sources,
+                      &self.captured_screens,
+                      &self.worker,
+                      &self.frame_rate_demands,
+                      demand_id,
+                      frame_rate,
+                  )))
+          """,
+              "        Ok(Some(source.subscribe(key, self, demand_id, frame_rate)))\n",
+          )
+          replace_once(
+              "src/infra/platform/linux/frame_pipeline.rs",
+              """        Ok(source.subscribe(
+                      key,
+                      &self.sources,
+                      &self.captured_screens,
+                      &self.worker,
+                      &self.frame_rate_demands,
+                      demand_id,
+                      frame_rate,
+                  ))
+          """,
+              "        Ok(source.subscribe(key, self, demand_id, frame_rate))\n",
+          )
+
+          replace_once(
+              "src/infra/platform/linux/screen_capture/kms/worker.rs",
+              """enum KmsCaptureCommand {
+                  UseComposedFallback,
+                  Shutdown,
+              }
+          """,
+              """enum KmsCaptureCommand {
+                  UseComposedFallback,
+                  Shutdown,
+              }
+
+              struct KmsCaptureLoop {
+                  screen_name: String,
+                  commands: Receiver<KmsCaptureCommand>,
+                  device: Sender<eros::Result<GpuDevice>>,
+                  frames: Sender<eros::Result<KmsCapturedFrame>>,
+                  overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
+                  enable_probing: bool,
+                  probe_interval: Duration,
+                  encoder_profiles: Vec<DmaBufProfile>,
+              }
+          """,
+          )
+          replace_once(
+              "src/infra/platform/linux/screen_capture/kms/worker.rs",
+              """            run_capture_loop(
+                      screen_name,
+                      command_receiver,
+                      device_sender,
+                      frame_sender,
+                      overflow_frames,
+                      enable_probing,
+                      probe_interval,
+                      encoder_profiles,
+                  );
+          """,
+              """            run_capture_loop(KmsCaptureLoop {
+                      screen_name,
+                      commands: command_receiver,
+                      device: device_sender,
+                      frames: frame_sender,
+                      overflow_frames,
+                      enable_probing,
+                      probe_interval,
+                      encoder_profiles,
+                  });
+          """,
+          )
+          replace_once(
+              "src/infra/platform/linux/screen_capture/kms/worker.rs",
+              """fn run_capture_loop(
+                  screen_name: String,
+                  commands: Receiver<KmsCaptureCommand>,
+                  device: Sender<eros::Result<GpuDevice>>,
+                  frames: Sender<eros::Result<KmsCapturedFrame>>,
+                  overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
+                  enable_probing: bool,
+                  probe_interval: Duration,
+                  encoder_profiles: Vec<DmaBufProfile>,
+              ) {
+          """,
+              """fn run_capture_loop(capture_loop: KmsCaptureLoop) {
+                  let KmsCaptureLoop {
+                      screen_name,
+                      commands,
+                      device,
+                      frames,
+                      overflow_frames,
+                      enable_probing,
+                      probe_interval,
+                      encoder_profiles,
+                  } = capture_loop;
+          """,
+          )
+
+          replace_once(
+              "src/infra/platform/linux/video_renderer/wayland.rs",
+              """        let released = self
+                      .state
+                      .released_buffers
+                      .drain(..)
+                      .collect::<HashSet<_>>();
+          """,
+              "        let released = std::mem::take(&mut self.state.released_buffers);\n",
+          )
+
+          replace_once(
+              "src/infra/transport/quic.rs",
+              """    Ok(decode_tlv(datagram, Delivery::Unreliable)
+                      .with_context(|| "Failed to decode QUIC datagram")?)
+          """,
+              """    decode_tlv(datagram, Delivery::Unreliable)
+                      .with_context(|| "Failed to decode QUIC datagram")
+          """,
+          )
+
+          replace_once(
+              "src/infra/transport/tcp.rs",
+              """    fn close(&self) -> impl Future<Output = ()> {
+                  async move {
+                      if !self.state.borrow().writer_available {
+                          return;
+                      }
+
+                      let completion = UnsyncQueue::default();
+                      self.commands.push(WriteCommand {
+                          operation: WriteOperation::Close,
+                          completion: completion.clone(),
+                      });
+                      let _ = completion.pop().await;
+                  }
+              }
+          """,
+              """    async fn close(&self) {
+                  if !self.state.borrow().writer_available {
+                      return;
+                  }
+
+                  let completion = UnsyncQueue::default();
+                  self.commands.push(WriteCommand {
+                      operation: WriteOperation::Close,
+                      completion: completion.clone(),
+                  });
+                  let _ = completion.pop().await;
+              }
+          """,
+          )
+
+          replace_once(
+              "src/infra/transport/mod.rs",
+              """    fn send_unreliable(
+                  &self,
+                  channel: TransportChannel,
+                  payload: Bytes,
+              ) -> impl Future<Output = eros::Result<()>> {
+                  async move {
+                      match self {
+                          Self::Quic(send) => send.send_unreliable(channel, payload).await,
+                          Self::Tcp(send) => send.send_unreliable(channel, payload).await,
+                      }
+                  }
+              }
+          """,
+              """    async fn send_unreliable(
+                  &self,
+                  channel: TransportChannel,
+                  payload: Bytes,
+              ) -> eros::Result<()> {
+                  match self {
+                      Self::Quic(send) => send.send_unreliable(channel, payload).await,
+                      Self::Tcp(send) => send.send_unreliable(channel, payload).await,
+                  }
+              }
+          """,
+          )
+          replace_once(
+              "src/infra/transport/mod.rs",
+              """    fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
+                  async move {
+                      match self {
+                          Self::Quic(send) => send.send(message).await,
+                          Self::Tcp(send) => send.send(message).await,
+                      }
+                  }
+              }
+          """,
+              """    async fn send(&self, message: TransportMessage) -> eros::Result<()> {
+                  match self {
+                      Self::Quic(send) => send.send(message).await,
+                      Self::Tcp(send) => send.send(message).await,
+                  }
+              }
+          """,
+          )
+          replace_once(
+              "src/infra/transport/mod.rs",
+              """    fn close(&self) -> impl Future<Output = ()> {
+                  async move {
+                      match self {
+                          Self::Quic(send) => send.close().await,
+                          Self::Tcp(send) => send.close().await,
+                      }
+                  }
+              }
+          """,
+              """    async fn close(&self) {
+                  match self {
+                      Self::Quic(send) => send.close().await,
+                      Self::Tcp(send) => send.close().await,
+                  }
+              }
+          """,
+          )
+          replace_once(
+              "src/infra/transport/mod.rs",
+              """    fn recv(&mut self) -> impl Future<Output = eros::Result<Option<TransportMessage>>> {
+                  async move {
+                      match self {
+                          Self::Quic(recv) => recv.recv().await,
+                          Self::Tcp(recv) => recv.recv().await,
+                      }
+                  }
+              }
+          """,
+              """    async fn recv(&mut self) -> eros::Result<Option<TransportMessage>> {
+                  match self {
+                      Self::Quic(recv) => recv.recv().await,
+                      Self::Tcp(recv) => recv.recv().await,
+                  }
+              }
+          """,
+          )
+          PY
+
+          cargo fmt --all
+
+      - name: Verify clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Commit fixes
+        run: |
+          git rm .github/workflows/agent-fix-clippy.yml
+          git config user.name "OpenAI"
+          git config user.email "openai@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix clippy warnings"
+          git push
