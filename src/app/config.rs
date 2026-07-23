@@ -45,6 +45,15 @@ pub enum NetworkTransport {
     Tcp,
 }
 
+impl NetworkTransport {
+    pub(crate) const fn listener_protocol(self) -> &'static str {
+        match self {
+            Self::Quic => "UDP",
+            Self::Tcp => "TCP",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
@@ -185,6 +194,12 @@ mod tests {
             .expect("TCP network transport configuration should deserialize");
 
         assert_eq!(config.network.transport, NetworkTransport::Tcp);
+    }
+
+    #[test]
+    fn network_transport_reports_its_listener_protocol() {
+        assert_eq!(NetworkTransport::Quic.listener_protocol(), "UDP");
+        assert_eq!(NetworkTransport::Tcp.listener_protocol(), "TCP");
     }
 
     #[test]

@@ -98,6 +98,7 @@ pub(crate) struct RootApplication {
     messages: UnsyncQueue<RootMessage>,
     closing: bool,
     finished: bool,
+    local_protocol: &'static str,
     local_port: u16,
     listener_online: bool,
     active_section: WorkspaceSection,
@@ -596,6 +597,7 @@ impl RootApplication {
             .await
             .context("Failed to create the configured connection endpoint")?;
         let local_address = connection_endpoint.local_address()?;
+        let local_protocol = config.network.transport.listener_protocol();
         let requester_name = format!("{} ({})", config.app_name, local_address.port());
 
         info!(
@@ -621,6 +623,7 @@ impl RootApplication {
             messages,
             closing: false,
             finished: false,
+            local_protocol,
             local_port: local_address.port(),
             listener_online: true,
             active_section: WorkspaceSection::default(),
@@ -931,6 +934,7 @@ impl RootApplication {
             page_title,
             page_subtitle,
             status_text,
+            local_protocol: self.local_protocol.to_string(),
             local_port: self.local_port.to_string(),
             local_server_online: self.listener_online,
             stream_title,

@@ -239,6 +239,7 @@ fn apply_view_state(window: &RabbitWindow, state: ViewState) {
     window.set_page_title(state.page_title.into());
     window.set_page_subtitle(state.page_subtitle.into());
     window.set_status_text(state.status_text.into());
+    window.set_local_protocol(state.local_protocol.into());
     window.set_local_port(state.local_port.into());
     window.set_local_server_online(state.local_server_online);
     window.set_stream_title(state.stream_title.into());

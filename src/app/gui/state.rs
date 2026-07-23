@@ -308,6 +308,7 @@ pub(crate) struct ViewState {
     pub(crate) page_title: String,
     pub(crate) page_subtitle: String,
     pub(crate) status_text: String,
+    pub(crate) local_protocol: String,
     pub(crate) local_port: String,
     pub(crate) local_server_online: bool,
     pub(crate) stream_title: String,

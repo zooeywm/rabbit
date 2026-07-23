@@ -173,6 +173,7 @@ component OnlineStatus inherits HorizontalLayout {
 }
 
 component Sidebar inherits Rectangle {
+    in property <string> local-protocol;
     in property <string> local-port;
     in property <bool> local-server-online;
     in property <NavigationSection> active-section;
@@ -346,7 +347,7 @@ component Sidebar inherits Rectangle {
                 height: 24px;
                 spacing: 6px;
                 MutedText {
-                    text: "UDP";
+                    text: root.local-protocol;
                 }
 
                 Text {
@@ -398,6 +399,7 @@ export component RabbitWindow inherits Window {
     in property <string> page-title: "Connect to a device";
     in property <string> page-subtitle: "Enter the server IP address, hostname, or either with a port";
     in property <string> status-text;
+    in property <string> local-protocol;
     in property <string> local-port;
     in property <bool> local-server-online;
     in property <string> stream-title;
@@ -439,6 +441,7 @@ export component RabbitWindow inherits Window {
 
         Sidebar {
             visible: !root.video-fill-window-active;
+            local-protocol: root.local-protocol;
             local-port: root.local-port;
             local-server-online: root.local-server-online;
             active-section: root.section;
@@ -533,7 +536,7 @@ export component RabbitWindow inherits Window {
                                 alignment: center;
                                 spacing: 3px;
                                 MutedText {
-                                    text: "UDP PORT";
+                                    text: root.local-protocol + " PORT";
                                     horizontal-alignment: right;
                                 }
 
@@ -716,7 +719,7 @@ export component RabbitWindow inherits Window {
 
                                 BodyText {
                                     text: root.local-server-online
-                                        ? "Listening for incoming connections on UDP " + root.local-port
+                                        ? "Listening for incoming connections on " + root.local-protocol + " " + root.local-port
                                         : "The local connection listener has stopped";
                                     horizontal-alignment: center;
                                     wrap: word-wrap;
