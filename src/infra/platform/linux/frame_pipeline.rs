@@ -23,6 +23,7 @@ use crate::{
     },
     kernel::{
         frame_pipeline::{FramePipelineManager, FramePipelineParameters},
+        geometry::{FrameRate, FrameRateGate},
         screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
         screen_manager::ScreenId,
     },
@@ -37,6 +38,8 @@ pub(crate) struct GbmFramePipelineManagerState {
     captured_screens: Rc<RefCell<HashMap<ScreenId, Rc<CapturedScreenSource>>>>,
     worker: Rc<RefCell<Option<GpuWorker>>>,
     next_pipeline_id: Cell<u64>,
+    frame_rate_demands: Rc<RefCell<HashMap<ScreenId, HashMap<u64, FrameRate>>>>,
+    next_frame_rate_demand_id: Cell<u64>,
     worker_reaper: WorkerReaperHandle,
 }
 
@@ -99,7 +102,8 @@ struct LatestFrameSubscriptionState<Frame> {
 #[derive(Debug)]
 pub(crate) struct GbmFramePipelineFrame {
     pub(crate) buffer: DmaBufFrame,
-    pub(crate) frame_rate: crate::kernel::geometry::FrameRate,
+    pub(crate) source_frame_rate: FrameRate,
+    pub(crate) frame_rate: FrameRate,
     pub(crate) probe: Option<crate::infra::platform::video_probe::VideoFrameProbe>,
 }
 
@@ -119,13 +123,43 @@ pub(crate) struct GbmFramePipelineSubscription {
     sources: Weak<RefCell<HashMap<FramePipelineSourceKey, Weak<FramePipelineSource>>>>,
     captured_screens: Weak<RefCell<HashMap<ScreenId, Rc<CapturedScreenSource>>>>,
     worker: Weak<RefCell<Option<GpuWorker>>>,
+    frame_rate_demands: Weak<RefCell<HashMap<ScreenId, HashMap<u64, FrameRate>>>>,
+    frame_rate_demand_id: u64,
+    frame_rate_gate: SubscriptionFrameRateGate,
+}
+
+#[derive(Debug)]
+struct SubscriptionFrameRateGate {
+    target: FrameRate,
+    gate: FrameRateGate,
+}
+
+impl SubscriptionFrameRateGate {
+    fn new(target: FrameRate) -> Self {
+        Self {
+            target,
+            gate: FrameRateGate::default(),
+        }
+    }
+
+    fn should_emit(&mut self, frame_rate: FrameRate) -> bool {
+        self.gate.should_emit(frame_rate, self.target)
+    }
 }
 
 impl futures_core::Stream for GbmFramePipelineSubscription {
     type Item = eros::Result<Rc<GbmFramePipelineFrame>>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.frames).poll_next(context)
+        let this = self.as_mut().get_mut();
+
+        loop {
+            match Pin::new(&mut this.frames).poll_next(context) {
+                Poll::Ready(Some(Ok(frame)))
+                    if !this.frame_rate_gate.should_emit(frame.frame_rate) => {}
+                result => return result,
+            }
+        }
     }
 }
 
@@ -307,6 +341,9 @@ impl FramePipelineSource {
         sources: &Rc<RefCell<HashMap<FramePipelineSourceKey, Weak<FramePipelineSource>>>>,
         captured_screens: &Rc<RefCell<HashMap<ScreenId, Rc<CapturedScreenSource>>>>,
         worker: &Rc<RefCell<Option<GpuWorker>>>,
+        frame_rate_demands: &Rc<RefCell<HashMap<ScreenId, HashMap<u64, FrameRate>>>>,
+        frame_rate_demand_id: u64,
+        frame_rate: FrameRate,
     ) -> GbmFramePipelineSubscription {
         GbmFramePipelineSubscription {
             key,
@@ -315,6 +352,9 @@ impl FramePipelineSource {
             sources: Rc::downgrade(sources),
             captured_screens: Rc::downgrade(captured_screens),
             worker: Rc::downgrade(worker),
+            frame_rate_demands: Rc::downgrade(frame_rate_demands),
+            frame_rate_demand_id,
+            frame_rate_gate: SubscriptionFrameRateGate::new(frame_rate),
         }
     }
 }
@@ -343,6 +383,8 @@ impl GbmFramePipelineManagerState {
             captured_screens: Rc::new(RefCell::new(HashMap::new())),
             worker: Rc::new(RefCell::new(None)),
             next_pipeline_id: Cell::new(0),
+            frame_rate_demands: Rc::new(RefCell::new(HashMap::new())),
+            next_frame_rate_demand_id: Cell::new(0),
             worker_reaper,
         }
     }
@@ -421,23 +463,110 @@ impl GbmFramePipelineManagerState {
     fn existing_subscription(
         &self,
         key: FramePipelineSourceKey,
-    ) -> Option<GbmFramePipelineSubscription> {
-        let source = self.sources.borrow().get(&key)?.upgrade()?;
+        frame_rate: FrameRate,
+    ) -> eros::Result<Option<GbmFramePipelineSubscription>> {
+        let source = self.sources.borrow().get(&key).and_then(Weak::upgrade);
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let demand_id = self.add_frame_rate_demand(key.screen_id, frame_rate)?;
 
-        Some(source.subscribe(key, &self.sources, &self.captured_screens, &self.worker))
+        Ok(Some(source.subscribe(
+            key,
+            &self.sources,
+            &self.captured_screens,
+            &self.worker,
+            &self.frame_rate_demands,
+            demand_id,
+            frame_rate,
+        )))
     }
 
     fn insert_source(
         &self,
         key: FramePipelineSourceKey,
         source: Rc<FramePipelineSource>,
-    ) -> GbmFramePipelineSubscription {
+        frame_rate: FrameRate,
+    ) -> eros::Result<GbmFramePipelineSubscription> {
         self.sources
             .borrow_mut()
             .insert(key, Rc::downgrade(&source));
+        let demand_id = self.add_frame_rate_demand(key.screen_id, frame_rate)?;
 
-        source.subscribe(key, &self.sources, &self.captured_screens, &self.worker)
+        Ok(source.subscribe(
+            key,
+            &self.sources,
+            &self.captured_screens,
+            &self.worker,
+            &self.frame_rate_demands,
+            demand_id,
+            frame_rate,
+        ))
     }
+
+    fn add_frame_rate_demand(
+        &self,
+        screen_id: ScreenId,
+        frame_rate: FrameRate,
+    ) -> eros::Result<u64> {
+        let demand_id = self.next_frame_rate_demand_id.get();
+        self.next_frame_rate_demand_id.set(
+            demand_id
+                .checked_add(1)
+                .with_context(|| "Failed to allocate a frame-rate demand ID")?,
+        );
+        let target = {
+            let mut demands = self.frame_rate_demands.borrow_mut();
+            let screen_demands = demands.entry(screen_id).or_default();
+            screen_demands.insert(demand_id, frame_rate);
+            highest_frame_rate(screen_demands.values().copied())
+        };
+
+        if let Err(error) = self.set_screen_frame_rate(screen_id, target) {
+            remove_frame_rate_demand(&self.frame_rate_demands, screen_id, demand_id);
+            return Err(error);
+        }
+
+        Ok(demand_id)
+    }
+
+    fn set_screen_frame_rate(
+        &self,
+        screen_id: ScreenId,
+        frame_rate: Option<FrameRate>,
+    ) -> eros::Result<()> {
+        let worker = self.worker.borrow();
+        let Some(worker) = worker.as_ref() else {
+            eros::bail!("GPU frame-pipeline worker is not available");
+        };
+
+        worker.set_screen_frame_rate(screen_id, frame_rate)
+    }
+}
+
+fn highest_frame_rate(frame_rates: impl Iterator<Item = FrameRate>) -> Option<FrameRate> {
+    frame_rates.max_by(|left, right| {
+        let left_value = u128::from(left.numerator()) * u128::from(right.denominator());
+        let right_value = u128::from(right.numerator()) * u128::from(left.denominator());
+        left_value.cmp(&right_value)
+    })
+}
+
+fn remove_frame_rate_demand(
+    demands: &Rc<RefCell<HashMap<ScreenId, HashMap<u64, FrameRate>>>>,
+    screen_id: ScreenId,
+    demand_id: u64,
+) -> Option<FrameRate> {
+    let mut demands = demands.borrow_mut();
+    let target = demands.get_mut(&screen_id).and_then(|screen_demands| {
+        screen_demands.remove(&demand_id);
+        highest_frame_rate(screen_demands.values().copied())
+    });
+    if target.is_none() {
+        demands.remove(&screen_id);
+    }
+
+    target
 }
 
 fn handle_worker_notification(
@@ -493,6 +622,7 @@ where
         &mut self,
         screen_id: &ScreenId,
         parameters: FramePipelineParameters,
+        frame_rate: FrameRate,
     ) -> eros::Result<Self::Subscription> {
         let key = FramePipelineSourceKey {
             screen_id: *screen_id,
@@ -501,7 +631,7 @@ where
 
         if let Some(subscription) =
             <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref())
-                .existing_subscription(key)
+                .existing_subscription(key, frame_rate)?
         {
             return Ok(subscription);
         }
@@ -534,12 +664,25 @@ where
             .clone();
         let source = FramePipelineSource::new(captured_screen, gpu_source);
 
-        Ok(state.insert_source(key, source))
+        state.insert_source(key, source, frame_rate)
     }
 }
 
 impl Drop for GbmFramePipelineSubscription {
     fn drop(&mut self) {
+        if let Some(frame_rate_demands) = self.frame_rate_demands.upgrade() {
+            let target = remove_frame_rate_demand(
+                &frame_rate_demands,
+                self.key.screen_id,
+                self.frame_rate_demand_id,
+            );
+            if let Some(worker) = self.worker.upgrade()
+                && let Some(worker) = worker.borrow().as_ref()
+            {
+                let _ = worker.set_screen_frame_rate(self.key.screen_id, target);
+            }
+        }
+
         if Rc::strong_count(&self.source) != 1 {
             return;
         }
@@ -599,13 +742,14 @@ mod tests {
             platform::{
                 frame_pipeline::{
                     GbmFramePipelineManager, GbmFramePipelineManagerState, LatestFramePublisher,
+                    SubscriptionFrameRateGate,
                 },
                 screen_capture::{KmsCaptureLease, KmsCapturedFrame, KmsFrameReceiver},
             },
         },
         kernel::{
             frame_pipeline::{FramePipelineManager, FramePipelineParameters},
-            geometry::PixelSize,
+            geometry::{FrameRate, PixelSize},
             screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
             screen_manager::ScreenId,
         },
@@ -658,23 +802,31 @@ mod tests {
             let shared_parameters = parameters(1920, 1080);
             let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
             let first = manager
-                .subscribe(&ScreenId(1), shared_parameters)
+                .subscribe(&ScreenId(1), shared_parameters, frame_rate(60))
                 .expect("First frame pipeline subscription should be created");
             let second = manager
-                .subscribe(&ScreenId(1), shared_parameters)
+                .subscribe(&ScreenId(1), shared_parameters, frame_rate(120))
                 .expect("Second frame pipeline subscription should be created");
             let different = manager
-                .subscribe(&ScreenId(1), parameters(1280, 720))
+                .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(90))
                 .expect("Different frame pipeline subscription should be created");
 
             assert!(Rc::ptr_eq(&first.source, &second.source));
             assert!(!Rc::ptr_eq(&first.source, &different.source));
             assert_eq!(manager.prj_ref().frame_pipeline.sources.borrow().len(), 2);
             assert_eq!(manager.prj_ref().capture_acquisitions, 1);
+            assert_eq!(
+                screen_target_frame_rate(manager, ScreenId(1)),
+                Some(frame_rate(120))
+            );
 
-            drop(first);
-            assert_eq!(manager.prj_ref().frame_pipeline.sources.borrow().len(), 2);
             drop(second);
+            assert_eq!(manager.prj_ref().frame_pipeline.sources.borrow().len(), 2);
+            assert_eq!(
+                screen_target_frame_rate(manager, ScreenId(1)),
+                Some(frame_rate(90))
+            );
+            drop(first);
             assert_eq!(manager.prj_ref().frame_pipeline.sources.borrow().len(), 1);
             drop(different);
             assert!(manager.prj_ref().frame_pipeline.sources.borrow().is_empty());
@@ -704,6 +856,19 @@ mod tests {
     }
 
     #[test]
+    fn subscription_frame_gate_applies_each_sessions_requested_rate() {
+        let shared_rate = frame_rate(120);
+        let mut sixty = SubscriptionFrameRateGate::new(frame_rate(60));
+        let mut one_twenty = SubscriptionFrameRateGate::new(frame_rate(120));
+
+        assert_eq!(
+            (0..120).filter(|_| sixty.should_emit(shared_rate)).count(),
+            60
+        );
+        assert!((0..120).all(|_| one_twenty.should_emit(shared_rate)));
+    }
+
+    #[test]
     fn distinct_pipeline_sources_share_one_gpu_worker() {
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
@@ -712,7 +877,7 @@ mod tests {
             let first = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1920, 1080))
+                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60))
                     .expect("First frame pipeline subscription should be created")
             };
             let first_worker = deps
@@ -722,7 +887,7 @@ mod tests {
             let second = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1280, 720))
+                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120))
                     .expect("Second frame pipeline subscription should be created")
             };
             let second_worker = deps
@@ -749,13 +914,13 @@ mod tests {
             let mut first = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1920, 1080))
+                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60))
                     .expect("First frame pipeline subscription should be created")
             };
             let mut second = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1280, 720))
+                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120))
                     .expect("Second frame pipeline subscription should be created")
             };
             let sender = deps
@@ -802,6 +967,18 @@ mod tests {
         FramePipelineParameters {
             frame_size: PixelSize { width, height },
         }
+    }
+
+    fn frame_rate(rate: u32) -> FrameRate {
+        FrameRate::new(rate, 1).expect("Test frame rate should be valid")
+    }
+
+    fn screen_target_frame_rate(
+        manager: &GbmFramePipelineManager<TestDeps>,
+        screen_id: ScreenId,
+    ) -> Option<FrameRate> {
+        let demands = manager.prj_ref().frame_pipeline.frame_rate_demands.borrow();
+        super::highest_frame_rate(demands.get(&screen_id)?.values().copied())
     }
 
     fn ready_frame<Frame>(

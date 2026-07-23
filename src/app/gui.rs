@@ -396,7 +396,12 @@ impl RootApplication {
         frame_rate: FrameRate,
         sender: &MessageSender,
     ) -> eros::Result<()> {
-        let frames = FramePipelineManager::subscribe(&mut self.model.app, &screen_id, parameters)?;
+        let frames = FramePipelineManager::subscribe(
+            &mut self.model.app,
+            &screen_id,
+            parameters,
+            frame_rate,
+        )?;
         let stream_id = self.model.next_screen_stream_id()?;
         let Some(session) = self
             .model

@@ -1,6 +1,9 @@
 use std::rc::Rc;
 
-use crate::kernel::{geometry::PixelSize, screen_manager::ScreenId};
+use crate::kernel::{
+    geometry::{FrameRate, PixelSize},
+    screen_manager::ScreenId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FramePipelineParameters {
@@ -15,6 +18,7 @@ pub trait FramePipelineManager {
         &mut self,
         screen_id: &ScreenId,
         parameters: FramePipelineParameters,
+        frame_rate: FrameRate,
     ) -> eros::Result<Self::Subscription>;
 }
 
@@ -30,7 +34,7 @@ mod tests {
 
     use crate::kernel::{
         frame_pipeline::{FramePipelineManager, FramePipelineParameters},
-        geometry::PixelSize,
+        geometry::{FrameRate, PixelSize},
         screen_manager::ScreenId,
     };
 
@@ -57,6 +61,7 @@ mod tests {
             &mut self,
             _screen_id: &ScreenId,
             _parameters: FramePipelineParameters,
+            _frame_rate: FrameRate,
         ) -> eros::Result<Self::Subscription> {
             Ok(EmptyFramePipelineSubscription)
         }
@@ -73,7 +78,11 @@ mod tests {
         };
 
         manager
-            .subscribe(&ScreenId(3), parameters)
+            .subscribe(
+                &ScreenId(3),
+                parameters,
+                FrameRate::new(60, 1).expect("Test frame rate should be valid"),
+            )
             .expect("Frame pipeline subscription should be created");
     }
 }

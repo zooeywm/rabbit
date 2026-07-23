@@ -559,7 +559,7 @@ impl GStreamerVideoEncoder {
         };
         let first_frame =
             first_frame.with_context(|| "Failed to receive first frame-pipeline output")?;
-        let source_frame_rate = first_frame.frame_rate;
+        let source_frame_rate = first_frame.source_frame_rate;
         let first_frame = GStreamerVideoFrame::from_pipeline_frame(first_frame, frame_rate, None)?;
         let mut encoder = Self::new(first_frame, source_frame_rate, max_rtp_packet_size)?;
         let result = encoder
@@ -808,11 +808,11 @@ impl GStreamerVideoEncoder {
     }
 
     fn prepare_frame(&self, frame: Rc<GbmFramePipelineFrame>) -> eros::Result<GStreamerVideoFrame> {
-        if frame.frame_rate != self.source_frame_rate {
+        if frame.source_frame_rate != self.source_frame_rate {
             eros::bail!(
                 "Frame-pipeline source frame rate changed from {:?} to {:?}",
                 self.source_frame_rate,
-                frame.frame_rate
+                frame.source_frame_rate
             );
         }
         GStreamerVideoFrame::from_pipeline_frame(
@@ -1511,6 +1511,7 @@ mod tests {
                     FramePipelineParameters {
                         frame_size: target_size,
                     },
+                    FrameRate::new(120, 1).expect("Host video test frame rate should be valid"),
                 )
                 .expect("Host video frame pipeline should start");
             let frames = TimedFrames::new(frames, run_duration);
@@ -2367,6 +2368,7 @@ mod tests {
                 lease,
                 va_backing: None,
             },
+            source_frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
             frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
             probe: None,
         })

@@ -20,7 +20,11 @@ use crate::{
         },
         video_encoder::{VaDmaBufAllocator, hardware_h264_encoder_for, va_vpp_input_modifiers},
     },
-    kernel::{frame_pipeline::FramePipelineParameters, screen_manager::ScreenId},
+    kernel::{
+        frame_pipeline::FramePipelineParameters,
+        geometry::{FrameRate, FrameRateGate},
+        screen_manager::ScreenId,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,6 +35,10 @@ enum GpuWorkerCommand {
     RegisterScreen {
         screen_id: ScreenId,
         frames: KmsFrameReceiver,
+    },
+    SetScreenFrameRate {
+        screen_id: ScreenId,
+        frame_rate: Option<FrameRate>,
     },
     ReleaseScreen(ScreenId),
     RegisterPipeline {
@@ -106,6 +114,33 @@ struct GpuScreen {
     frames: Receiver<eros::Result<KmsCapturedFrame>>,
     composition_fallback: KmsCompositionFallback,
     composition: GpuComposition,
+    target_frame_rate: Option<FrameRate>,
+    frame_rate_gate: FrameRateGate,
+}
+
+impl GpuScreen {
+    fn output_frame_rate(&mut self, source_frame_rate: FrameRate) -> Option<FrameRate> {
+        let target_frame_rate = self.target_frame_rate?;
+        if !self
+            .frame_rate_gate
+            .should_emit(source_frame_rate, target_frame_rate)
+        {
+            return None;
+        }
+
+        Some(lower_frame_rate(source_frame_rate, target_frame_rate))
+    }
+}
+
+fn lower_frame_rate(left: FrameRate, right: FrameRate) -> FrameRate {
+    let left_value = u128::from(left.numerator()) * u128::from(right.denominator());
+    let right_value = u128::from(right.numerator()) * u128::from(left.denominator());
+
+    if left_value <= right_value {
+        left
+    } else {
+        right
+    }
 }
 
 #[derive(Debug)]
@@ -214,6 +249,26 @@ impl GpuWorker {
         })
     }
 
+    pub(super) fn set_screen_frame_rate(
+        &self,
+        screen_id: ScreenId,
+        frame_rate: Option<FrameRate>,
+    ) -> eros::Result<()> {
+        self.commands
+            .send(GpuWorkerCommand::SetScreenFrameRate {
+                screen_id,
+                frame_rate,
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to update the frame-rate limit for screen {}",
+                    screen_id.0
+                )
+            })?;
+
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(super) fn thread_id(&self) -> thread::ThreadId {
         self.thread
@@ -267,8 +322,21 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                         frames,
                         composition_fallback,
                         composition: GpuComposition::new(),
+                        target_frame_rate: None,
+                        frame_rate_gate: FrameRateGate::default(),
                     },
                 );
+            }
+            GpuWorkerEvent::Command(Ok(GpuWorkerCommand::SetScreenFrameRate {
+                screen_id,
+                frame_rate,
+            })) => {
+                if let Some(screen) = screens.get_mut(&screen_id)
+                    && screen.target_frame_rate != frame_rate
+                {
+                    screen.target_frame_rate = frame_rate;
+                    screen.frame_rate_gate.reset();
+                }
             }
             GpuWorkerEvent::Command(Ok(GpuWorkerCommand::ReleaseScreen(screen_id))) => {
                 screens.remove(&screen_id);
@@ -429,6 +497,11 @@ fn process_screen_frame(
     screen: &mut GpuScreen,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
 ) {
+    let source_frame_rate = frame.frame_rate;
+    let Some(output_frame_rate) = screen.output_frame_rate(source_frame_rate) else {
+        return;
+    };
+
     let KmsCapturedFrame {
         source,
         mut issues,
@@ -482,11 +555,18 @@ fn process_screen_frame(
         probe,
     };
 
-    let frame =
-        match publish_single_pipeline_passthrough(context, screen_id, frame, pipelines, !fused) {
-            None => return,
-            Some(frame) => frame,
-        };
+    let frame = match publish_single_pipeline_passthrough(
+        context,
+        screen_id,
+        frame,
+        pipelines,
+        !fused,
+        source_frame_rate,
+        output_frame_rate,
+    ) {
+        None => return,
+        Some(frame) => frame,
+    };
 
     let mut frame = frame;
     let source = match prepare_pipeline_source(context, screen_id, &mut frame) {
@@ -508,7 +588,15 @@ fn process_screen_frame(
     };
 
     route_screen_frame(screen_id, &frame, pipelines, |parameters, frame| {
-        process_pipeline_frame(context, &source, parameters, frame, fused)
+        process_pipeline_frame(
+            context,
+            &source,
+            parameters,
+            frame,
+            fused,
+            source_frame_rate,
+            output_frame_rate,
+        )
     });
 
     if fused && let KmsCapturedSource::Composed(buffer) = &frame.source {
@@ -673,6 +761,8 @@ fn publish_single_pipeline_passthrough(
     mut frame: KmsCapturedFrame,
     pipelines: &mut HashMap<FramePipelineId, GpuPipeline>,
     allow_passthrough: bool,
+    source_frame_rate: FrameRate,
+    frame_rate: FrameRate,
 ) -> Option<KmsCapturedFrame> {
     let KmsCapturedSource::Composed(buffer) = &frame.source else {
         return Some(frame);
@@ -767,7 +857,8 @@ fn publish_single_pipeline_passthrough(
     };
     pipeline.outputs.publish(Ok(GbmFramePipelineFrame {
         buffer,
-        frame_rate: frame.frame_rate,
+        source_frame_rate,
+        frame_rate,
         probe,
     }));
 
@@ -841,6 +932,8 @@ fn process_pipeline_frame(
     pipeline: &mut GpuPipeline,
     frame: &KmsCapturedFrame,
     defer_source_release: bool,
+    source_frame_rate: FrameRate,
+    frame_rate: FrameRate,
 ) -> eros::Result<Option<GbmFramePipelineFrame>> {
     let parameters = pipeline.parameters;
     validate_nv12_size(parameters.frame_size)?;
@@ -929,7 +1022,8 @@ fn process_pipeline_frame(
         context.egl().flush_frame_pipeline()?;
         return Ok(Some(GbmFramePipelineFrame {
             buffer,
-            frame_rate: frame.frame_rate,
+            source_frame_rate,
+            frame_rate,
             probe: frame.probe.clone().map(|mut probe| {
                 probe.mark_gpu_submitted();
                 probe
@@ -958,7 +1052,8 @@ fn process_pipeline_frame(
 
     Ok(Some(GbmFramePipelineFrame {
         buffer,
-        frame_rate: frame.frame_rate,
+        source_frame_rate,
+        frame_rate,
         probe: frame.probe.clone().map(|mut probe| {
             probe.mark_gpu_submitted();
             probe
@@ -1218,13 +1313,15 @@ mod tests {
             frame_pipeline::worker::{
                 FramePipelineId, GpuComposition, GpuPipeline, GpuScreen, GpuWorker, GpuWorkerEvent,
                 GpuWorkerNotification, LatestSender, OUTPUT_POOL_CAPACITY, gpu_mismatch,
-                route_screen_frame, validate_nv12_size, wait_for_event,
+                lower_frame_rate, route_screen_frame, validate_nv12_size, wait_for_event,
             },
             gpu::GpuDevice,
             screen_capture::{KmsFrameReceiver, empty_kms_frame},
         },
         kernel::{
-            frame_pipeline::FramePipelineParameters, geometry::PixelSize, screen_manager::ScreenId,
+            frame_pipeline::FramePipelineParameters,
+            geometry::{FrameRate, FrameRateGate, PixelSize},
+            screen_manager::ScreenId,
         },
     };
 
@@ -1268,6 +1365,8 @@ mod tests {
                 frames,
                 composition_fallback,
                 composition: GpuComposition::new(),
+                target_frame_rate: None,
+                frame_rate_gate: FrameRateGate::default(),
             },
         )]);
 
@@ -1292,6 +1391,33 @@ mod tests {
             .expect("A different render node should be rejected");
 
         assert!(error.to_string().contains("cannot capture screen 2"));
+    }
+
+    #[test]
+    fn screen_frame_gate_limits_frames_before_gpu_processing() {
+        let (_frame_sender, receiver) = KmsFrameReceiver::channel();
+        let (device, frames, composition_fallback) = receiver.into_parts();
+        let mut screen = GpuScreen {
+            device: Some(device),
+            frames,
+            composition_fallback,
+            composition: GpuComposition::new(),
+            target_frame_rate: Some(
+                FrameRate::new(60, 1).expect("Target frame rate should be valid"),
+            ),
+            frame_rate_gate: FrameRateGate::default(),
+        };
+        let source = FrameRate::new(144, 1).expect("Source frame rate should be valid");
+        let target = FrameRate::new(60, 1).expect("Target frame rate should be valid");
+
+        assert_eq!(lower_frame_rate(source, target), target);
+
+        assert_eq!(
+            (0..144)
+                .filter(|_| screen.output_frame_rate(source).is_some())
+                .count(),
+            60
+        );
     }
 
     #[test]
