@@ -295,7 +295,10 @@ fn remote_screen_model(entries: Vec<RemoteScreenView>) -> ModelRc<RemoteScreenIt
             .into_iter()
             .map(|entry| RemoteScreenItem {
                 name: SharedString::from(entry.name),
-                resolution: SharedString::from(entry.resolution),
+                original: SharedString::from(entry.original),
+                selected_width: SharedString::from(entry.selected_width),
+                selected_height: SharedString::from(entry.selected_height),
+                selected_frame_rate: SharedString::from(entry.selected_frame_rate),
             })
             .collect::<Vec<_>>(),
     ))

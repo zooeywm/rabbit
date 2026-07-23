@@ -10,6 +10,7 @@ use crate::app::{
             ConnectedDeviceView, ConnectionRequestView, DirectConnectionCompletion,
             DirectConnectionState, DirectTarget, HostedScreenStreamView, RemoteScreenView,
             ScreenStreamState, ScreenStreamTarget, ViewPage, ViewState, WorkspaceSection,
+            format_frame_rate,
         },
         view::{Gui, GuiIntent, ViewPublisher},
     },
@@ -771,12 +772,18 @@ impl RootApplication {
                     .get(session_id)?
                     .iter()
                     .find(|screen| screen.id == *screen_id)
-                    .map(|screen| RemoteScreenView {
-                        name: format!("Session {} · {}", session_id.0, screen.name),
-                        resolution: format!(
-                            "{} × {}",
-                            screen.resolution.width, screen.resolution.height
-                        ),
+                    .map(|screen| {
+                        let frame_rate = format_frame_rate(screen.frame_rate);
+                        RemoteScreenView {
+                            name: format!("Session {} · {}", session_id.0, screen.name),
+                            original: format!(
+                                "Original: {} × {} @ {} Hz",
+                                screen.resolution.width, screen.resolution.height, frame_rate
+                            ),
+                            selected_width: screen.resolution.width.to_string(),
+                            selected_height: screen.resolution.height.to_string(),
+                            selected_frame_rate: frame_rate,
+                        }
                     })
             })
             .collect::<Vec<_>>();

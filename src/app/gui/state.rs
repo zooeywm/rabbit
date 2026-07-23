@@ -6,7 +6,7 @@ use std::{
 use eros::Context;
 
 use crate::kernel::{
-    geometry::PixelSize,
+    geometry::{FrameRate, PixelSize},
     screen_configuration::{
         ScreenResolutionStatus, ScreenStreamRequestId, ScreenStreamsConfigured,
     },
@@ -298,7 +298,20 @@ pub(crate) struct HostedScreenStreamView {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RemoteScreenView {
     pub(crate) name: String,
-    pub(crate) resolution: String,
+    pub(crate) original: String,
+    pub(crate) selected_width: String,
+    pub(crate) selected_height: String,
+    pub(crate) selected_frame_rate: String,
+}
+
+pub(crate) fn format_frame_rate(frame_rate: FrameRate) -> String {
+    let value = f64::from(frame_rate.numerator()) / f64::from(frame_rate.denominator());
+    let formatted = format!("{value:.3}");
+
+    formatted
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -326,10 +339,10 @@ mod tests {
 
     use crate::app::gui::state::{
         DirectConnectionCompletion, DirectConnectionState, DirectTarget, ScreenStreamState,
-        ScreenStreamTarget,
+        ScreenStreamTarget, format_frame_rate,
     };
     use crate::kernel::{
-        geometry::PixelSize,
+        geometry::{FrameRate, PixelSize},
         screen_configuration::{
             ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
             ScreenStreamRequestId, ScreenStreamsConfigured,
@@ -387,6 +400,18 @@ mod tests {
         assert_eq!(target.host(), "test.io");
         assert_eq!(target.port(), Some(23944));
         assert_eq!(target.to_string(), "test.io:23944");
+    }
+
+    #[test]
+    fn screen_frame_rate_display_omits_redundant_decimal_zeroes() {
+        assert_eq!(
+            format_frame_rate(FrameRate::new(120_000, 1_000).expect("Frame rate should be valid")),
+            "120"
+        );
+        assert_eq!(
+            format_frame_rate(FrameRate::new(143_855, 1_000).expect("Frame rate should be valid")),
+            "143.855"
+        );
     }
 
     #[test]

@@ -39,7 +39,10 @@ export struct HostedScreenStreamItem {
 
 export struct RemoteScreenItem {
     name: string,
-    resolution: string,
+    original: string,
+    selected-width: string,
+    selected-height: string,
+    selected-frame-rate: string,
 }
 
 component Heading inherits Text {
@@ -843,40 +846,108 @@ export component RabbitWindow inherits Window {
                             spacing: 12px;
 
                             for screen[index] in root.remote-screens: Card {
-                                min-width: 160px;
-                                preferred-width: 220px;
-                                height: 194px;
+                                min-width: 260px;
+                                preferred-width: 320px;
+                                height: 314px;
                                 horizontal-stretch: 1;
 
                                 VerticalLayout {
-                                    alignment: center;
-                                    padding: 18px;
+                                    padding: 16px;
                                     spacing: 8px;
 
                                     ScreenIcon { }
 
                                     Heading {
                                         text: screen.name;
-                                        horizontal-alignment: center;
                                     }
 
                                     BodyText {
-                                        text: screen.resolution;
-                                        horizontal-alignment: center;
+                                        text: screen.original;
+                                    }
+
+                                    Text {
+                                        text: "Select resolution";
+                                        color: #272b31;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    HorizontalLayout {
+                                        height: 34px;
+                                        spacing: 8px;
+
+                                        LineEdit {
+                                            text: screen.selected-width;
+                                            input-type: InputType.number;
+                                            horizontal-stretch: 1;
+                                        }
+
+                                        Text {
+                                            width: 10px;
+                                            text: "×";
+                                            color: #5e6672;
+                                            font-size: 13px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+
+                                        LineEdit {
+                                            text: screen.selected-height;
+                                            input-type: InputType.number;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "Refresh rate (Hz)";
+                                        color: #272b31;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    LineEdit {
+                                        text: screen.selected-frame-rate;
+                                        input-type: InputType.decimal;
                                     }
 
                                     Rectangle {
-                                        height: 3px;
-                                    }
+                                        height: 36px;
+                                        border-radius: 5px;
+                                        background: #d81e06;
 
-                                    Button {
-                                        text: "Open";
-                                        primary: true;
-                                        clicked => { root.open-screen(index); }
+                                        Text {
+                                            text: "Open";
+                                            color: #ffffff;
+                                            font-size: 13px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+
+                                        TouchArea {
+                                            clicked => { root.open-screen(index); }
+                                        }
                                     }
                                 }
                             }
 
+                            }
+
+                            if root.remote-screens.length > 0: Rectangle {
+                                height: 42px;
+                                background: #edf6ff;
+                                border-color: #c9e2ff;
+                                border-width: 1px;
+                                border-radius: 7px;
+
+                                Text {
+                                    x: 14px;
+                                    width: parent.width - 28px;
+                                    text: "ⓘ  The selected resolution and refresh rate will be applied for this session only.";
+                                    color: #4389d4;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
                     }
