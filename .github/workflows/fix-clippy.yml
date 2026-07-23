@@ -1,0 +1,53 @@
+name: Fix Clippy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libssl-dev libdrm-dev libgbm-dev libegl1-mesa-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libfontconfig1-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-xkb-dev
+
+      - name: Apply fixes
+        run: |
+          set -euo pipefail
+          python3 .github/fix_clippy.py
+          cargo fmt --all
+
+      - name: Verify clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Commit fixes
+        run: |
+          git rm .github/fix_clippy.py
+          git rm .github/workflows/fix-clippy.yml
+          git config user.name "OpenAI"
+          git config user.email "openai@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix clippy warnings"
+          git push
