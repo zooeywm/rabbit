@@ -64,14 +64,27 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: clippy-cleanup-diagnostics
+          name: clippy-cleanup-apply-diagnostics
           path: |
             apply-fixes.log
             /tmp/fix_clippy.py
           if-no-files-found: warn
 
       - name: Verify clippy
-        run: cargo clippy -- -D warnings
+        run: |
+          set +e
+          cargo clippy -- -D warnings > clippy.log 2>&1
+          status=$?
+          cat clippy.log
+          exit "$status"
+
+      - name: Upload clippy diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-cleanup-clippy-diagnostics
+          path: clippy.log
+          if-no-files-found: error
 
       - name: Commit fixes
         run: |
