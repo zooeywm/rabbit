@@ -25,16 +25,9 @@ pub struct Config {
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct NetworkConfig {
     pub transport: NetworkTransport,
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            transport: NetworkTransport::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

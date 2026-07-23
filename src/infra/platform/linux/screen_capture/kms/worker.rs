@@ -62,6 +62,17 @@ enum KmsCaptureCommand {
     Shutdown,
 }
 
+struct KmsCaptureLoop {
+    screen_name: String,
+    command_receiver: Receiver<KmsCaptureCommand>,
+    device_sender: Sender<eros::Result<GpuDevice>>,
+    frame_sender: Sender<eros::Result<KmsCapturedFrame>>,
+    overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
+    enable_probing: bool,
+    probe_interval: Duration,
+    encoder_profiles: Vec<DmaBufProfile>,
+}
+
 #[derive(Debug)]
 pub(crate) struct KmsCaptureLease {
     commands: Sender<KmsCaptureCommand>,
@@ -95,7 +106,7 @@ impl KmsCaptureLease {
         let overflow_frames = frames.clone();
         let thread_name = format!("rabbit-kms-{screen_name}");
         let thread = thread::Builder::new().name(thread_name).spawn(move || {
-            run_capture_loop(
+            KmsCaptureLoop {
                 screen_name,
                 command_receiver,
                 device_sender,
@@ -104,7 +115,8 @@ impl KmsCaptureLease {
                 enable_probing,
                 probe_interval,
                 encoder_profiles,
-            );
+            }
+            .run();
         })?;
 
         Ok(ScreenCaptureSource {
@@ -205,63 +217,70 @@ impl Drop for KmsCaptureLease {
     }
 }
 
-fn run_capture_loop(
-    screen_name: String,
-    commands: Receiver<KmsCaptureCommand>,
-    device: Sender<eros::Result<GpuDevice>>,
-    frames: Sender<eros::Result<KmsCapturedFrame>>,
-    overflow_frames: Receiver<eros::Result<KmsCapturedFrame>>,
-    enable_probing: bool,
-    probe_interval: Duration,
-    encoder_profiles: Vec<DmaBufProfile>,
-) {
-    let mut capturer = match KmsCapturer::new(&screen_name, encoder_profiles) {
-        Ok(capturer) => capturer,
-        Err(error) => {
-            let _ = device.send(Err(error));
+impl KmsCaptureLoop {
+    fn run(self) {
+        let Self {
+            screen_name,
+            command_receiver: commands,
+            device_sender: device,
+            frame_sender: frames,
+            overflow_frames,
+            enable_probing,
+            probe_interval,
+            encoder_profiles,
+        } = self;
+
+        let mut capturer = match KmsCapturer::new(&screen_name, encoder_profiles) {
+            Ok(capturer) => capturer,
+            Err(error) => {
+                let _ = device.send(Err(error));
+                return;
+            }
+        };
+
+        if device.send(Ok(capturer.gpu_device().clone())).is_err() {
             return;
         }
-    };
 
-    if device.send(Ok(capturer.gpu_device().clone())).is_err() {
-        return;
-    }
+        let mut probe_clock = enable_probing.then(|| VideoProbeClock::new(probe_interval));
+        let mut use_composed_fallback = false;
 
-    let mut probe_clock = enable_probing.then(|| VideoProbeClock::new(probe_interval));
-    let mut use_composed_fallback = false;
-
-    loop {
         loop {
-            match commands.try_recv() {
-                Ok(KmsCaptureCommand::UseComposedFallback) => use_composed_fallback = true,
-                Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-
-        let frame = if let Some(clock) = &mut probe_clock {
-            match capturer.capture_with_timing(use_composed_fallback) {
-                Ok((Some(frame), timing)) => {
-                    Ok(Some(captured_frame(frame, Some(clock.frame(timing)))))
+            loop {
+                match commands.try_recv() {
+                    Ok(KmsCaptureCommand::UseComposedFallback) => {
+                        use_composed_fallback = true;
+                    }
+                    Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
+                    Err(TryRecvError::Empty) => break,
                 }
-                Ok((None, _)) => Ok(None),
-                Err(error) => Err(error),
             }
-        } else {
-            capturer
-                .capture(use_composed_fallback)
-                .map(|frame| frame.map(|frame| captured_frame(frame, None)))
-        };
-        let capture_failed = frame.is_err();
 
-        let frame = match frame {
-            Ok(Some(frame)) => Ok(frame),
-            Ok(None) => continue,
-            Err(error) => Err(error),
-        };
+            let frame = if let Some(clock) = &mut probe_clock {
+                match capturer.capture_with_timing(use_composed_fallback) {
+                    Ok((Some(frame), timing)) => {
+                        Ok(Some(captured_frame(frame, Some(clock.frame(timing)))))
+                    }
+                    Ok((None, _)) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            } else {
+                capturer
+                    .capture(use_composed_fallback)
+                    .map(|frame| frame.map(|frame| captured_frame(frame, None)))
+            };
 
-        if !publish_latest_frame(&frames, &overflow_frames, frame) || capture_failed {
-            return;
+            let capture_failed = frame.is_err();
+
+            let frame = match frame {
+                Ok(Some(frame)) => Ok(frame),
+                Ok(None) => continue,
+                Err(error) => Err(error),
+            };
+
+            if !publish_latest_frame(&frames, &overflow_frames, frame) || capture_failed {
+                return;
+            }
         }
     }
 }

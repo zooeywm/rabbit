@@ -338,10 +338,7 @@ impl FramePipelineSource {
     fn subscribe(
         self: &Rc<Self>,
         key: FramePipelineSourceKey,
-        sources: &Rc<RefCell<HashMap<FramePipelineSourceKey, Weak<FramePipelineSource>>>>,
-        captured_screens: &Rc<RefCell<HashMap<ScreenId, Rc<CapturedScreenSource>>>>,
-        worker: &Rc<RefCell<Option<GpuWorker>>>,
-        frame_rate_demands: &Rc<RefCell<HashMap<ScreenId, HashMap<u64, FrameRate>>>>,
+        state: &GbmFramePipelineManagerState,
         frame_rate_demand_id: u64,
         frame_rate: FrameRate,
     ) -> GbmFramePipelineSubscription {
@@ -349,10 +346,10 @@ impl FramePipelineSource {
             key,
             source: Rc::clone(self),
             frames: self.frames.borrow_mut().subscribe(),
-            sources: Rc::downgrade(sources),
-            captured_screens: Rc::downgrade(captured_screens),
-            worker: Rc::downgrade(worker),
-            frame_rate_demands: Rc::downgrade(frame_rate_demands),
+            sources: Rc::downgrade(&state.sources),
+            captured_screens: Rc::downgrade(&state.captured_screens),
+            worker: Rc::downgrade(&state.worker),
+            frame_rate_demands: Rc::downgrade(&state.frame_rate_demands),
             frame_rate_demand_id,
             frame_rate_gate: SubscriptionFrameRateGate::new(frame_rate),
         }
@@ -471,15 +468,7 @@ impl GbmFramePipelineManagerState {
         };
         let demand_id = self.add_frame_rate_demand(key.screen_id, frame_rate)?;
 
-        Ok(Some(source.subscribe(
-            key,
-            &self.sources,
-            &self.captured_screens,
-            &self.worker,
-            &self.frame_rate_demands,
-            demand_id,
-            frame_rate,
-        )))
+        Ok(Some(source.subscribe(key, self, demand_id, frame_rate)))
     }
 
     fn insert_source(
@@ -493,15 +482,7 @@ impl GbmFramePipelineManagerState {
             .insert(key, Rc::downgrade(&source));
         let demand_id = self.add_frame_rate_demand(key.screen_id, frame_rate)?;
 
-        Ok(source.subscribe(
-            key,
-            &self.sources,
-            &self.captured_screens,
-            &self.worker,
-            &self.frame_rate_demands,
-            demand_id,
-            frame_rate,
-        ))
+        Ok(source.subscribe(key, self, demand_id, frame_rate))
     }
 
     fn add_frame_rate_demand(

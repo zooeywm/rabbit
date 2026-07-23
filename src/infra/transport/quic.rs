@@ -453,8 +453,7 @@ async fn recv_unreliable_batch(connection: &compio::quic::Connection) -> Receive
 }
 
 fn decode_unreliable_datagram(datagram: Bytes) -> eros::Result<TransportMessage> {
-    Ok(decode_tlv(datagram, Delivery::Unreliable)
-        .with_context(|| "Failed to decode QUIC datagram")?)
+    decode_tlv(datagram, Delivery::Unreliable).with_context(|| "Failed to decode QUIC datagram")
 }
 
 async fn recv_reliable_unordered(connection: &compio::quic::Connection) -> ReceiveResult {

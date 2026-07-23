@@ -113,19 +113,17 @@ impl TransportSend for TcpTransportSend {
         self.send_message(message)
     }
 
-    fn close(&self) -> impl Future<Output = ()> {
-        async move {
-            if !self.state.borrow().writer_available {
-                return;
-            }
-
-            let completion = UnsyncQueue::default();
-            self.commands.push(WriteCommand {
-                operation: WriteOperation::Close,
-                completion: completion.clone(),
-            });
-            let _ = completion.pop().await;
+    async fn close(&self) {
+        if !self.state.borrow().writer_available {
+            return;
         }
+
+        let completion = UnsyncQueue::default();
+        self.commands.push(WriteCommand {
+            operation: WriteOperation::Close,
+            completion: completion.clone(),
+        });
+        let _ = completion.pop().await;
     }
 }
 

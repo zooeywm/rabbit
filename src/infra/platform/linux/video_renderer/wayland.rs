@@ -448,11 +448,8 @@ impl WaylandVideoRenderer {
         if self.state.released_buffers.is_empty() {
             return Ok(());
         }
-        let released = self
-            .state
-            .released_buffers
-            .drain(..)
-            .collect::<HashSet<_>>();
+        let released = std::mem::take(&mut self.state.released_buffers);
+
         self.submitted.retain(|submitted| {
             if released.contains(&submitted.buffer.id()) {
                 submitted.buffer.destroy();

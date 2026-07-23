@@ -67,45 +67,33 @@ impl TransportSend for SessionTransportSend {
         }
     }
 
-    fn send_unreliable(
-        &self,
-        channel: TransportChannel,
-        payload: Bytes,
-    ) -> impl Future<Output = eros::Result<()>> {
-        async move {
-            match self {
-                Self::Quic(send) => send.send_unreliable(channel, payload).await,
-                Self::Tcp(send) => send.send_unreliable(channel, payload).await,
-            }
+    async fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
+        match self {
+            Self::Quic(send) => send.send_unreliable(channel, payload).await,
+            Self::Tcp(send) => send.send_unreliable(channel, payload).await,
         }
     }
 
-    fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
-        async move {
-            match self {
-                Self::Quic(send) => send.send(message).await,
-                Self::Tcp(send) => send.send(message).await,
-            }
+    async fn send(&self, message: TransportMessage) -> eros::Result<()> {
+        match self {
+            Self::Quic(send) => send.send(message).await,
+            Self::Tcp(send) => send.send(message).await,
         }
     }
 
-    fn close(&self) -> impl Future<Output = ()> {
-        async move {
-            match self {
-                Self::Quic(send) => send.close().await,
-                Self::Tcp(send) => send.close().await,
-            }
+    async fn close(&self) {
+        match self {
+            Self::Quic(send) => send.close().await,
+            Self::Tcp(send) => send.close().await,
         }
     }
 }
 
 impl TransportRecv for SessionTransportRecv {
-    fn recv(&mut self) -> impl Future<Output = eros::Result<Option<TransportMessage>>> {
-        async move {
-            match self {
-                Self::Quic(recv) => recv.recv().await,
-                Self::Tcp(recv) => recv.recv().await,
-            }
+    async fn recv(&mut self) -> eros::Result<Option<TransportMessage>> {
+        match self {
+            Self::Quic(recv) => recv.recv().await,
+            Self::Tcp(recv) => recv.recv().await,
         }
     }
 }
