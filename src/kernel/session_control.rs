@@ -3,7 +3,7 @@ use bytes::Bytes;
 use eros::Context;
 
 use crate::kernel::{
-    geometry::PixelSize,
+    geometry::{FrameRate, PixelSize},
     screen_configuration::{
         RemoteDisplayMode, RequestKeyFrame, ResolutionResult, ScreenResolutionOutcome,
         ScreenResolutionStatus, ScreenStreamRequest, ScreenStreamRequestId,
@@ -18,6 +18,7 @@ pub struct ScreenInfo {
     pub id: ScreenId,
     pub name: String,
     pub resolution: PixelSize,
+    pub frame_rate: FrameRate,
     pub layout: ScreenLayout,
 }
 
@@ -69,6 +70,12 @@ struct WirePixelSize {
 }
 
 #[derive(BinRead, BinWrite)]
+struct WireFrameRate {
+    numerator: u32,
+    denominator: u32,
+}
+
+#[derive(BinRead, BinWrite)]
 struct WireScreenRect {
     x: u32,
     y: u32,
@@ -89,6 +96,7 @@ struct WireScreenInfoRef<'a> {
     name_length: u16,
     name: &'a [u8],
     resolution: WirePixelSize,
+    frame_rate: WireFrameRate,
     layout: WireScreenLayout,
 }
 
@@ -100,6 +108,7 @@ struct WireScreenInfo {
     #[br(count = name_length)]
     name: Vec<u8>,
     resolution: WirePixelSize,
+    frame_rate: WireFrameRate,
     layout: WireScreenLayout,
 }
 
@@ -247,6 +256,15 @@ impl From<PixelSize> for WirePixelSize {
     }
 }
 
+impl From<FrameRate> for WireFrameRate {
+    fn from(frame_rate: FrameRate) -> Self {
+        Self {
+            numerator: frame_rate.numerator(),
+            denominator: frame_rate.denominator(),
+        }
+    }
+}
+
 impl From<ScreenRect> for WireScreenRect {
     fn from(rect: ScreenRect) -> Self {
         Self {
@@ -304,12 +322,15 @@ impl TryFrom<WireScreenInfo> for ScreenInfo {
     fn try_from(screen: WireScreenInfo) -> eros::Result<Self> {
         let name = String::from_utf8(screen.name)
             .with_context(|| format!("Failed to decode name for ScreenInfo {}", screen.id))?;
+        let frame_rate = FrameRate::new(screen.frame_rate.numerator, screen.frame_rate.denominator)
+            .with_context(|| format!("Failed to decode ScreenInfo {} frame rate", screen.id))?;
 
         Ok(Self {
             id: ScreenId::try_from(screen.id)
                 .with_context(|| format!("Failed to decode ScreenInfo {} screen ID", screen.id))?,
             name,
             resolution: screen.resolution.into(),
+            frame_rate,
             layout: screen.layout.into(),
         })
     }
@@ -693,6 +714,7 @@ fn write_screen_info(writer: &mut Cursor<Vec<u8>>, screen: &Screen) -> eros::Res
         name_length,
         name,
         resolution: screen.resolution.into(),
+        frame_rate: screen.frame_rate.into(),
         layout: screen.layout.into(),
     };
 
@@ -701,4 +723,88 @@ fn write_screen_info(writer: &mut Cursor<Vec<u8>>, screen: &Screen) -> eros::Res
         .with_context(|| format!("Failed to encode ScreenInfo {}", screen.id.0))?;
 
     Ok(())
+}
+
+// Focused test: cargo test kernel::session_control::tests --lib
+#[cfg(test)]
+mod tests {
+    use crate::kernel::{
+        geometry::{FrameRate, PixelSize},
+        screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
+        session_control::{
+            ControlMessage, OutgoingScreenList, ScreenInfo, WireFrameRate, WirePixelSize,
+            WireScreenInfo, WireScreenLayout, WireScreenRect, WireScreenTransform,
+        },
+        transport::TransportMessage,
+    };
+
+    #[test]
+    fn screen_list_round_trip_preserves_frame_rate() {
+        let expected =
+            FrameRate::new(143_855, 1_000).expect("Test screen frame rate should be valid");
+        let screens = [Screen {
+            id: ScreenId(2),
+            name: "HDMI-A-1".to_string(),
+            resolution: PixelSize {
+                width: 2560,
+                height: 1440,
+            },
+            frame_rate: expected,
+            layout: ScreenLayout {
+                rect: ScreenRect {
+                    x: 0,
+                    y: 0,
+                    width: 2560,
+                    height: 1440,
+                },
+                scale: 1.0,
+                transform: ScreenTransform::Normal,
+            },
+        }];
+        let message = TransportMessage::from(
+            OutgoingScreenList::try_from(screens.as_slice())
+                .expect("Screen list with a frame rate should encode"),
+        );
+
+        let ControlMessage::ScreenList(decoded) =
+            ControlMessage::try_from(message).expect("Screen list with a frame rate should decode")
+        else {
+            panic!("Decoded control message should be a screen list");
+        };
+
+        assert_eq!(decoded[0].frame_rate, expected);
+    }
+
+    #[test]
+    fn screen_info_rejects_invalid_frame_rate() {
+        let wire = WireScreenInfo {
+            id: 3,
+            name: b"eDP-1".to_vec(),
+            resolution: WirePixelSize {
+                width: 1920,
+                height: 1080,
+            },
+            frame_rate: WireFrameRate {
+                numerator: 0,
+                denominator: 1,
+            },
+            layout: WireScreenLayout {
+                rect: WireScreenRect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                scale: 1.0,
+                transform: WireScreenTransform::Normal,
+            },
+        };
+
+        let error = ScreenInfo::try_from(wire).expect_err("Zero frame rate should be rejected");
+
+        assert!(
+            format!("{error:?}").contains("Failed to decode ScreenInfo 3 frame rate"),
+            "Invalid frame rate error should identify the ScreenInfo boundary: {error:?}"
+        );
+    }
 }

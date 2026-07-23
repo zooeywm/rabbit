@@ -2,7 +2,7 @@ use eros::Context;
 use niri_ipc::{Request, Response, Transform as NiriTransform, socket::Socket};
 
 use crate::kernel::{
-    geometry::PixelSize,
+    geometry::{FrameRate, PixelSize},
     screen_manager::{
         Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
     },
@@ -62,6 +62,12 @@ impl NiriScreenLayoutManagerState {
                     output.name
                 )
             })?;
+            let frame_rate = FrameRate::new(mode.refresh_rate, 1_000).with_context(|| {
+                format!(
+                    "Niri returned an invalid current mode refresh rate for output {}: {} mHz",
+                    output.name, mode.refresh_rate
+                )
+            })?;
 
             mapped_outputs.push((
                 output.name,
@@ -70,6 +76,7 @@ impl NiriScreenLayoutManagerState {
                     width: u32::from(mode.width),
                     height: u32::from(mode.height),
                 },
+                frame_rate,
             ));
         }
 
@@ -77,17 +84,25 @@ impl NiriScreenLayoutManagerState {
             return Ok(Vec::new());
         }
 
-        let Some(min_x) = mapped_outputs.iter().map(|(_, logical, _)| logical.x).min() else {
+        let Some(min_x) = mapped_outputs
+            .iter()
+            .map(|(_, logical, _, _)| logical.x)
+            .min()
+        else {
             eros::bail!("Niri mapped output list became empty while calculating its layout");
         };
 
-        let Some(min_y) = mapped_outputs.iter().map(|(_, logical, _)| logical.y).min() else {
+        let Some(min_y) = mapped_outputs
+            .iter()
+            .map(|(_, logical, _, _)| logical.y)
+            .min()
+        else {
             eros::bail!("Niri mapped output list became empty while calculating its layout");
         };
 
         let mut mapped_screens = Vec::with_capacity(mapped_outputs.len());
 
-        for (name, logical, resolution) in mapped_outputs {
+        for (name, logical, resolution, frame_rate) in mapped_outputs {
             if !logical.scale.is_finite() || logical.scale <= 0.0 {
                 eros::bail!(
                     "Niri returned an invalid scale for screen \
@@ -107,6 +122,7 @@ impl NiriScreenLayoutManagerState {
             mapped_screens.push((
                 name,
                 resolution,
+                frame_rate,
                 ScreenLayout {
                     rect: ScreenRect {
                         x,
@@ -123,11 +139,11 @@ impl NiriScreenLayoutManagerState {
         // Maintain deterministic ordering for enumeration and primary-screen
         // fallback selection.
         mapped_screens.sort_by(|left, right| {
-            left.2
+            left.3
                 .rect
                 .x
-                .cmp(&right.2.rect.x)
-                .then_with(|| left.2.rect.y.cmp(&right.2.rect.y))
+                .cmp(&right.3.rect.x)
+                .then_with(|| left.3.rect.y.cmp(&right.3.rect.y))
                 .then_with(|| left.0.cmp(&right.0))
         });
 
@@ -137,7 +153,9 @@ impl NiriScreenLayoutManagerState {
 
         let mut screens = Vec::with_capacity(mapped_screens.len());
 
-        for (index, (name, resolution, layout)) in mapped_screens.into_iter().enumerate() {
+        for (index, (name, resolution, frame_rate, layout)) in
+            mapped_screens.into_iter().enumerate()
+        {
             let id =
                 u8::try_from(index).with_context(|| "Failed to assign a logical Niri screen ID")?;
 
@@ -146,6 +164,7 @@ impl NiriScreenLayoutManagerState {
                     .with_context(|| format!("Failed to validate Niri screen ID {id}"))?,
                 name,
                 resolution,
+                frame_rate,
                 layout,
             });
         }

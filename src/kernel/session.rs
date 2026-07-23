@@ -474,7 +474,7 @@ mod tests {
     };
 
     use crate::kernel::{
-        geometry::PixelSize,
+        geometry::{FrameRate, PixelSize},
         screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
         session::{
             SessionId, SessionRecv, SessionRole, SessionSend, VideoMessage, assemble_video_frame,
@@ -790,6 +790,8 @@ mod tests {
                 width: 2560,
                 height: 1600,
             },
+            frame_rate: FrameRate::new(120_000, 1_000)
+                .expect("Test screen frame rate should be valid"),
             layout: ScreenLayout {
                 rect: ScreenRect {
                     x: 0,
@@ -824,5 +826,7 @@ mod tests {
         assert_eq!(screens.len(), 1);
         assert_eq!(screens[0].id, ScreenId(2));
         assert_eq!(screens[0].name, "eDP-1");
+        assert_eq!(screens[0].frame_rate.numerator(), 120_000);
+        assert_eq!(screens[0].frame_rate.denominator(), 1_000);
     }
 }

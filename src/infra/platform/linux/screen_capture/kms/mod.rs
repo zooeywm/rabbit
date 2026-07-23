@@ -131,7 +131,7 @@ mod tests {
             },
         },
         kernel::{
-            geometry::PixelSize,
+            geometry::{FrameRate, PixelSize},
             screen_capture::ScreenCaptureManager,
             screen_manager::{
                 Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
@@ -240,6 +240,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
             },
+            frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
             layout: ScreenLayout {
                 rect: ScreenRect {
                     x: 0,

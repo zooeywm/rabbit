@@ -2288,6 +2288,7 @@ mod tests {
             id: ScreenId(0),
             name,
             resolution,
+            frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
             layout: ScreenLayout {
                 rect: ScreenRect {
                     x: 0,
