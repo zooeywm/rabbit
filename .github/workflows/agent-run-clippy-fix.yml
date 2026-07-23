@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -16,6 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -56,6 +60,7 @@ jobs:
       - name: Commit fixes
         run: |
           git rm .agent-trigger
+          git rm .agent-run-trigger
           git rm .github/workflows/agent-fix-clippy.yml
           git rm .github/workflows/agent-run-clippy-fix.yml
           git config user.name "OpenAI"
