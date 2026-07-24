@@ -1,0 +1,196 @@
+import { NavigationSection } from "../types.slint";
+
+export component Sidebar inherits Rectangle {
+    in property <string> local-protocol;
+    in property <string> local-port;
+    in property <bool> local-server-online;
+    in property <NavigationSection> active-section;
+    callback select-section(NavigationSection);
+
+    width: 188px;
+    background: #ffffff;
+    border-color: #e7e9ed;
+    border-width: 1px;
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding: 18px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            height: 38px;
+            spacing: 10px;
+
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 8px;
+                background: #087cf0;
+
+                Text {
+                    text: "R";
+                    color: #ffffff;
+                    font-size: 16px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: "Rabbit";
+                color: #171b22;
+                font-size: 15px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            height: 40px;
+            border-radius: 8px;
+            background: root.active-section == NavigationSection.remote-devices ? #eaf3ff : #ffffff;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+
+                Rectangle {
+                    width: 16px;
+                    vertical-stretch: 1;
+
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 4px;
+                        background: #0b7df1;
+
+                        Text {
+                            text: "+";
+                            color: #ffffff;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "Remote devices";
+                    color: root.active-section == NavigationSection.remote-devices ? #0b7df1 : #626b78;
+                    font-size: 13px;
+                    font-weight: root.active-section == NavigationSection.remote-devices ? 700 : 500;
+                    vertical-alignment: center;
+                }
+            }
+
+            TouchArea {
+                clicked => { root.select-section(NavigationSection.remote-devices); }
+            }
+        }
+
+        Rectangle {
+            height: 40px;
+            border-radius: 8px;
+            background: root.active-section == NavigationSection.this-device ? #eaf3ff : #ffffff;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 10px;
+
+                Rectangle {
+                    width: 16px;
+                    vertical-stretch: 1;
+
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 4px;
+                        background: root.active-section == NavigationSection.this-device ? #0b7df1 : #9aa1aa;
+
+                        Text {
+                            text: "−";
+                            color: #ffffff;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "This device";
+                    color: root.active-section == NavigationSection.this-device ? #0b7df1 : #626b78;
+                    font-size: 13px;
+                    font-weight: root.active-section == NavigationSection.this-device ? 700 : 500;
+                    vertical-alignment: center;
+                }
+            }
+
+            TouchArea {
+                clicked => { root.select-section(NavigationSection.this-device); }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        VerticalLayout {
+            spacing: 7px;
+
+            Text {
+                text: "LOCAL SERVER";
+                color: #939aa5;
+                font-size: 10px;
+                font-weight: 700;
+            }
+
+            HorizontalLayout {
+                spacing: 7px;
+
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: root.local-server-online ? #19b768 : #e54c57;
+                }
+
+                Text {
+                    text: root.local-server-online ? "Online" : "Offline";
+                    color: root.local-server-online ? #16a45d : #d9434e;
+                    font-size: 12px;
+                    font-weight: 700;
+                }
+            }
+
+            HorizontalLayout {
+                height: 22px;
+
+                Text {
+                    text: root.local-protocol;
+                    color: #8a919c;
+                    font-size: 12px;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                Text {
+                    text: root.local-port;
+                    color: #0b7df1;
+                    font-size: 12px;
+                    font-weight: 700;
+                }
+            }
+        }
+    }
+}

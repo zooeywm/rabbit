@@ -1,0 +1,39 @@
+export enum AppPage {
+    connect,
+    connecting,
+    connection-error,
+    requests,
+    connected,
+    stream-request,
+    streaming,
+    stream-error,
+}
+
+export enum NavigationSection {
+    remote-devices,
+    this-device,
+}
+
+export struct ConnectionRequestItem {
+    name: string,
+    address: string,
+}
+
+export struct ConnectedDeviceItem {
+    name: string,
+    address: string,
+    status: string,
+}
+
+export struct HostedScreenStreamItem {
+    device-name: string,
+    screen-name: string,
+}
+
+export struct RemoteScreenItem {
+    name: string,
+    original: string,
+    selected-width: string,
+    selected-height: string,
+    selected-frame-rate: string,
+}

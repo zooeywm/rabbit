@@ -1,0 +1,73 @@
+export component PersonIcon inherits Rectangle {
+    width: 46px;
+    height: 46px;
+    border-radius: 23px;
+    background: #e8f2ff;
+
+    Rectangle {
+        x: 18px;
+        y: 10px;
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: #0b7df1;
+    }
+
+    Rectangle {
+        x: 12px;
+        y: 24px;
+        width: 22px;
+        height: 13px;
+        border-radius: 7px;
+        background: #0b7df1;
+    }
+}
+
+export component ScreenIcon inherits Rectangle {
+    width: 48px;
+    height: 48px;
+    border-radius: 24px;
+    background: #e8f2ff;
+
+    Rectangle {
+        x: 11px;
+        y: 11px;
+        width: 26px;
+        height: 19px;
+        border-color: #0b7df1;
+        border-width: 2px;
+        border-radius: 2px;
+    }
+
+    Rectangle {
+        x: 22px;
+        y: 31px;
+        width: 4px;
+        height: 5px;
+        background: #0b7df1;
+    }
+
+    Rectangle {
+        x: 17px;
+        y: 36px;
+        width: 14px;
+        height: 2px;
+        background: #0b7df1;
+    }
+}
+
+export component ErrorIcon inherits Rectangle {
+    width: 56px;
+    height: 56px;
+    border-radius: 28px;
+    background: #ffe8ea;
+
+    Text {
+        text: "×";
+        color: #ef4753;
+        font-size: 32px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}

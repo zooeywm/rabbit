@@ -1,0 +1,77 @@
+export component Heading inherits Text {
+    color: #171b22;
+    font-size: 17px;
+    font-weight: 700;
+    vertical-alignment: center;
+}
+
+export component BodyText inherits Text {
+    color: #5e6672;
+    font-size: 13px;
+    vertical-alignment: center;
+}
+
+export component MutedText inherits Text {
+    color: #8a919c;
+    font-size: 12px;
+    vertical-alignment: center;
+}
+
+export component Card inherits Rectangle {
+    background: #ffffff;
+    border-color: #e8ebf0;
+    border-width: 1px;
+    border-radius: 10px;
+    drop-shadow-color: #140f172a;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 4px;
+}
+
+// Defines the video layout region. On Wayland this rectangle is covered by a
+// DMA-BUF subsurface; the Slint backend draws into the same region.
+export component VideoDisplaySurface inherits Rectangle {
+    background: #17191c;
+    border-radius: 10px;
+}
+
+export component OnlineStatus inherits HorizontalLayout {
+    in property <bool> online;
+    spacing: 7px;
+
+    Rectangle {
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: root.online ? #19b768 : #e54c57;
+    }
+
+    Text {
+        text: root.online ? "Online" : "Offline";
+        color: root.online ? #16a45d : #d9434e;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+}
+
+export component PageHeader inherits VerticalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+
+    height: 62px;
+    min-width: 0px;
+    spacing: 5px;
+
+    Text {
+        text: root.title;
+        color: #171b22;
+        font-size: 21px;
+        font-weight: 700;
+        vertical-alignment: center;
+    }
+
+    BodyText {
+        text: root.subtitle;
+        height: 22px;
+    }
+}

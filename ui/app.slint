@@ -5,510 +5,35 @@ import {
     ScrollView,
 } from "std-widgets.slint";
 
-export enum AppPage {
-    connect,
-    connecting,
-    connection-error,
-    requests,
-    connected,
-    stream-request,
-    streaming,
-    stream-error,
-}
-
-export enum NavigationSection {
-    remote-devices,
-    this-device,
-}
-
-export struct ConnectionRequestItem {
-    name: string,
-    address: string,
-}
-
-export struct ConnectedDeviceItem {
-    name: string,
-    address: string,
-    status: string,
-}
-
-export struct HostedScreenStreamItem {
-    device-name: string,
-    screen-name: string,
-}
-
-export struct RemoteScreenItem {
-    name: string,
-    original: string,
-    selected-width: string,
-    selected-height: string,
-    selected-frame-rate: string,
-}
-
-component Heading inherits Text {
-    color: #171b22;
-    font-size: 17px;
-    font-weight: 700;
-    vertical-alignment: center;
-}
-
-component BodyText inherits Text {
-    color: #5e6672;
-    font-size: 13px;
-    vertical-alignment: center;
-}
-
-component MutedText inherits Text {
-    color: #8a919c;
-    font-size: 12px;
-    vertical-alignment: center;
-}
-
-component Card inherits Rectangle {
-    background: #ffffff;
-    border-color: #e8ebf0;
-    border-width: 1px;
-    border-radius: 10px;
-    drop-shadow-color: #140f172a;
-    drop-shadow-blur: 14px;
-    drop-shadow-offset-y: 4px;
-}
-
-// Defines the video layout region. On Wayland this rectangle is covered by a
-// DMA-BUF subsurface; the Slint backend draws into the same region.
-component VideoDisplaySurface inherits Rectangle {
-    background: #17191c;
-    border-radius: 10px;
-}
-
-component PersonIcon inherits Rectangle {
-    width: 46px;
-    height: 46px;
-    border-radius: 23px;
-    background: #e8f2ff;
-
-    Rectangle {
-        x: 18px;
-        y: 10px;
-        width: 10px;
-        height: 10px;
-        border-radius: 5px;
-        background: #0b7df1;
-    }
-
-    Rectangle {
-        x: 12px;
-        y: 24px;
-        width: 22px;
-        height: 13px;
-        border-radius: 7px;
-        background: #0b7df1;
-    }
-}
-
-component ScreenIcon inherits Rectangle {
-    width: 48px;
-    height: 48px;
-    border-radius: 24px;
-    background: #e8f2ff;
-
-    Rectangle {
-        x: 11px;
-        y: 11px;
-        width: 26px;
-        height: 19px;
-        border-color: #0b7df1;
-        border-width: 2px;
-        border-radius: 2px;
-    }
-
-    Rectangle {
-        x: 22px;
-        y: 31px;
-        width: 4px;
-        height: 5px;
-        background: #0b7df1;
-    }
-
-    Rectangle {
-        x: 17px;
-        y: 36px;
-        width: 14px;
-        height: 2px;
-        background: #0b7df1;
-    }
-}
-
-component RemoteScreenCard inherits Card {
-    in property <RemoteScreenItem> screen;
-    in property <int> screen-index;
-    callback open-screen(int, string, string, string);
-
-    min-width: 260px;
-    height: 314px;
-
-    VerticalLayout {
-        padding: 16px;
-        spacing: 8px;
-
-        ScreenIcon { }
-
-        Heading {
-            text: root.screen.name;
-        }
-
-        BodyText {
-            text: root.screen.original;
-        }
-
-        Text {
-            text: "Select resolution";
-            color: #272b31;
-            font-size: 12px;
-            vertical-alignment: center;
-        }
-
-        HorizontalLayout {
-            height: 34px;
-            spacing: 8px;
-
-            width-input := LineEdit {
-                text: root.screen.selected-width;
-                input-type: InputType.number;
-                min-width: 0px;
-                horizontal-stretch: 1;
-            }
-
-            Text {
-                width: 10px;
-                text: "×";
-                color: #5e6672;
-                font-size: 13px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            height-input := LineEdit {
-                text: root.screen.selected-height;
-                input-type: InputType.number;
-                min-width: 0px;
-                horizontal-stretch: 1;
-            }
-        }
-
-        Text {
-            text: "Refresh rate (Hz)";
-            color: #272b31;
-            font-size: 12px;
-            vertical-alignment: center;
-        }
-
-        frame-rate-input := LineEdit {
-            text: root.screen.selected-frame-rate;
-            input-type: InputType.decimal;
-            min-width: 0px;
-        }
-
-        Rectangle {
-            height: 36px;
-            border-radius: 5px;
-            background: #d81e06;
-
-            Text {
-                text: "Open";
-                color: #ffffff;
-                font-size: 13px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            TouchArea {
-                clicked => {
-                    root.open-screen(
-                        root.screen-index,
-                        width-input.text,
-                        height-input.text,
-                        frame-rate-input.text,
-                    );
-                }
-            }
-        }
-    }
-}
-
-component RemoteScreenGrid inherits Rectangle {
-    in property <[RemoteScreenItem]> screens;
-    callback open-screen(int, string, string, string);
-
-    property <length> card-min-width: 260px;
-    property <length> card-preferred-width: 320px;
-    property <length> card-height: 314px;
-    property <length> card-spacing: 12px;
-    property <int> column-count: max(1, floor((root.width + root.card-spacing) / (root.card-preferred-width + root.card-spacing)));
-    property <int> row-count: root.screens.length == 0 ? 0 : floor((root.screens.length + root.column-count - 1) / root.column-count);
-    property <length> card-width: min(root.card-preferred-width, max(root.card-min-width, root.width));
-
-    height: root.row-count * root.card-height + max(0, root.row-count - 1) * root.card-spacing;
-
-    for screen[index] in root.screens: RemoteScreenCard {
-        x: mod(index, root.column-count) * (root.card-width + root.card-spacing);
-        y: floor(index / root.column-count) * (root.card-height + root.card-spacing);
-        width: root.card-width;
-        screen: screen;
-        screen-index: index;
-        open-screen(i, selected-width, selected-height, selected-frame-rate) => {
-            root.open-screen(i, selected-width, selected-height, selected-frame-rate);
-        }
-    }
-}
-
-component ErrorIcon inherits Rectangle {
-    width: 56px;
-    height: 56px;
-    border-radius: 28px;
-    background: #ffe8ea;
-
-    Text {
-        text: "×";
-        color: #ef4753;
-        font-size: 32px;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-}
-
-component OnlineStatus inherits HorizontalLayout {
-    in property <bool> online;
-    spacing: 7px;
-
-    Rectangle {
-        width: 8px;
-        height: 8px;
-        border-radius: 4px;
-        background: root.online ? #19b768 : #e54c57;
-    }
-
-    Text {
-        text: root.online ? "Online" : "Offline";
-        color: root.online ? #16a45d : #d9434e;
-        font-size: 12px;
-        font-weight: 600;
-        vertical-alignment: center;
-    }
-}
-
-component Sidebar inherits Rectangle {
-    in property <string> local-protocol;
-    in property <string> local-port;
-    in property <bool> local-server-online;
-    in property <NavigationSection> active-section;
-    callback select-section(NavigationSection);
-
-    width: 188px;
-    background: #ffffff;
-    border-color: #e7e9ed;
-    border-width: 1px;
-
-    VerticalLayout {
-        width: 100%;
-        height: 100%;
-        padding: 18px;
-        spacing: 12px;
-
-        HorizontalLayout {
-            height: 38px;
-            spacing: 10px;
-
-            Rectangle {
-                width: 28px;
-                height: 28px;
-                border-radius: 8px;
-                background: #087cf0;
-
-                Text {
-                    text: "R";
-                    color: #ffffff;
-                    font-size: 16px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-
-            Text {
-                text: "Rabbit";
-                color: #171b22;
-                font-size: 15px;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-        }
-
-        Rectangle {
-            height: 40px;
-            border-radius: 8px;
-            background: root.active-section == NavigationSection.remote-devices ? #eaf3ff : #ffffff;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 10px;
-
-                Rectangle {
-                    width: 16px;
-                    vertical-stretch: 1;
-
-                    Rectangle {
-                        y: (parent.height - self.height) / 2;
-                        width: 16px;
-                        height: 16px;
-                        border-radius: 5px;
-                        background: #0b7df1;
-
-                        Rectangle {
-                            x: 4px;
-                            y: 7px;
-                            width: 8px;
-                            height: 2px;
-                            background: #ffffff;
-                        }
-
-                        Rectangle {
-                            x: 7px;
-                            y: 4px;
-                            width: 2px;
-                            height: 8px;
-                            background: #ffffff;
-                        }
-                    }
-                }
-
-                Text {
-                    text: "Remote devices";
-                    color: root.active-section == NavigationSection.remote-devices ? #087cf0 : #656d78;
-                    font-size: 13px;
-                    font-weight: root.active-section == NavigationSection.remote-devices ? 600 : 400;
-                    vertical-alignment: center;
-                }
-            }
-
-            TouchArea {
-                clicked => { root.select-section(NavigationSection.remote-devices); }
-            }
-        }
-
-        Rectangle {
-            height: 40px;
-            border-radius: 8px;
-            background: root.active-section == NavigationSection.this-device ? #eaf3ff : #ffffff;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 10px;
-
-                Rectangle {
-                    width: 16px;
-                    vertical-stretch: 1;
-
-                    Rectangle {
-                        y: (parent.height - self.height) / 2;
-                        width: 16px;
-                        height: 16px;
-                        border-radius: 5px;
-                        background: #8b929c;
-
-                        Rectangle {
-                            x: 4px;
-                            y: 4px;
-                            width: 8px;
-                            height: 2px;
-                            background: #ffffff;
-                        }
-
-                        Rectangle {
-                            x: 4px;
-                            y: 8px;
-                            width: 6px;
-                            height: 2px;
-                            background: #ffffff;
-                        }
-                    }
-                }
-
-                Text {
-                    text: "This device";
-                    color: root.active-section == NavigationSection.this-device ? #087cf0 : #656d78;
-                    font-size: 13px;
-                    font-weight: root.active-section == NavigationSection.this-device ? 600 : 400;
-                    vertical-alignment: center;
-                }
-            }
-
-            TouchArea {
-                clicked => { root.select-section(NavigationSection.this-device); }
-            }
-        }
-
-        Rectangle {
-            vertical-stretch: 1;
-        }
-
-        VerticalLayout {
-            spacing: 5px;
-
-            MutedText {
-                text: "LOCAL SERVER";
-                font-size: 10px;
-                font-weight: 600;
-            }
-
-            OnlineStatus {
-                online: root.local-server-online;
-                height: 20px;
-            }
-
-            HorizontalLayout {
-                height: 24px;
-                spacing: 6px;
-                MutedText {
-                    text: root.local-protocol;
-                }
-
-                Text {
-                    text: root.local-port;
-                    color: #087cf0;
-                    font-size: 14px;
-                    font-weight: 700;
-                    vertical-alignment: center;
-                }
-            }
-        }
-    }
-}
-
-component PageHeader inherits VerticalLayout {
-    in property <string> title;
-    in property <string> subtitle;
-
-    height: 62px;
-    min-width: 0px;
-    spacing: 5px;
-
-    Text {
-        text: root.title;
-        color: #171b22;
-        font-size: 21px;
-        font-weight: 700;
-        vertical-alignment: center;
-    }
-
-    BodyText {
-        text: root.subtitle;
-        height: 22px;
-    }
-}
+import {
+    AppPage,
+    ConnectedDeviceItem,
+    ConnectionRequestItem,
+    HostedScreenStreamItem,
+    NavigationSection,
+    RemoteScreenItem,
+} from "./types.slint";
+import {
+    BodyText,
+    Card,
+    Heading,
+    MutedText,
+    OnlineStatus,
+    PageHeader,
+    VideoDisplaySurface,
+} from "./components/common.slint";
+import { ErrorIcon, PersonIcon } from "./components/icons.slint";
+import { Sidebar } from "./components/sidebar.slint";
+import { ConnectedPage } from "./pages/connected.slint";
+
+export {
+    AppPage,
+    ConnectedDeviceItem,
+    ConnectionRequestItem,
+    HostedScreenStreamItem,
+    NavigationSection,
+    RemoteScreenItem,
+}from "./types.slint";
 
 export component RabbitWindow inherits Window {
     title: "Rabbit";
@@ -602,358 +127,263 @@ export component RabbitWindow inherits Window {
                     horizontal-stretch: 1;
                     vertical-stretch: 1;
 
-                if root.page == AppPage.connect: VerticalLayout {
-                    width: content-area.width;
-                    height: content-area.height;
-                    spacing: 16px;
+                    if root.page == AppPage.connect: VerticalLayout {
+                        width: content-area.width;
+                        height: content-area.height;
+                        spacing: 16px;
 
-                    Card {
-                        height: 76px;
-
-                        HorizontalLayout {
-                            padding: 14px;
-                            spacing: 10px;
-
-                            address-input := LineEdit {
-                                text <=> root.direct-address;
-                                placeholder-text: "IP address, hostname, or either with a port";
-                                horizontal-stretch: 1;
-                                accepted => { root.connect(address-input.text); }
-                            }
-
-                            Button {
-                                text: "Connect";
-                                primary: true;
-                                clicked => { root.connect(address-input.text); }
-                            }
-                        }
-                    }
-
-                    Card {
-                        height: 96px;
-
-                        HorizontalLayout {
-                            padding: 17px;
-                            spacing: 13px;
-
-                            OnlineStatus {
-                                online: root.local-server-online;
-                                width: 74px;
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 4px;
-                                Heading {
-                                    text: "Local server";
-                                }
-
-                                BodyText {
-                                    text: root.local-server-online
-                                        ? "Ready to receive direct connection requests"
-                                        : "The direct connection listener has stopped";
-                                }
-                            }
-
-                            Rectangle {
-                                horizontal-stretch: 1;
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 3px;
-                                MutedText {
-                                    text: root.local-protocol + " PORT";
-                                    horizontal-alignment: right;
-                                }
-
-                                Text {
-                                    text: root.local-port;
-                                    color: #087cf0;
-                                    font-size: 18px;
-                                    font-weight: 700;
-                                    horizontal-alignment: right;
-                                }
-                            }
-                        }
-                    }
-
-                    if root.status-text != "": Rectangle {
-                        height: 42px;
-                        background: #fff1f2;
-                        border-color: #ffd7da;
-                        border-width: 1px;
-                        border-radius: 8px;
-
-                        Text {
-                            x: 13px;
-                            width: parent.width - 26px;
-                            text: root.status-text;
-                            color: #c73c47;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    Rectangle {
-                        vertical-stretch: 1;
-                    }
-                }
-
-                if root.page == AppPage.connecting || root.page == AppPage.stream-request: Card {
-                    width: content-area.width;
-                    height: content-area.height;
-
-                    VerticalLayout {
-                        alignment: center;
-                        padding: 50px;
-                        spacing: 18px;
-
-                        ProgressIndicator {
-                            height: 3px;
-                            horizontal-stretch: 1;
-                            indeterminate: true;
-                        }
-
-                        Heading {
-                            text: root.status-text;
-                            horizontal-alignment: center;
-                        }
-
-                        BodyText {
-                            text: root.page == AppPage.connecting
-                                ? "The remote device must accept this connection request."
-                                : "The remote screen will open when its first frame arrives.";
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-
-                if root.page == AppPage.connection-error: Card {
-                    width: content-area.width;
-                    height: content-area.height;
-
-                    VerticalLayout {
-                        alignment: center;
-                        padding: 48px;
-                        spacing: 15px;
-
-                        ErrorIcon { }
-
-                        Heading {
-                            text: root.page-title;
-                            horizontal-alignment: center;
-                        }
-
-                        BodyText {
-                            text: root.status-text;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
-
-                        Rectangle {
-                            height: 2px;
-                        }
-
-                        Button {
-                            text: "Try again";
-                            primary: true;
-                            clicked => { root.retry-connect(); }
-                        }
-                    }
-                }
-
-                if root.page == AppPage.requests: ScrollView {
-                    width: content-area.width;
-                    height: content-area.height;
-
-                    VerticalLayout {
-                        spacing: 12px;
-
-                        for request[index] in root.connection-requests: Card {
-                            height: 112px;
+                        Card {
+                            height: 76px;
 
                             HorizontalLayout {
-                                padding: 16px;
-                                spacing: 14px;
+                                padding: 14px;
+                                spacing: 10px;
 
-                                PersonIcon { }
+                                address-input := LineEdit {
+                                    text <=> root.direct-address;
+                                    placeholder-text: "IP address, hostname, or either with a port";
+                                    horizontal-stretch: 1;
+                                    accepted => { root.connect(address-input.text); }
+                                }
+
+                                Button {
+                                    text: "Connect";
+                                    primary: true;
+                                    clicked => { root.connect(address-input.text); }
+                                }
+                            }
+                        }
+
+                        Card {
+                            height: 96px;
+
+                            HorizontalLayout {
+                                padding: 17px;
+                                spacing: 13px;
+
+                                OnlineStatus {
+                                    online: root.local-server-online;
+                                    width: 74px;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    Heading {
+                                        text: "Local server";
+                                    }
+
+                                    BodyText {
+                                        text: root.local-server-online
+                                            ? "Ready to receive direct connection requests"
+                                            : "The direct connection listener has stopped";
+                                    }
+                                }
+
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
 
                                 VerticalLayout {
                                     alignment: center;
                                     spacing: 3px;
-                                    Heading {
-                                        text: request.name;
-                                    }
-
-                                    BodyText {
-                                        text: request.address;
-                                    }
-
                                     MutedText {
-                                        text: "Requests access to this device";
+                                        text: root.local-protocol + " PORT";
+                                        horizontal-alignment: right;
+                                    }
+
+                                    Text {
+                                        text: root.local-port;
+                                        color: #087cf0;
+                                        font-size: 18px;
+                                        font-weight: 700;
+                                        horizontal-alignment: right;
                                     }
                                 }
+                            }
+                        }
 
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
+                        if root.status-text != "": Rectangle {
+                            height: 42px;
+                            background: #fff1f2;
+                            border-color: #ffd7da;
+                            border-width: 1px;
+                            border-radius: 8px;
 
-                                Button {
-                                    text: "Reject";
-                                    clicked => { root.decide-request(index, false); }
-                                }
+                            Text {
+                                x: 13px;
+                                width: parent.width - 26px;
+                                text: root.status-text;
+                                color: #c73c47;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                vertical-alignment: center;
+                            }
+                        }
 
-                                Button {
-                                    text: "Accept";
-                                    primary: true;
-                                    clicked => { root.decide-request(index, true); }
+                        Rectangle {
+                            vertical-stretch: 1;
+                        }
+                    }
+
+                    if root.page == AppPage.connecting || root.page == AppPage.stream-request: Card {
+                        width: content-area.width;
+                        height: content-area.height;
+
+                        VerticalLayout {
+                            alignment: center;
+                            padding: 50px;
+                            spacing: 18px;
+
+                            ProgressIndicator {
+                                height: 3px;
+                                horizontal-stretch: 1;
+                                indeterminate: true;
+                            }
+
+                            Heading {
+                                text: root.status-text;
+                                horizontal-alignment: center;
+                            }
+
+                            BodyText {
+                                text: root.page == AppPage.connecting
+                                    ? "The remote device must accept this connection request."
+                                    : "The remote screen will open when its first frame arrives.";
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    if root.page == AppPage.connection-error: Card {
+                        width: content-area.width;
+                        height: content-area.height;
+
+                        VerticalLayout {
+                            alignment: center;
+                            padding: 48px;
+                            spacing: 15px;
+
+                            ErrorIcon { }
+
+                            Heading {
+                                text: root.page-title;
+                                horizontal-alignment: center;
+                            }
+
+                            BodyText {
+                                text: root.status-text;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+
+                            Rectangle {
+                                height: 2px;
+                            }
+
+                            Button {
+                                text: "Try again";
+                                primary: true;
+                                clicked => { root.retry-connect(); }
+                            }
+                        }
+                    }
+
+                    if root.page == AppPage.requests: ScrollView {
+                        width: content-area.width;
+                        height: content-area.height;
+
+                        VerticalLayout {
+                            spacing: 12px;
+
+                            for request[index] in root.connection-requests: Card {
+                                height: 112px;
+
+                                HorizontalLayout {
+                                    padding: 16px;
+                                    spacing: 14px;
+
+                                    PersonIcon { }
+
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 3px;
+                                        Heading {
+                                            text: request.name;
+                                        }
+
+                                        BodyText {
+                                            text: request.address;
+                                        }
+
+                                        MutedText {
+                                            text: "Requests access to this device";
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Button {
+                                        text: "Reject";
+                                        clicked => { root.decide-request(index, false); }
+                                    }
+
+                                    Button {
+                                        text: "Accept";
+                                        primary: true;
+                                        clicked => { root.decide-request(index, true); }
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                if root.page == AppPage.connected: connected-page := Rectangle {
-                    width: content-area.width;
-                    height: content-area.height;
-                    clip: true;
+                    if root.page == AppPage.connected: ConnectedPage {
+                        width: content-area.width;
+                        height: content-area.height;
+                        section: root.section;
+                        local-protocol: root.local-protocol;
+                        local-port: root.local-port;
+                        local-server-online: root.local-server-online;
+                        stream-settings-error: root.stream-settings-error;
+                        connected-devices: root.connected-devices;
+                        hosted-screen-streams: root.hosted-screen-streams;
+                        remote-screens: root.remote-screens;
+                        disconnect-remote-session() => { root.disconnect-remote-session(); }
+                        stop-hosted-screen-stream(index) => { root.stop-hosted-screen-stream(index); }
+                        disconnect-device(index) => { root.disconnect-device(index); }
+                        open-screen(index, selected-width, selected-height, selected-frame-rate) => {
+                            root.open-screen(index, selected-width, selected-height, selected-frame-rate);
+                        }
+                    }
 
-                    connected-scroll := ScrollView {
-                        viewport-width: connected-page.width;
-                        min-width: 0px;
-                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    streaming-page := VerticalLayout {
+                        visible: root.page == AppPage.streaming;
+                        width: content-area.width;
+                        height: content-area.height;
+                        spacing: root.video-fill-window-active ? 0px : 10px;
 
-                        VerticalLayout {
-                            width: connected-page.width;
-                            spacing: 14px;
+                        HorizontalLayout {
+                            visible: !root.video-fill-window-active;
+                            height: 34px;
+                            spacing: 8px;
 
-                            if root.section == NavigationSection.this-device
-                                && root.connected-devices.length == 0
-                                && root.hosted-screen-streams.length == 0: Card {
-                            height: 108px;
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: 7px;
-
-                                OnlineStatus {
-                                    online: root.local-server-online;
-                                    height: 20px;
-                                }
-
-                                BodyText {
-                                    text: root.local-server-online
-                                        ? "Listening for incoming connections on " + root.local-protocol + " " + root.local-port
-                                        : "The local connection listener has stopped";
-                                    horizontal-alignment: center;
-                                    wrap: word-wrap;
-                                }
+                            Rectangle {
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                background: #19b768;
                             }
-                        }
 
-                            if root.connected-devices.length > 0: Heading {
-                            text: "Devices accessing this device";
-                            height: 28px;
-                        }
-
-                            for device[index] in root.connected-devices: Card {
-                            height: 92px;
-
-                            HorizontalLayout {
-                                padding: 16px;
-                                spacing: 14px;
-
-                                PersonIcon { }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 4px;
-                                    Heading {
-                                        text: device.name;
-                                    }
-
-                                    BodyText {
-                                        text: device.address;
-                                    }
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                HorizontalLayout {
-                                    width: 92px;
-                                    spacing: 7px;
-                                    Rectangle {
-                                        width: 8px;
-                                        height: 8px;
-                                        border-radius: 4px;
-                                        background: #19b768;
-                                    }
-
-                                    Text {
-                                        text: device.status;
-                                        color: #16a45d;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                    }
-                                }
-
-                                Button {
-                                    text: "Disconnect";
-                                    clicked => { root.disconnect-device(index); }
-                                }
-                            }
-                        }
-
-                            if root.hosted-screen-streams.length > 0: Heading {
-                            text: "Outgoing screen streams";
-                            height: 28px;
-                        }
-
-                            for stream[index] in root.hosted-screen-streams: Card {
-                            height: 88px;
-
-                            HorizontalLayout {
-                                padding: 16px;
-                                spacing: 14px;
-
-                                ScreenIcon { }
-
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: 4px;
-
-                                    Heading {
-                                        text: stream.screen-name;
-                                    }
-
-                                    BodyText {
-                                        text: "Sending to " + stream.device-name;
-                                    }
-                                }
-
-                                Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                Button {
-                                    text: "Stop streaming";
-                                    clicked => { root.stop-hosted-screen-stream(index); }
-                                }
-                            }
-                        }
-
-                            if root.remote-screens.length > 0: HorizontalLayout {
-                            height: 28px;
-                            min-width: 0px;
-
-                            Heading {
-                                text: "Remote screens";
+                            Text {
+                                text: "Streaming";
+                                color: #16a45d;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
                             }
 
                             Rectangle {
@@ -961,138 +391,55 @@ export component RabbitWindow inherits Window {
                             }
 
                             Button {
-                                text: "Disconnect";
-                                clicked => { root.disconnect-remote-session(); }
+                                text: "Fill window";
+                                clicked => { root.video-fill-window = true; }
+                            }
+
+                            Button {
+                                text: "Stop screen";
+                                clicked => { root.stop-stream(); }
                             }
                         }
 
-                            if root.remote-screens.length > 0: RemoteScreenGrid {
-                            width: connected-scroll.visible-width;
-                            screens: root.remote-screens;
-                            open-screen(i, selected-width, selected-height, selected-frame-rate) => {
-                                root.open-screen(i, selected-width, selected-height, selected-frame-rate);
-                            }
+                        video-surface := VideoDisplaySurface {
+                            width: 100%;
+                            vertical-stretch: 1;
+                            border-radius: root.video-fill-window-active ? 0px : 10px;
                         }
+                    }
 
-                            if root.stream-settings-error != "": Rectangle {
-                                height: 42px;
-                                background: #fff1f2;
-                                border-color: #ffd7da;
-                                border-width: 1px;
-                                border-radius: 7px;
+                    if root.page == AppPage.stream-error: Card {
+                        width: content-area.width;
+                        height: content-area.height;
 
-                                Text {
-                                    x: 14px;
-                                    width: parent.width - 28px;
-                                    text: root.stream-settings-error;
-                                    color: #c73c47;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                    vertical-alignment: center;
-                                }
+                        VerticalLayout {
+                            alignment: center;
+                            padding: 48px;
+                            spacing: 15px;
+
+                            ErrorIcon { }
+
+                            Heading {
+                                text: "Screen stream unavailable";
+                                horizontal-alignment: center;
                             }
 
-                            if root.remote-screens.length > 0: Rectangle {
-                                height: 42px;
-                                background: #edf6ff;
-                                border-color: #c9e2ff;
-                                border-width: 1px;
-                                border-radius: 7px;
+                            BodyText {
+                                text: root.status-text;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
 
-                                Text {
-                                    x: 14px;
-                                    width: parent.width - 28px;
-                                    text: "ⓘ  The selected resolution and refresh rate will be applied for this session only.";
-                                    color: #4389d4;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                    vertical-alignment: center;
-                                }
+                            Rectangle {
+                                height: 2px;
+                            }
+
+                            Button {
+                                text: "Stop and return";
+                                clicked => { root.stop-stream(); }
                             }
                         }
                     }
-                }
-
-                streaming-page := VerticalLayout {
-                    visible: root.page == AppPage.streaming;
-                    width: content-area.width;
-                    height: content-area.height;
-                    spacing: root.video-fill-window-active ? 0px : 10px;
-
-                    HorizontalLayout {
-                        visible: !root.video-fill-window-active;
-                        height: 34px;
-                        spacing: 8px;
-
-                        Rectangle {
-                            width: 8px;
-                            height: 8px;
-                            border-radius: 4px;
-                            background: #19b768;
-                        }
-
-                        Text {
-                            text: "Streaming";
-                            color: #16a45d;
-                            font-size: 12px;
-                            font-weight: 600;
-                            vertical-alignment: center;
-                        }
-
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
-
-                        Button {
-                            text: "Fill window";
-                            clicked => { root.video-fill-window = true; }
-                        }
-
-                        Button {
-                            text: "Stop screen";
-                            clicked => { root.stop-stream(); }
-                        }
-                    }
-
-                    video-surface := VideoDisplaySurface {
-                        width: 100%;
-                        vertical-stretch: 1;
-                        border-radius: root.video-fill-window-active ? 0px : 10px;
-                    }
-                }
-
-                if root.page == AppPage.stream-error: Card {
-                    width: content-area.width;
-                    height: content-area.height;
-
-                    VerticalLayout {
-                        alignment: center;
-                        padding: 48px;
-                        spacing: 15px;
-
-                        ErrorIcon { }
-
-                        Heading {
-                            text: "Screen stream unavailable";
-                            horizontal-alignment: center;
-                        }
-
-                        BodyText {
-                            text: root.status-text;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
-
-                        Rectangle {
-                            height: 2px;
-                        }
-
-                        Button {
-                            text: "Stop and return";
-                            clicked => { root.stop-stream(); }
-                        }
-                    }
-                }
                 }
             }
         }

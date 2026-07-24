@@ -1,0 +1,220 @@
+import { Button, ScrollView } from "std-widgets.slint";
+
+import {
+    ConnectedDeviceItem,
+    HostedScreenStreamItem,
+    NavigationSection,
+    RemoteScreenItem,
+} from "../types.slint";
+import { BodyText, Card, Heading, OnlineStatus } from "../components/common.slint";
+import { PersonIcon, ScreenIcon } from "../components/icons.slint";
+import { RemoteScreenGrid } from "../components/remote-screen.slint";
+
+export component ConnectedPage inherits Rectangle {
+    in property <NavigationSection> section;
+    in property <string> local-protocol;
+    in property <string> local-port;
+    in property <bool> local-server-online;
+    in property <string> stream-settings-error;
+    in property <[ConnectedDeviceItem]> connected-devices;
+    in property <[HostedScreenStreamItem]> hosted-screen-streams;
+    in property <[RemoteScreenItem]> remote-screens;
+
+    callback disconnect-remote-session();
+    callback stop-hosted-screen-stream(int);
+    callback disconnect-device(int);
+    callback open-screen(int, string, string, string);
+
+    clip: true;
+
+    connected-scroll := ScrollView {
+        viewport-width: root.width;
+        min-width: 0px;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+        VerticalLayout {
+            width: root.width;
+            spacing: 14px;
+
+            if root.section == NavigationSection.this-device
+                && root.connected-devices.length == 0
+                && root.hosted-screen-streams.length == 0: Card {
+                height: 108px;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 7px;
+
+                    OnlineStatus {
+                        online: root.local-server-online;
+                        height: 20px;
+                    }
+
+                    BodyText {
+                        text: root.local-server-online
+                            ? "Listening for incoming connections on " + root.local-protocol + " " + root.local-port
+                            : "The local connection listener has stopped";
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            if root.connected-devices.length > 0: Heading {
+                text: "Devices accessing this device";
+                height: 28px;
+            }
+
+            for device[index] in root.connected-devices: Card {
+                height: 92px;
+
+                HorizontalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+
+                    PersonIcon { }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        Heading {
+                            text: device.name;
+                        }
+
+                        BodyText {
+                            text: device.address;
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    HorizontalLayout {
+                        width: 92px;
+                        spacing: 7px;
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: #19b768;
+                        }
+
+                        Text {
+                            text: device.status;
+                            color: #16a45d;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Button {
+                        text: "Disconnect";
+                        clicked => { root.disconnect-device(index); }
+                    }
+                }
+            }
+
+            if root.hosted-screen-streams.length > 0: Heading {
+                text: "Outgoing screen streams";
+                height: 28px;
+            }
+
+            for stream[index] in root.hosted-screen-streams: Card {
+                height: 88px;
+
+                HorizontalLayout {
+                    padding: 16px;
+                    spacing: 14px;
+
+                    ScreenIcon { }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 4px;
+
+                        Heading {
+                            text: stream.screen-name;
+                        }
+
+                        BodyText {
+                            text: "Sending to " + stream.device-name;
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+
+                    Button {
+                        text: "Stop streaming";
+                        clicked => { root.stop-hosted-screen-stream(index); }
+                    }
+                }
+            }
+
+            if root.remote-screens.length > 0: HorizontalLayout {
+                height: 28px;
+                min-width: 0px;
+
+                Heading {
+                    text: "Remote screens";
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    text: "Disconnect";
+                    clicked => { root.disconnect-remote-session(); }
+                }
+            }
+
+            if root.remote-screens.length > 0: RemoteScreenGrid {
+                width: connected-scroll.visible-width;
+                screens: root.remote-screens;
+                open-screen(i, selected-width, selected-height, selected-frame-rate) => {
+                    root.open-screen(i, selected-width, selected-height, selected-frame-rate);
+                }
+            }
+
+            if root.stream-settings-error != "": Rectangle {
+                height: 42px;
+                background: #fff1f2;
+                border-color: #ffd7da;
+                border-width: 1px;
+                border-radius: 7px;
+
+                Text {
+                    x: 14px;
+                    width: parent.width - 28px;
+                    text: root.stream-settings-error;
+                    color: #c73c47;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+            }
+
+            if root.remote-screens.length > 0: Rectangle {
+                height: 42px;
+                background: #edf6ff;
+                border-color: #c9e2ff;
+                border-width: 1px;
+                border-radius: 7px;
+
+                Text {
+                    x: 14px;
+                    width: parent.width - 28px;
+                    text: "ⓘ  The selected resolution and refresh rate will be applied for this session only.";
+                    color: #4389d4;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
