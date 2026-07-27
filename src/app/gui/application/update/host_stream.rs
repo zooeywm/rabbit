@@ -8,6 +8,9 @@ use crate::app::{
         message::{MessageSender, RootMessage},
     },
     platform::ApplicationStack,
+    runtime::host_stream_lifecycle::{
+        ScreenStreamFinishEffect, apply_host_stop_screen_stream, apply_screen_stream_finished,
+    },
 };
 
 impl<Stack> RootApplication<Stack>
@@ -124,17 +127,17 @@ where
                 else {
                     return Ok(false);
                 };
-                let is_current = session
-                    .screen_streams
-                    .get(&screen_id)
-                    .is_some_and(|stream| stream.id == stream_id);
-
-                if !is_current {
+                let session_closed_normally = session.send.is_closed_normally();
+                let effect = apply_screen_stream_finished(
+                    &mut session.screen_streams,
+                    screen_id,
+                    stream_id,
+                    result.is_err(),
+                    session_closed_normally,
+                );
+                if effect == ScreenStreamFinishEffect::Stale {
                     return Ok(false);
                 }
-
-                let session_closed_normally = session.send.is_closed_normally();
-                session.screen_streams.remove(&screen_id);
 
                 match result {
                     Ok(()) => info!(
@@ -196,7 +199,7 @@ where
                 else {
                     return Ok(false);
                 };
-                session.screen_streams.remove(&screen_id);
+                apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
                 info!(
                     event = "host_screen_stream_stopped",
                     session_id = session_id.0,

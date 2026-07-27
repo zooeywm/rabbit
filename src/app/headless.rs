@@ -18,6 +18,11 @@ use crate::{
         runtime::{
             host_control::{HostControlDecision, classify_host_session_message},
             host_stream_launch::launch_host_stream,
+            host_stream_lifecycle::{
+                ScreenStreamFinishEffect, apply_host_stop_screen_stream,
+                apply_screen_stream_finished,
+            },
+            session_lifecycle::{ReconnectEligibility, SessionTimeoutPolicy, evaluate_reconnect},
         },
         services::host_stream::HostStreamPlan,
     },
@@ -91,6 +96,7 @@ where
 
     let messages = UnsyncQueue::<HeadlessMessage>::default();
     let sender = messages.clone();
+    let timeout_policy = SessionTimeoutPolicy::default();
 
     let listener = connection_endpoint.clone();
     let listener_sender = sender.clone();
@@ -122,6 +128,7 @@ where
     );
 
     loop {
+        apply_headless_timeouts(&mut model, &timeout_policy);
         match messages.pop().await {
             HeadlessMessage::ListenerFailed(error) => {
                 return Err(error).context("Headless connection listener stopped");
@@ -146,12 +153,15 @@ where
                     .iter_mut()
                     .find(|session| session.send.id() == id)
                 {
-                    let current = session
-                        .screen_streams
-                        .get(&screen_id)
-                        .is_some_and(|stream| stream.id == stream_id);
-                    if current {
-                        session.screen_streams.remove(&screen_id);
+                    let closed_normally = session.send.is_closed_normally();
+                    let effect = apply_screen_stream_finished(
+                        &mut session.screen_streams,
+                        screen_id,
+                        stream_id,
+                        result.is_err(),
+                        closed_normally,
+                    );
+                    if effect != ScreenStreamFinishEffect::Stale {
                         match result {
                             Ok(()) => info!(
                                 session_id = id.0,
@@ -239,9 +249,25 @@ where
         .context("Failed to send headless screen list")?;
 
     let key = SessionKey::new(remote, SessionRole::Host);
-    if model.has_session(&key) {
+    let existing_phase = model.session_phase_for_key(&key);
+    if evaluate_reconnect(existing_phase) == ReconnectEligibility::Denied {
         send.close().await;
         return Ok(());
+    }
+    if let Some(crate::app::model::SessionPhase::Draining) = existing_phase {
+        if let Some(old_id) = model
+            .sessions
+            .iter()
+            .find(|session| session.key == key)
+            .map(|session| session.send.id())
+        {
+            info!(
+                event = "headless_session_reconnect_supersede",
+                session_id = old_id.0,
+                "Superseding draining headless session for reconnect"
+            );
+            model.remove_session(old_id);
+        }
     }
 
     let mut running = RunningSession::new(
@@ -256,6 +282,28 @@ where
         .context("Failed to activate headless host session")?;
     model.sessions.push(running);
     Ok(())
+}
+
+fn apply_headless_timeouts<Stack>(
+    model: &mut ApplicationModel<Stack>,
+    policy: &SessionTimeoutPolicy,
+) where
+    Stack: ApplicationStack,
+{
+    let timed_out: Vec<_> = model
+        .sessions
+        .iter()
+        .filter(|session| session.peek_timeout(policy).is_some())
+        .map(|session| session.send.id())
+        .collect();
+    for id in timed_out {
+        info!(
+            event = "headless_session_timeout",
+            session_id = id.0,
+            "Headless session hit timeout policy; removing"
+        );
+        model.remove_session(id);
+    }
 }
 
 async fn handle_session_message<Stack>(
@@ -323,7 +371,7 @@ where
                 .iter_mut()
                 .find(|session| session.send.id() == id)
             {
-                session.screen_streams.remove(&screen_id);
+                apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
             }
         }
         HostControlDecision::Ignore => {

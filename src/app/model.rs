@@ -2,12 +2,18 @@ use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     rc::Rc,
+    time::{Duration, Instant},
 };
 
 use eros::Context as _;
 
 use crate::{
-    app::{platform::ApplicationStack, runtime::session_lifecycle::SessionPhaseEvent},
+    app::{
+        platform::ApplicationStack,
+        runtime::session_lifecycle::{
+            SessionPhaseEvent, SessionTimeoutAction, SessionTimeoutPolicy, evaluate_session_timeout,
+        },
+    },
     infra::{PendingConnectionRequest, SessionTransportSend, unsync_queue::UnsyncQueue},
     kernel::{
         connection_request::PeerCapabilities,
@@ -26,6 +32,8 @@ pub(crate) struct RunningSession {
     pub(crate) key: SessionKey,
     pub(crate) peer_name: Option<String>,
     pub(crate) phase: SessionPhase,
+    /// When the current phase was entered (for timeout policy).
+    pub(crate) phase_entered_at: Instant,
     /// Capabilities advertised by the peer during handshake.
     pub(crate) peer_capabilities: PeerCapabilities,
     pub(crate) send: Rc<SessionSend<SessionTransportSend>>,
@@ -45,6 +53,7 @@ impl RunningSession {
             key,
             peer_name,
             phase: SessionPhase::Joining,
+            phase_entered_at: Instant::now(),
             peer_capabilities,
             send,
             screen_streams: HashMap::new(),
@@ -53,13 +62,42 @@ impl RunningSession {
     }
 
     pub(crate) fn activate(&mut self) -> Result<(), DomainError> {
-        self.phase = self.phase.transition(SessionPhaseEvent::Activate)?;
-        Ok(())
+        self.apply_phase_event(SessionPhaseEvent::Activate)
     }
 
     pub(crate) fn begin_drain(&mut self) -> Result<(), DomainError> {
-        self.phase = self.phase.transition(SessionPhaseEvent::BeginDrain)?;
+        self.apply_phase_event(SessionPhaseEvent::BeginDrain)
+    }
+
+    pub(crate) fn apply_phase_event(
+        &mut self,
+        event: SessionPhaseEvent,
+    ) -> Result<(), DomainError> {
+        let next = self.phase.transition(event)?;
+        if next != self.phase {
+            self.phase = next;
+            self.phase_entered_at = Instant::now();
+        } else {
+            self.phase = next;
+        }
         Ok(())
+    }
+
+    pub(crate) fn phase_elapsed(&self) -> Duration {
+        self.phase_entered_at.elapsed()
+    }
+
+    /// Pure timeout peek — shells decide whether to transition and/or disconnect.
+    pub(crate) fn peek_timeout(
+        &self,
+        policy: &SessionTimeoutPolicy,
+    ) -> Option<SessionTimeoutAction> {
+        evaluate_session_timeout(
+            self.phase,
+            self.phase_elapsed(),
+            self.screen_streams.len(),
+            policy,
+        )
     }
 
     pub(crate) fn admits_new_streams(&self) -> bool {
@@ -203,8 +241,16 @@ where
         self.screen_stream_results.remove(&id);
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn has_session(&self, key: &SessionKey) -> bool {
         self.sessions.iter().any(|session| session.key == *key)
+    }
+
+    pub(crate) fn session_phase_for_key(&self, key: &SessionKey) -> Option<SessionPhase> {
+        self.sessions
+            .iter()
+            .find(|session| session.key == *key)
+            .map(|session| session.phase)
     }
 
     pub(crate) fn has_controller_session(

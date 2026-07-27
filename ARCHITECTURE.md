@@ -179,7 +179,8 @@ call runtime/services, update state groups.
 | `runtime::host_policy` / `host_control` | Host admission + control classification |
 | `runtime::controller_policy` | Controller stream request admission |
 | `runtime::host_stream_launch` | Shared encode-task spawn for GUI/headless |
-| `runtime::session_lifecycle` | Exhaustive Joining/Active/Draining transitions |
+| `runtime::host_stream_lifecycle` | Stream finish/stop bookkeeping (GUI + headless) |
+| `runtime::session_lifecycle` | Phase table, timeouts, reconnect eligibility |
 
 These modules must not import the presentation shell.
 
@@ -327,16 +328,18 @@ Completed foundation:
 | --- | --- |
 | Domain errors | `kernel::domain_error::{DomainErrorKind, DomainError}` |
 | Capability negotiation | `kernel::capability` + `runtime::host_policy` on SetScreenStreams |
-| Exhaustive session phase table | `runtime::session_lifecycle` (3×2 events, unit-tested) |
-| Shared host policy | GUI + headless call the same `evaluate_set_screen_streams` |
+| Exhaustive session phase table | `runtime::session_lifecycle` (3×5 events + timeouts, unit-tested) |
+| Shared host policy | GUI + headless call the same `evaluate_set_screen_streams` / `classify_host_session_message` |
 | Peer caps on sessions | `RunningSession.peer_capabilities` from handshake |
+| Session timeouts / reconnect | `SessionTimeoutPolicy`, `evaluate_reconnect`; shells supersede draining peers |
+| Host stream lifecycle | `host_stream_lifecycle` finish/stop helpers shared by shells |
 | Architecture guards | `src/architecture.rs` forbids kernel→app/infra, services/runtime→GUI |
 
 Further product increments (not structural blockers):
 
-1. Session FSM timeouts / reconnect events.
-2. Headless controller / record-to-file sinks.
-3. Continue splitting remaining mega-files (gstreamer encode body).
+1. Headless controller / record-to-file sinks.
+2. Continue splitting remaining mega-files (frame pipeline worker, gstreamer encode body).
+3. Surface peer capabilities in the Slint UI.
 
 ---
 

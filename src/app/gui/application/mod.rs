@@ -24,8 +24,10 @@ use crate::app::{
     },
     model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
     runtime::{
-        host_policy::{HostStreamEvaluation, evaluate_set_screen_streams},
         host_stream_launch::launch_host_stream,
+        session_lifecycle::{
+            ReconnectEligibility, SessionPhase, SessionTimeoutPolicy, evaluate_reconnect,
+        },
     },
     services::{host_stream::HostStreamPlan, session_catalog},
 };
@@ -46,7 +48,6 @@ use crate::{
         frame_pipeline::FramePipelineParameters,
         geometry::FrameRate,
         protocol::{PROTOCOL_NAME, protocol_version_string},
-        screen_configuration::SetScreenStreams,
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{SessionId, SessionRecv, SessionRole, SessionSend},
         transport::TransportRecv,
@@ -88,6 +89,7 @@ where
 struct HostStreamState {
     pending_starts: HashSet<(SessionId, ScreenId)>,
     pending_stops: HashSet<(SessionId, ScreenId)>,
+    timeout_policy: SessionTimeoutPolicy,
 }
 
 /// Root application state and async message loop.
@@ -180,32 +182,6 @@ where
         Ok(())
     }
 
-    pub(super) fn configure_preserved_screens(
-        &self,
-        request: SetScreenStreams,
-        session_id: SessionId,
-    ) -> eros::Result<HostStreamEvaluation> {
-        let Some(session) = self
-            .model
-            .sessions
-            .iter()
-            .find(|session| session.send.id() == session_id)
-        else {
-            eros::bail!(
-                "Session {} is not registered for stream configuration",
-                session_id.0
-            );
-        };
-        evaluate_set_screen_streams(
-            request,
-            |id| self.model.app.screen(id).cloned(),
-            &self.model.local_capabilities,
-            &session.peer_capabilities,
-            session.admits_new_streams(),
-        )
-        .map_err(|error| error.into_union())
-    }
-
     pub(super) fn start_session<R>(
         &mut self,
         peer_address: SocketAddr,
@@ -219,12 +195,14 @@ where
         R: TransportRecv + 'static,
     {
         let key = SessionKey::new(peer_address, send.role());
-        if self.model.has_session(&key) {
+        let existing_phase = self.model.session_phase_for_key(&key);
+        if evaluate_reconnect(existing_phase) == ReconnectEligibility::Denied {
             warn!(
                 event = "duplicate_session_rejected",
                 %peer_address,
                 role = ?send.role(),
-                "Duplicate Session rejected"
+                ?existing_phase,
+                "Duplicate Session rejected (reconnect not eligible)"
             );
             compio::runtime::spawn(async move {
                 send.close().await;
@@ -232,6 +210,25 @@ where
             .detach();
 
             return false;
+        }
+        // Supersede a draining registration for the same peer key.
+        if let Some(SessionPhase::Draining) = existing_phase {
+            if let Some(old_id) = self
+                .model
+                .sessions
+                .iter()
+                .find(|session| session.key == key)
+                .map(|session| session.send.id())
+            {
+                info!(
+                    event = "session_reconnect_supersede",
+                    session_id = old_id.0,
+                    %peer_address,
+                    role = ?send.role(),
+                    "Superseding draining session for reconnect"
+                );
+                self.model.remove_session(old_id);
+            }
         }
 
         let session_id = send.id();
@@ -472,9 +469,35 @@ where
             host_stream: HostStreamState {
                 pending_starts: HashSet::new(),
                 pending_stops: HashSet::new(),
+                timeout_policy: SessionTimeoutPolicy::default(),
             },
             _logger_guard: logger_guard,
         })
+    }
+
+    /// Applies session timeout policy; drains then disconnects timed-out sessions.
+    pub(super) fn apply_session_timeouts(&mut self) -> eros::Result<bool> {
+        let policy = self.host_stream.timeout_policy;
+        let mut timed_out = Vec::new();
+
+        for session in &self.model.sessions {
+            if let Some(action) = session.peek_timeout(&policy) {
+                timed_out.push((session.send.id(), action));
+            }
+        }
+
+        let mut changed = false;
+        for (id, action) in timed_out {
+            info!(
+                event = "session_timeout",
+                session_id = id.0,
+                ?action,
+                "Session hit timeout policy; disconnecting"
+            );
+            let _ = self.disconnect_session(id)?;
+            changed = true;
+        }
+        Ok(changed)
     }
 
     async fn run(
@@ -489,7 +512,8 @@ where
 
         while !application.lifecycle.finished {
             let message = application.next_message(&intents).await;
-            let changed = application.update(message, &sender).await?;
+            let mut changed = application.update(message, &sender).await?;
+            changed |= application.apply_session_timeouts()?;
             if changed {
                 application.publish_view_state()?;
             }

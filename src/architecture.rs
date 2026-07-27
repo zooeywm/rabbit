@@ -111,9 +111,28 @@ fn runtime_exposes_host_and_controller_policies() {
         "host_policy.rs",
         "host_control.rs",
         "host_stream_launch.rs",
+        "host_stream_lifecycle.rs",
         "controller_policy.rs",
         "session_lifecycle.rs",
     ] {
         assert!(runtime.join(name).is_file(), "missing runtime/{name}");
+    }
+}
+
+#[test]
+fn session_lifecycle_documents_timeout_and_reconnect_surface() {
+    let text = source_imports(&crate_src().join("app/runtime/session_lifecycle.rs"));
+    for needle in [
+        "JoinTimedOut",
+        "IdleTimedOut",
+        "DrainTimedOut",
+        "SessionTimeoutPolicy",
+        "evaluate_session_timeout",
+        "evaluate_reconnect",
+    ] {
+        assert!(
+            text.contains(needle),
+            "session_lifecycle.rs should expose {needle}"
+        );
     }
 }

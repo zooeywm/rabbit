@@ -175,7 +175,8 @@ runtime/services、更新状态组。
 | `runtime::host_policy` / `host_control` | Host 准入 + 控制消息分类 |
 | `runtime::controller_policy` | Controller 开流请求准入 |
 | `runtime::host_stream_launch` | GUI/headless 共享编码任务启动 |
-| `runtime::session_lifecycle` | Joining/Active/Draining 穷尽迁移 |
+| `runtime::host_stream_lifecycle` | 串流结束/停止簿记（GUI + headless） |
+| `runtime::session_lifecycle` | 相位表、超时、重连资格 |
 
 这些模块不得依赖展示壳。
 
@@ -320,16 +321,18 @@ Linux 视频编码（`infra/.../video_encoder/gstreamer/`）：
 | --- | --- |
 | 领域错误 | `kernel::domain_error::{DomainErrorKind, DomainError}` |
 | 能力协商 | `kernel::capability` + `runtime::host_policy` 作用于 SetScreenStreams |
-| 穷尽会话相位表 | `runtime::session_lifecycle`（3×2 事件，单测） |
-| 共享 host 策略 | GUI + headless 调用同一 `evaluate_set_screen_streams` |
+| 穷尽会话相位表 | `runtime::session_lifecycle`（3×5 事件 + 超时，单测） |
+| 共享 host 策略 | GUI + headless 共用 `evaluate_set_screen_streams` / `classify_host_session_message` |
 | 会话上的对端能力 | 握手写入 `RunningSession.peer_capabilities` |
+| 会话超时 / 重连 | `SessionTimeoutPolicy`、`evaluate_reconnect`；壳层可顶替 draining 对端 |
+| Host 串流生命周期 | `host_stream_lifecycle` 结束/停止助手供壳层复用 |
 | 架构守卫 | `src/architecture.rs` 禁止 kernel→app/infra、services/runtime→GUI |
 
 后续产品增量（非结构阻塞）：
 
-1. 会话 FSM 超时 / 重连事件。
-2. Headless controller / 录到文件 sink。
-3. 继续拆分超大文件（gstreamer 编码主体）。
+1. Headless controller / 录到文件 sink。
+2. 继续拆分超大文件（frame pipeline worker、gstreamer 编码主体）。
+3. 在 UI 中展示对端能力。
 
 ---
 
