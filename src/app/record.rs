@@ -206,8 +206,10 @@ fn wait_for_graceful_stop_signal() {
     }
 
     unsafe {
-        libc::signal(libc::SIGINT, Some(on_stop_signal));
-        libc::signal(libc::SIGTERM, Some(on_stop_signal));
+        // On Linux glibc, `sighandler_t` is a raw address-sized integer.
+        let handler = on_stop_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
     }
 
     while SIGNAL_COUNT.load(Ordering::SeqCst) == 0 {
