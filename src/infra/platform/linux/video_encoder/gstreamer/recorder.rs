@@ -57,7 +57,8 @@ where
     else {
         eros::bail!("Recording ended before the first frame arrived");
     };
-    let first_frame = first_frame.with_context(|| "Failed to receive first recording frame")?;
+    let first_frame =
+        first_frame.with_context(|| "Failed to receive first recording frame from the pipeline")?;
     let source_frame_rate = first_frame.source_frame_rate;
     // Tag caps with the pipeline output rate (min of source/target), not wall clock.
     let output_rate = first_frame.frame_rate;

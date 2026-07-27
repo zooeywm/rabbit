@@ -73,6 +73,8 @@ enum FrameFanout {
     Latest(RefCell<LatestFramePublisher<GbmFramePipelineFrame>>),
     Reliable {
         receiver: flume::Receiver<eros::Result<Rc<GbmFramePipelineFrame>>>,
+        /// Inject capture/GPU failures into the same queue the consumer reads.
+        fail: flume::Sender<eros::Result<Rc<GbmFramePipelineFrame>>>,
     },
 }
 
@@ -327,9 +329,11 @@ impl FramePipelineSource {
 
         if let Some(capacity) = reliable_capacity {
             let (app_tx, app_rx) = flume::bounded(capacity.max(1));
+            let fail = app_tx.clone();
             let source = Rc::new(Self {
                 frames: FrameFanout::Reliable {
                     receiver: app_rx.clone(),
+                    fail,
                 },
                 _captured_screen: captured_screen,
                 _gpu_registration: registration,
@@ -419,7 +423,7 @@ impl FramePipelineSource {
             FrameFanout::Latest(publisher) => {
                 SubscriptionFrames::Latest(publisher.borrow_mut().subscribe())
             }
-            FrameFanout::Reliable { receiver } => {
+            FrameFanout::Reliable { receiver, .. } => {
                 SubscriptionFrames::Reliable(receiver.clone())
             }
         };
@@ -658,8 +662,13 @@ fn handle_worker_notification(
             };
 
             for source in failed_sources {
-                if let FrameFanout::Latest(publisher) = &source.frames {
-                    publisher.borrow_mut().fail(failure.clone());
+                match &source.frames {
+                    FrameFanout::Latest(publisher) => {
+                        publisher.borrow_mut().fail(failure.clone());
+                    }
+                    FrameFanout::Reliable { fail, .. } => {
+                        let _ = fail.try_send(Err(eros::error!(failure.clone())));
+                    }
                 }
             }
 

@@ -545,6 +545,9 @@ fn process_screen_frame(
     }
 
     let fused = matches!(&source, KmsCapturedSource::PlaneSet { .. });
+    let block_pools = pipelines
+        .values()
+        .any(|pipeline| pipeline.screen_id == screen_id && pipeline.block_on_pool_exhaustion);
     let source = match source {
         KmsCapturedSource::Composed(buffer) => buffer,
         KmsCapturedSource::PlaneSet {
@@ -558,6 +561,7 @@ fn process_screen_frame(
                 &planes,
                 &mut issues,
                 &mut screen.composition,
+                block_pools,
             ) {
                 Ok(Some(buffer)) => buffer,
                 Ok(None) => return,

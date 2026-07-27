@@ -3,6 +3,7 @@
 use std::{io::BufRead as _, path::PathBuf, time::Duration};
 
 use eros::Context as _;
+use futures_util::StreamExt as _;
 use tracing::info;
 
 use crate::{
@@ -19,6 +20,9 @@ use crate::{
         screen_manager::{Screen, ScreenLayoutManager},
     },
 };
+
+/// How long to wait for the first captured frame before failing (e.g. missing setcap).
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Headless local recording for a concrete platform stack.
 #[cfg(target_os = "linux")]
@@ -76,19 +80,52 @@ where
         "Selected screen for local recording"
     );
 
-    let frames = FramePipelineManager::subscribe(
+    let mut frames = FramePipelineManager::subscribe(
         &mut app,
         &screen_id,
         parameters,
         frame_rate,
         FrameDelivery::recording(),
     )?;
+
+    // Fail fast if KMS capture never produces a frame (missing CAP_SYS_ADMIN is common).
+    let first_frame = match compio::time::timeout(FIRST_FRAME_TIMEOUT, frames.next()).await {
+        Ok(Some(Ok(frame))) => frame,
+        Ok(Some(Err(error))) => {
+            return Err(error).context(capture_permission_hint(
+                "Failed to capture the first recording frame",
+            ));
+        }
+        Ok(None) => {
+            eros::bail!(
+                "{}",
+                capture_permission_hint(
+                    "Recording ended before the first frame arrived (capture closed)"
+                )
+            );
+        }
+        Err(_) => {
+            eros::bail!(
+                "{}",
+                capture_permission_hint(&format!(
+                    "Timed out after {}s waiting for the first captured frame",
+                    FIRST_FRAME_TIMEOUT.as_secs()
+                ))
+            );
+        }
+    };
+
     let cancellation = UnsyncQueue::default();
     spawn_stop_triggers(cancellation.clone(), duration_secs, output_path.clone());
 
-    record_frames_to_mp4(frames, frame_rate, &output_path, cancellation)
-        .await
-        .with_context(|| format!("Failed to record to {}", output_path.display()))?;
+    record_frames_to_mp4(
+        futures_util::stream::iter(std::iter::once(Ok(first_frame))).chain(frames),
+        frame_rate,
+        &output_path,
+        cancellation,
+    )
+    .await
+    .with_context(|| format!("Failed to record to {}", output_path.display()))?;
 
     info!(
         event = "local_record_complete",
@@ -96,6 +133,15 @@ where
         "Local screen recording complete"
     );
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn capture_permission_hint(prefix: &str) -> String {
+    format!(
+        "{prefix}. KMS capture usually needs CAP_SYS_ADMIN on the rabbit binary \
+(e.g. `make record` / `make setcap-release`, or \
+`sudo setcap cap_sys_admin+ep target/release/rabbit`)."
+    )
 }
 
 /// Headless local recording for a concrete platform stack.

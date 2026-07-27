@@ -19,6 +19,8 @@ pub(crate) struct GpuComposition {
 }
 
 const COMPOSITION_POOL_CAPACITY: usize = 3;
+/// Recording holds composition targets until VA encode releases them.
+const RECORD_COMPOSITION_POOL_CAPACITY: usize = 48;
 
 impl GpuComposition {
     pub(super) fn new() -> Self {
@@ -30,6 +32,16 @@ impl GpuComposition {
             fallback_requested: false,
         }
     }
+
+    pub(super) fn ensure_pool_capacity(&mut self, capacity: usize) {
+        if self.pool.capacity() >= capacity {
+            return;
+        }
+        let size = self.size;
+        self.pool = DmaBufPool::new(capacity);
+        self.size = size;
+        self.pool_exhaustion_warned = false;
+    }
 }
 
 pub(super) fn compose_plane_set(
@@ -39,39 +51,51 @@ pub(super) fn compose_plane_set(
     planes: &[KmsFramebufferPlane],
     issues: &mut Vec<KmsPlaneIssue>,
     composition: &mut GpuComposition,
+    block_on_pool_exhaustion: bool,
 ) -> eros::Result<Option<DmaBufFrame>> {
+    let desired_capacity = if block_on_pool_exhaustion {
+        RECORD_COMPOSITION_POOL_CAPACITY
+    } else {
+        COMPOSITION_POOL_CAPACITY
+    };
     if composition.size != Some(output_size) {
         composition.size = Some(output_size);
-        composition.pool = DmaBufPool::new(COMPOSITION_POOL_CAPACITY);
+        composition.pool = DmaBufPool::new(desired_capacity);
         composition.pool_exhaustion_warned = false;
+    } else if block_on_pool_exhaustion {
+        composition.ensure_pool_capacity(desired_capacity);
     }
 
-    let frame = composition.pool.acquire(
-        || {
-            context.allocate_dma_buf(
-                output_size,
-                Format::Xrgb8888,
-                gbm::BufferObjectFlags::RENDERING,
-            )
-        },
-        |fence| {
-            context
-                .egl()
-                .wait_on_native_fence(fence)
-                .with_context(|| "Failed to enqueue fused KMS composition-target reuse fence")
-        },
-    )?;
-    let Some(frame) = frame else {
-        if !composition.pool_exhaustion_warned {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                screen_id = screen_id.0,
-                capacity = COMPOSITION_POOL_CAPACITY,
-                "Fused KMS composition pool exhausted; dropping source frames until a target is released"
-            );
-            composition.pool_exhaustion_warned = true;
-        }
-        return Ok(None);
+    let wait_fence = |fence| {
+        context
+            .egl()
+            .wait_on_native_fence(fence)
+            .with_context(|| "Failed to enqueue fused KMS composition-target reuse fence")
+    };
+    let allocate = || {
+        context.allocate_dma_buf(
+            output_size,
+            Format::Xrgb8888,
+            gbm::BufferObjectFlags::RENDERING,
+        )
+    };
+
+    let frame = if block_on_pool_exhaustion {
+        composition.pool.acquire_blocking(allocate, wait_fence)?
+    } else {
+        let Some(frame) = composition.pool.acquire(allocate, wait_fence)? else {
+            if !composition.pool_exhaustion_warned {
+                tracing::warn!(
+                    target: "rabbit::frame_pipeline",
+                    screen_id = screen_id.0,
+                    capacity = composition.pool.capacity(),
+                    "Fused KMS composition pool exhausted; dropping source frames until a target is released"
+                );
+                composition.pool_exhaustion_warned = true;
+            }
+            return Ok(None);
+        };
+        frame
     };
 
     let result = compose_plane_set_into(context, screen_id, output_size, planes, issues, &frame);
