@@ -4387,6 +4387,7 @@ dependencies = [
  "gstreamer-video",
  "khronos-egl",
  "kudi",
+ "libc",
  "niri-ipc",
  "palc",
  "raw-window-handle",

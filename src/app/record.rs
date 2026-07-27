@@ -130,41 +130,87 @@ where
 }
 
 fn spawn_stop_triggers(cancellation: UnsyncQueue<()>, duration_secs: u64, output_path: PathBuf) {
+    // UnsyncQueue is !Send; fan-in stop sources through flume, then push once.
+    let (stop_tx, stop_rx) = flume::bounded::<()>(1);
+
+    #[cfg(unix)]
+    {
+        let tx = stop_tx.clone();
+        std::thread::Builder::new()
+            .name("rabbit-record-signal-stop".into())
+            .spawn(move || {
+                wait_for_graceful_stop_signal();
+                eprintln!("Stop signal received — finalizing recording…");
+                let _ = tx.send(());
+            })
+            .expect("Failed to spawn recording signal-stop thread");
+    }
+
     if duration_secs > 0 {
-        let cancel = cancellation.clone();
+        let tx = stop_tx.clone();
+        let path = output_path.clone();
         compio::runtime::spawn(async move {
             compio::time::sleep(Duration::from_secs(duration_secs)).await;
             info!(
                 event = "local_record_duration_elapsed",
                 duration_secs,
-                output = %output_path.display(),
+                output = %path.display(),
                 "Recording duration elapsed"
             );
-            cancel.push(());
+            let _ = tx.send(());
         })
         .detach();
-        return;
+        eprintln!(
+            "Recording to {} — stops after {duration_secs}s, or press Ctrl-C to stop early.",
+            output_path.display()
+        );
+    } else {
+        let tx = stop_tx;
+        std::thread::Builder::new()
+            .name("rabbit-record-stdin-stop".into())
+            .spawn(move || {
+                eprintln!(
+                    "Recording to {} — press Enter or Ctrl-C to stop (do not force-kill).",
+                    output_path.display()
+                );
+                let stdin = std::io::stdin();
+                let mut line = String::new();
+                let _ = stdin.lock().read_line(&mut line);
+                let _ = tx.send(());
+            })
+            .expect("Failed to spawn recording stdin-stop thread");
     }
-
-    // UnsyncQueue is !Send; bridge stdin from a worker thread via flume.
-    let (stop_tx, stop_rx) = flume::bounded::<()>(1);
-    std::thread::Builder::new()
-        .name("rabbit-record-stdin-stop".into())
-        .spawn(move || {
-            eprintln!(
-                "Recording to {} — press Enter to stop.",
-                output_path.display()
-            );
-            let stdin = std::io::stdin();
-            let mut line = String::new();
-            let _ = stdin.lock().read_line(&mut line);
-            let _ = stop_tx.send(());
-        })
-        .expect("Failed to spawn recording stop thread");
 
     compio::runtime::spawn(async move {
         let _ = stop_rx.recv_async().await;
         cancellation.push(());
     })
     .detach();
+}
+
+/// Blocks until SIGINT/SIGTERM. A second signal force-exits so a hung finalize
+/// cannot trap the user.
+#[cfg(unix)]
+fn wait_for_graceful_stop_signal() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static SIGNAL_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    // SAFETY: handler only touches an atomic and may call `_exit` (async-signal-safe).
+    unsafe extern "C" fn on_stop_signal(_: libc::c_int) {
+        let n = SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst);
+        if n >= 1 {
+            // Second Ctrl-C: abandon finalize rather than hang forever.
+            unsafe { libc::_exit(130) };
+        }
+    }
+
+    unsafe {
+        libc::signal(libc::SIGINT, Some(on_stop_signal));
+        libc::signal(libc::SIGTERM, Some(on_stop_signal));
+    }
+
+    while SIGNAL_COUNT.load(Ordering::SeqCst) == 0 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

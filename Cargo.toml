@@ -27,6 +27,9 @@ time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 slint = { version = "1.17.1", default-features = false, features = ["accessibility", "backend-winit", "compat-1-2", "raw-window-handle-06", "renderer-femtovg", "std"] }
 socket2 = "0.6"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Linux screen layout and KMS capture backends.
 [target.'cfg(target_os = "linux")'.dependencies]
 # niri-ipc does not guarantee Rust API compatibility across version updates.

@@ -23,7 +23,7 @@ pub enum Command {
         #[arg(short, long)]
         screen: Option<String>,
 
-        /// Stop after N seconds. Omit to stop when Enter is pressed.
+        /// Stop after N seconds. Omit to stop on Enter or Ctrl-C (graceful finalize).
         #[arg(short, long)]
         duration: Option<u64>,
     },
