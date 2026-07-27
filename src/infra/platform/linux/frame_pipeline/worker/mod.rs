@@ -1,3 +1,23 @@
+//! GPU frame-pipeline worker (Linux).
+//!
+//! # Responsibilities
+//!
+//! - Own a dedicated thread and DRM/GBM/EGL context lifetime
+//! - Register screens and pipeline subscriptions from the async runtime
+//! - Compose multi-plane KMS captures when needed
+//! - Select passthrough / NV12 / VAAPI output strategies for the encoder
+//! - Publish latest processed frames through shared subscriptions
+//!
+//! # Protocol shape
+//!
+//! The async side talks to this worker only through `GpuWorkerCommand` /
+//! notification channels. Keep command handling and GPU object graphs local
+//! to this module (or tightly coupled submodules) so the control surface stays
+//! reviewable. See `ARCHITECTURE.md` §6.
+//!
+//! Future splits should preserve that command/event boundary rather than
+//! exposing raw GPU handles across the async runtime.
+
 use std::{
     collections::HashMap,
     io,
@@ -6,19 +26,19 @@ use std::{
 
 use eros::Context;
 use flume::{Receiver, RecvError, Selector, Sender, bounded, unbounded};
-use gbm::{Format, Modifier};
+use gbm::Format;
 
 use crate::{
     infra::WorkerReaperHandle,
     infra::platform::{
         dma_buf::{DmaBufFrame, DmaBufPool},
         frame_pipeline::{GbmFramePipelineFrame, SharedFramePipelineError},
-        gpu::{GpuContext, GpuDevice, Nv12OutputStrategy},
+        gpu::{GpuContext, GpuDevice},
         screen_capture::{
             EglDmaBufImage, KmsCapturedFrame, KmsCapturedSource, KmsCompositionFallback,
-            KmsCompositionTransform, KmsFrameReceiver, KmsFramebufferPlane, KmsPlaneIssue,
+            KmsFrameReceiver,
         },
-        video_encoder::{VaDmaBufAllocator, hardware_h264_encoder_for, va_vpp_input_modifiers},
+        video_encoder::{VaDmaBufAllocator, hardware_h264_encoder_for},
     },
     kernel::{
         frame_pipeline::FramePipelineParameters,
@@ -26,6 +46,15 @@ use crate::{
         screen_manager::ScreenId,
     },
 };
+
+mod composition;
+mod output;
+
+use composition::GpuComposition;
+use output::FrameOutputStrategy;
+
+use composition::compose_plane_set;
+use output::{allocate_output, select_direct_nv12_output, select_output, validate_nv12_size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct FramePipelineId(pub(super) u64);
@@ -101,14 +130,6 @@ struct GpuPipeline {
 
 const OUTPUT_POOL_CAPACITY: usize = 6;
 
-#[derive(Debug, Clone, Copy)]
-enum FrameOutputStrategy {
-    PassthroughXrgb(Modifier),
-    VaDirectNv12,
-    DirectNv12(Nv12OutputStrategy),
-    VaapiXrgb(Modifier),
-}
-
 struct GpuScreen {
     device: Option<Receiver<eros::Result<GpuDevice>>>,
     frames: Receiver<eros::Result<KmsCapturedFrame>>,
@@ -140,29 +161,6 @@ fn lower_frame_rate(left: FrameRate, right: FrameRate) -> FrameRate {
         left
     } else {
         right
-    }
-}
-
-#[derive(Debug)]
-struct GpuComposition {
-    size: Option<crate::kernel::geometry::PixelSize>,
-    pool: DmaBufPool,
-    selected: bool,
-    pool_exhaustion_warned: bool,
-    fallback_requested: bool,
-}
-
-const COMPOSITION_POOL_CAPACITY: usize = 3;
-
-impl GpuComposition {
-    fn new() -> Self {
-        Self {
-            size: None,
-            pool: DmaBufPool::new(COMPOSITION_POOL_CAPACITY),
-            selected: false,
-            pool_exhaustion_warned: false,
-            fallback_requested: false,
-        }
     }
 }
 
@@ -629,132 +627,6 @@ fn request_composition_fallback(
     screen.composition_fallback.request();
 }
 
-fn compose_plane_set(
-    context: &GpuContext,
-    screen_id: ScreenId,
-    output_size: crate::kernel::geometry::PixelSize,
-    planes: &[KmsFramebufferPlane],
-    issues: &mut Vec<KmsPlaneIssue>,
-    composition: &mut GpuComposition,
-) -> eros::Result<Option<DmaBufFrame>> {
-    if composition.size != Some(output_size) {
-        composition.size = Some(output_size);
-        composition.pool = DmaBufPool::new(COMPOSITION_POOL_CAPACITY);
-        composition.pool_exhaustion_warned = false;
-    }
-
-    let frame = composition.pool.acquire(
-        || {
-            context.allocate_dma_buf(
-                output_size,
-                Format::Xrgb8888,
-                gbm::BufferObjectFlags::RENDERING,
-            )
-        },
-        |fence| {
-            context
-                .egl()
-                .wait_on_native_fence(fence)
-                .with_context(|| "Failed to enqueue fused KMS composition-target reuse fence")
-        },
-    )?;
-    let Some(frame) = frame else {
-        if !composition.pool_exhaustion_warned {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                screen_id = screen_id.0,
-                capacity = COMPOSITION_POOL_CAPACITY,
-                "Fused KMS composition pool exhausted; dropping source frames until a target is released"
-            );
-            composition.pool_exhaustion_warned = true;
-        }
-        return Ok(None);
-    };
-
-    let result = compose_plane_set_into(context, screen_id, output_size, planes, issues, &frame);
-    if let Err(error) = result {
-        frame.invalidate_lease();
-        return Err(error);
-    }
-
-    if !composition.selected {
-        tracing::info!(
-            target: "rabbit::frame_pipeline",
-            screen_id = screen_id.0,
-            width = output_size.width,
-            height = output_size.height,
-            plane_count = planes.len(),
-            strategy = "gpu_fused_kms_composition",
-            "Selected KMS composition strategy"
-        );
-        composition.selected = true;
-    }
-
-    Ok(Some(frame))
-}
-
-fn compose_plane_set_into(
-    context: &GpuContext,
-    screen_id: ScreenId,
-    output_size: crate::kernel::geometry::PixelSize,
-    planes: &[KmsFramebufferPlane],
-    issues: &mut Vec<KmsPlaneIssue>,
-    frame: &DmaBufFrame,
-) -> eros::Result<()> {
-    let image = context
-        .egl()
-        .import_composition_target(frame)
-        .with_context(|| "Failed to import the fused KMS composition target")?;
-    let target = context
-        .egl()
-        .create_composition_target(&image)
-        .with_context(|| "Failed to bind the fused KMS composition target")?;
-    context
-        .egl()
-        .clear_composition_target(&target)
-        .with_context(|| "Failed to clear the fused KMS composition target")?;
-    context.egl().retain_cached_plane_images(planes);
-
-    for plane in planes {
-        let texture = match context.egl().create_cached_plane_texture(plane) {
-            Ok(texture) => texture,
-            Err(error) => {
-                tracing::warn!(
-                    target: "rabbit::screen_capture::kms",
-                    screen_id = screen_id.0,
-                    plane_id = ?plane.id,
-                    plane_type = ?plane.plane_type,
-                    error = ?error,
-                    "Skipped a KMS plane during fused GPU composition"
-                );
-                issues.push(KmsPlaneIssue {
-                    plane_id: plane.id,
-                    plane_type: Some(plane.plane_type),
-                    error,
-                });
-                continue;
-            }
-        };
-        let transform = KmsCompositionTransform::new(
-            output_size,
-            plane.buffer.size,
-            plane.placement,
-            plane.cursor_hotspot,
-        );
-        context
-            .egl()
-            .compose_plane(&target, &texture, &transform, plane.blend)
-            .with_context(|| {
-                format!(
-                    "Failed to compose KMS plane {:?} on the GPU worker",
-                    plane.id
-                )
-            })?;
-    }
-
-    Ok(())
-}
-
 fn publish_single_pipeline_passthrough(
     context: &GpuContext,
     screen_id: ScreenId,
@@ -1061,228 +933,6 @@ fn process_pipeline_frame(
     }))
 }
 
-impl FrameOutputStrategy {
-    fn name(self) -> &'static str {
-        match self {
-            Self::PassthroughXrgb(_) => "kms_xrgb_passthrough",
-            Self::VaDirectNv12 => "va_direct_nv12",
-            Self::DirectNv12(strategy) => strategy.name(),
-            Self::VaapiXrgb(_) => "vaapi_xrgb",
-        }
-    }
-}
-
-fn select_output(
-    context: &GpuContext,
-    pipeline: &mut GpuPipeline,
-) -> eros::Result<(
-    crate::infra::platform::dma_buf::DmaBufFrame,
-    FrameOutputStrategy,
-)> {
-    if let Some(output) = select_direct_nv12_output(context, pipeline) {
-        return Ok(output);
-    }
-
-    let size = pipeline.parameters.frame_size;
-
-    for modifier in va_vpp_input_modifiers(Format::Xrgb8888)
-        .with_context(|| "Failed to find VAAPI-compatible XRGB DMA-BUF modifiers")?
-    {
-        let strategy = FrameOutputStrategy::VaapiXrgb(modifier);
-        let buffer = match allocate_output(context, size, strategy, None) {
-            Ok(buffer) => buffer,
-            Err(error) => {
-                tracing::warn!(
-                    target: "rabbit::frame_pipeline",
-                    modifier = ?modifier,
-                    error = ?error,
-                    "Failed to allocate VAAPI XRGB output candidate"
-                );
-                continue;
-            }
-        };
-        let renderable = context
-            .egl()
-            .import_composition_target(&buffer)
-            .and_then(|image| context.egl().create_composition_target(&image));
-        if let Err(error) = renderable {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                modifier = ?modifier,
-                error = ?error,
-                "EGL rejected VAAPI XRGB output candidate"
-            );
-            continue;
-        }
-        if let Err(error) = hardware_h264_encoder_for(&buffer) {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                modifier = ?modifier,
-                error = ?error,
-                "Hardware H.264 pipeline rejected VAAPI XRGB output candidate"
-            );
-            continue;
-        }
-
-        return Ok((buffer, strategy));
-    }
-
-    eros::bail!("No VAAPI XRGB DMA-BUF output candidate is usable")
-}
-
-fn select_direct_nv12_output(
-    context: &GpuContext,
-    pipeline: &mut GpuPipeline,
-) -> Option<(
-    crate::infra::platform::dma_buf::DmaBufFrame,
-    FrameOutputStrategy,
-)> {
-    let size = pipeline.parameters.frame_size;
-    let va_allocator = match VaDmaBufAllocator::new(context.render_node_path(), size) {
-        Ok(allocator) => Some(allocator),
-        Err(error) => {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                strategy = FrameOutputStrategy::VaDirectNv12.name(),
-                error = ?error,
-                "Failed to initialize VA DirectNV12 output candidate"
-            );
-            None
-        }
-    };
-    if let Some(va_allocator) = va_allocator {
-        let buffer = match va_allocator.allocate() {
-            Ok(buffer) => Some(buffer),
-            Err(error) => {
-                tracing::warn!(
-                    target: "rabbit::frame_pipeline",
-                    strategy = FrameOutputStrategy::VaDirectNv12.name(),
-                    error = ?error,
-                    "Failed to allocate VA DirectNV12 output candidate"
-                );
-                None
-            }
-        };
-        if let Some(buffer) = buffer {
-            let renderable = context
-                .egl()
-                .import_nv12_target(&buffer)
-                .and_then(|image| context.egl().create_nv12_target(&image));
-            if let Err(error) = renderable {
-                tracing::warn!(
-                    target: "rabbit::frame_pipeline",
-                    strategy = FrameOutputStrategy::VaDirectNv12.name(),
-                    error = ?error,
-                    "EGL rejected VA DirectNV12 output candidate"
-                );
-            } else if let Err(error) = hardware_h264_encoder_for(&buffer) {
-                tracing::warn!(
-                    target: "rabbit::frame_pipeline",
-                    strategy = FrameOutputStrategy::VaDirectNv12.name(),
-                    error = ?error,
-                    "Hardware H.264 encoder rejected VA DirectNV12 output candidate"
-                );
-            } else {
-                pipeline.va_nv12_allocator = Some(va_allocator);
-                return Some((buffer, FrameOutputStrategy::VaDirectNv12));
-            }
-        }
-    }
-
-    for strategy in Nv12OutputStrategy::ALL {
-        if !context.supports_nv12_output(strategy) {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                strategy = strategy.name(),
-                "Direct NV12 output candidate is unsupported"
-            );
-            continue;
-        }
-
-        let buffer = match context.allocate_nv12_output(size, strategy) {
-            Ok(buffer) => buffer,
-            Err(error) => {
-                tracing::warn!(
-                    target: "rabbit::frame_pipeline",
-                    strategy = strategy.name(),
-                    error = ?error,
-                    "Failed to allocate direct NV12 output candidate"
-                );
-                continue;
-            }
-        };
-        let renderable = context
-            .egl()
-            .import_nv12_target(&buffer)
-            .and_then(|image| context.egl().create_nv12_target(&image));
-        if let Err(error) = renderable {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                strategy = strategy.name(),
-                error = ?error,
-                "EGL rejected direct NV12 output candidate"
-            );
-            continue;
-        }
-        if let Err(error) = hardware_h264_encoder_for(&buffer) {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                strategy = strategy.name(),
-                error = ?error,
-                "Hardware H.264 encoder rejected direct NV12 output candidate"
-            );
-            continue;
-        }
-
-        return Some((buffer, FrameOutputStrategy::DirectNv12(strategy)));
-    }
-
-    None
-}
-
-fn allocate_output(
-    context: &GpuContext,
-    size: crate::kernel::geometry::PixelSize,
-    strategy: FrameOutputStrategy,
-    va_nv12_allocator: Option<&VaDmaBufAllocator>,
-) -> eros::Result<crate::infra::platform::dma_buf::DmaBufFrame> {
-    match strategy {
-        FrameOutputStrategy::PassthroughXrgb(_) => {
-            eros::bail!("XRGB pass-through does not allocate a frame-pipeline output")
-        }
-        FrameOutputStrategy::VaDirectNv12 => va_nv12_allocator
-            .with_context(|| "VA DirectNV12 strategy has no allocator")?
-            .allocate(),
-        FrameOutputStrategy::DirectNv12(strategy) => context.allocate_nv12_output(size, strategy),
-        FrameOutputStrategy::VaapiXrgb(modifier) => context.allocate_dma_buf_with_modifier(
-            size,
-            Format::Xrgb8888,
-            modifier,
-            gbm::BufferObjectFlags::RENDERING,
-        ),
-    }
-}
-
-fn validate_nv12_size(size: crate::kernel::geometry::PixelSize) -> eros::Result<()> {
-    if size.width == 0 || size.height == 0 {
-        eros::bail!(
-            "NV12 frame size must be non-zero, got {}x{}",
-            size.width,
-            size.height
-        );
-    }
-
-    if !size.width.is_multiple_of(2) || !size.height.is_multiple_of(2) {
-        eros::bail!(
-            "NV12 frame size must use even dimensions, got {}x{}",
-            size.width,
-            size.height
-        );
-    }
-
-    Ok(())
-}
-
 impl<T> LatestSender<T> {
     fn publish(&self, mut item: T) {
         loop {
@@ -1300,7 +950,6 @@ impl<T> LatestSender<T> {
     }
 }
 
-// Focused test: cargo test infra::platform::frame_pipeline::worker::tests --lib
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, path::PathBuf};

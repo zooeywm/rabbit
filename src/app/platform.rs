@@ -71,14 +71,19 @@ where
 
 #[cfg_attr(target_os = "linux", path = "platform/linux.rs")]
 #[cfg_attr(target_os = "windows", path = "platform/windows.rs")]
-mod target;
+mod platform;
 
 #[cfg(test)]
-pub(crate) use target::TestApplicationStack;
+pub(crate) use platform::TestApplicationStack;
 
 pub(crate) fn run() -> eros::Result<()> {
     let config = Config::new()?;
-    target::run(config)
+    platform::run(config)
+}
+
+pub(crate) fn run_headless() -> eros::Result<()> {
+    let config = Config::new()?;
+    platform::run_headless(config)
 }
 
 #[cfg(test)]
@@ -89,6 +94,6 @@ mod tests {
     fn selected_stack_can_run_the_application() {
         fn assert_stack<Stack: ApplicationStack>() {}
 
-        assert_stack::<super::target::TestApplicationStack>();
+        assert_stack::<super::platform::TestApplicationStack>();
     }
 }

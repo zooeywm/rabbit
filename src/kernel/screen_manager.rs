@@ -11,7 +11,10 @@ pub trait ScreenLayoutManager {
 pub struct ScreenId(pub(crate) u8);
 
 impl ScreenId {
-    pub const MAX: u8 = u8::MAX - 1;
+    /// Largest screen id that can share a transport with the control channel.
+    ///
+    /// See [`crate::kernel::protocol::MAX_VIDEO_SCREEN_ID`].
+    pub const MAX: u8 = crate::kernel::protocol::MAX_VIDEO_SCREEN_ID;
 
     pub const fn get(self) -> u8 {
         self.0

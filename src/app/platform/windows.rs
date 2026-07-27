@@ -36,6 +36,23 @@ pub(crate) fn run(config: Config) -> eros::Result<()> {
     }
 }
 
+pub(crate) fn run_headless(config: Config) -> eros::Result<()> {
+    match select_application_stack(&config) {
+        WindowsApplicationStack::WgcD3d11 => {
+            let runtime =
+                compio::runtime::Runtime::new().expect("Headless Compio runtime should start");
+            runtime.block_on(crate::app::headless::run::<WgcD3d11ApplicationStack>(
+                config,
+            ))
+        }
+    }
+}
+
+/// Selects the Windows media backend.
+///
+/// The WGC + D3D11 + Media Foundation stack is the only wired option and trails
+/// the Linux product path in feature completeness. Keep parity work behind this
+/// stack boundary.
 fn select_application_stack(_config: &Config) -> WindowsApplicationStack {
     info!(
         event = "app_platform_stack_selected",

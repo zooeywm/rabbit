@@ -1,4 +1,9 @@
-use crate::kernel::screen_manager::ScreenId;
+//! Session transport ports: channels, delivery, and byte-oriented messaging.
+//!
+//! Channel numbering is fixed by [`crate::kernel::protocol`] so control and
+//! video cannot silently renumber across peers.
+
+use crate::kernel::{protocol::CONTROL_CHANNEL_ID, screen_manager::ScreenId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportChannel {
@@ -9,17 +14,18 @@ pub enum TransportChannel {
 impl From<TransportChannel> for u8 {
     fn from(channel: TransportChannel) -> Self {
         match channel {
-            TransportChannel::Control => 0,
-            TransportChannel::Video(id) => u8::from(id) + 1,
+            TransportChannel::Control => CONTROL_CHANNEL_ID,
+            TransportChannel::Video(id) => u8::from(id).saturating_add(1),
         }
     }
 }
 
 impl From<u8> for TransportChannel {
     fn from(id: u8) -> Self {
-        match id {
-            0 => Self::Control,
-            id => Self::Video(ScreenId(id - 1)),
+        if id == CONTROL_CHANNEL_ID {
+            Self::Control
+        } else {
+            Self::Video(ScreenId(id - 1))
         }
     }
 }

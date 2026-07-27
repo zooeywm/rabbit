@@ -35,6 +35,23 @@ pub(crate) fn run(config: Config) -> eros::Result<()> {
     }
 }
 
+pub(crate) fn run_headless(config: Config) -> eros::Result<()> {
+    match select_application_stack(&config) {
+        LinuxApplicationStack::NiriKmsGbm => {
+            let runtime =
+                compio::runtime::Runtime::new().expect("Headless Compio runtime should start");
+            runtime.block_on(crate::app::headless::run::<NiriKmsGbmApplicationStack>(
+                config,
+            ))
+        }
+    }
+}
+
+/// Selects the Linux media backend.
+///
+/// Today only the niri + KMS + GBM + GStreamer stack is wired. Additional
+/// stacks should become new `LinuxApplicationStack` variants rather than
+/// inlining platform choice into session or GUI code.
 fn select_application_stack(_config: &Config) -> LinuxApplicationStack {
     let niri_socket_present = std::env::var_os("NIRI_SOCKET").is_some();
     info!(

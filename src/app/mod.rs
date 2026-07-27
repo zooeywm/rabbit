@@ -2,10 +2,12 @@ pub(crate) mod config;
 
 mod deps;
 mod gui;
+pub(crate) mod headless;
 mod logging;
 mod model;
 mod platform;
 mod screen_stream;
+pub(crate) mod services;
 
 use tracing::{info, warn};
 
@@ -17,6 +19,7 @@ use crate::{
 
 pub(crate) use logging::{LoggerGuard, init_logging};
 pub(crate) use platform::run as run_gui;
+pub(crate) use platform::run_headless;
 
 /// Root application state and dependency container.
 pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState> {
@@ -56,10 +59,11 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerSt
 where
     Self: ScreenLayoutManager,
 {
-    /// Runs the current application lifecycle.
+    /// Runs platform service startup for the selected application stack.
     ///
-    /// The MVP currently reports the detected screen layout. The persistent
-    /// rendering and application event loop will be added here later.
+    /// Refreshes and logs the local screen layout. Session orchestration, GUI
+    /// messaging, and media streaming run in `app::gui::application` after this
+    /// bootstrap returns.
     pub(crate) async fn run(&mut self) -> eros::Result<()> {
         let screens = self.screens();
 

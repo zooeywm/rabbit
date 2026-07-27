@@ -5,6 +5,13 @@ use std::{
     time::Duration,
 };
 
+use crate::infra::platform::{
+    dma_buf::{DmaBufFrame, DmaBufProfile},
+    frame_pipeline::GbmFramePipelineFrame,
+    video_encoder::gstreamer::probe::GStreamerVideoProbe,
+    video_probe::VideoFrameProbe,
+};
+use crate::kernel::{geometry::FrameRate, video_encoder::VideoEncoderCommand};
 use drm::buffer::{DrmFourcc, DrmModifier};
 use eros::Context as _;
 use futures_core::Stream as _;
@@ -14,354 +21,29 @@ use gstreamer::prelude::{
     Cast as _, ElementExt as _, ElementExtManual as _, GObjectExtManualGst as _,
     GstBinExtManual as _, GstObjectExt as _,
 };
-use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 
-use crate::infra::platform::{
-    dma_buf::{DmaBufFrame, DmaBufLease, DmaBufProfile},
-    frame_pipeline::GbmFramePipelineFrame,
-    video_encoder::gstreamer::probe::GStreamerVideoProbe,
-    video_probe::VideoFrameProbe,
-};
-use crate::kernel::{geometry::FrameRate, video_encoder::VideoEncoderCommand};
-
-struct DmaBufLeaseOwner {
-    _lease: DmaBufLease,
-    storage: [u8; 0],
-}
-
-impl AsMut<[u8]> for DmaBufLeaseOwner {
-    fn as_mut(&mut self) -> &mut [u8] {
-        &mut self.storage
-    }
-}
-
+mod frame;
+mod pipeline_util;
 mod probe;
+mod rtp;
 mod va_surface;
 
+#[cfg(test)]
+pub(crate) use frame::validate_dmabuf_buffer;
+pub(crate) use frame::{GStreamerVideoFrame, dmabuf_caps};
+pub(crate) use pipeline_util::{
+    H264_KEY_INT_MAX, configure_low_latency_encoder, create_required_element, h264_rtp_caps,
+    va_vpp_output_caps,
+};
+pub(crate) use rtp::GStreamerRtpPacket;
 pub(crate) use va_surface::VaDmaBufAllocator;
 
-#[derive(Debug)]
-pub(crate) struct GStreamerVideoFrame {
-    buffer: gstreamer::Buffer,
-    input_caps: gstreamer::Caps,
-    input_signature: DmaBufInputSignature,
-    probe: Option<VideoFrameProbe>,
-    va_context: Option<gstreamer::Context>,
-}
+use frame::DmaBufInputSignature;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DmaBufInputSignature {
-    size: crate::kernel::geometry::PixelSize,
-    format: DrmFourcc,
-    modifier: DrmModifier,
-    frame_rate: FrameRate,
-}
-
-impl TryFrom<&gstreamer::CapsRef> for DmaBufInputSignature {
-    type Error = eros::ErrorUnion;
-
-    fn try_from(caps: &gstreamer::CapsRef) -> Result<Self, Self::Error> {
-        let structure = caps
-            .structure(0)
-            .with_context(|| "GStreamer DMA-BUF input caps are empty")?;
-        let width = structure
-            .get::<i32>("width")
-            .with_context(|| "GStreamer DMA-BUF input caps do not contain a fixed width")?;
-        let height = structure
-            .get::<i32>("height")
-            .with_context(|| "GStreamer DMA-BUF input caps do not contain a fixed height")?;
-        let drm_format = structure
-            .get::<&str>("drm-format")
-            .with_context(|| "GStreamer DMA-BUF input caps do not contain a DRM format")?;
-        let (fourcc, modifier) = gstreamer_video::dma_drm_fourcc_from_str(drm_format)
-            .with_context(|| "Failed to parse GStreamer DMA-BUF input DRM format")?;
-        let frame_rate = structure
-            .get::<gstreamer::Fraction>("framerate")
-            .with_context(|| "GStreamer DMA-BUF input caps do not contain a fixed frame rate")?;
-        let numerator = u32::try_from(frame_rate.numer())
-            .with_context(|| "GStreamer DMA-BUF input frame-rate numerator is not positive")?;
-        let denominator = u32::try_from(frame_rate.denom())
-            .with_context(|| "GStreamer DMA-BUF input frame-rate denominator is not positive")?;
-
-        Ok(Self {
-            size: crate::kernel::geometry::PixelSize {
-                width: u32::try_from(width)
-                    .with_context(|| "GStreamer DMA-BUF input width is negative")?,
-                height: u32::try_from(height)
-                    .with_context(|| "GStreamer DMA-BUF input height is negative")?,
-            },
-            format: DrmFourcc::try_from(fourcc)
-                .with_context(|| "GStreamer DMA-BUF input fourcc is unknown")?,
-            modifier: DrmModifier::from(modifier),
-            frame_rate: FrameRate::new(numerator, denominator)
-                .with_context(|| "GStreamer DMA-BUF input frame rate is invalid")?,
-        })
-    }
-}
-
-impl TryFrom<Rc<GbmFramePipelineFrame>> for GStreamerVideoFrame {
-    type Error = eros::ErrorUnion;
-
-    fn try_from(source: Rc<GbmFramePipelineFrame>) -> Result<Self, Self::Error> {
-        gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
-        let frame_rate = source.frame_rate;
-        Self::from_pipeline_frame(source, frame_rate, None)
-    }
-}
-
-impl GStreamerVideoFrame {
-    fn from_pipeline_frame(
-        source: Rc<GbmFramePipelineFrame>,
-        frame_rate: FrameRate,
-        expected: Option<(&gstreamer::CapsRef, DmaBufInputSignature)>,
-    ) -> eros::Result<Self> {
-        let frame = &source.buffer;
-
-        if frame.readiness_fence.is_some() {
-            eros::bail!("GStreamer input frame still has an unresolved readiness fence");
-        }
-        let expected_planes = match frame.format {
-            DrmFourcc::Nv12 => 2,
-            DrmFourcc::Xrgb8888 => 1,
-            format => eros::bail!(
-                "GStreamer input frame must use NV12 or XRGB8888, got {:?}",
-                format
-            ),
-        };
-        if frame.planes.len() != expected_planes {
-            eros::bail!(
-                "GStreamer {:?} input frame must contain {} planes, got {}",
-                frame.format,
-                expected_planes,
-                frame.planes.len()
-            );
-        }
-        if frame.objects.is_empty() {
-            eros::bail!("GStreamer NV12 input frame does not contain DMA-BUF objects");
-        }
-
-        let modifier = frame.planes[0].modifier;
-        if frame.planes.iter().any(|plane| plane.modifier != modifier) {
-            eros::bail!(
-                "GStreamer {:?} input frame planes use different DRM modifiers",
-                frame.format
-            );
-        }
-        let input_signature = DmaBufInputSignature {
-            size: frame.size,
-            format: frame.format,
-            modifier,
-            frame_rate,
-        };
-        if let Some((_, expected_signature)) = expected
-            && input_signature != expected_signature
-        {
-            eros::bail!(
-                "GStreamer encoder input changed from {:?} to {:?}",
-                expected_signature,
-                input_signature
-            );
-        }
-
-        const MAX_DMA_BUF_OBJECTS: usize = 2;
-        if frame.objects.len() > MAX_DMA_BUF_OBJECTS {
-            eros::bail!(
-                "GStreamer {:?} input frame contains too many DMA-BUF objects: {}",
-                frame.format,
-                frame.objects.len()
-            );
-        }
-
-        let mut object_offsets = [0_usize; MAX_DMA_BUF_OBJECTS];
-        let mut buffer_size = 0_usize;
-        for (index, object) in frame.objects.iter().enumerate() {
-            object_offsets[index] = buffer_size;
-            buffer_size = buffer_size
-                .checked_add(object.size)
-                .with_context(|| "GStreamer DMA-BUF object sizes exceed usize")?;
-        }
-
-        let mut offsets = [0_usize; 2];
-        let mut strides = [0_i32; 2];
-        for (plane_index, plane) in frame.planes.iter().enumerate() {
-            let Some(object) = frame.objects.get(plane.object_index) else {
-                eros::bail!(
-                    "GStreamer NV12 plane {} references missing DMA-BUF object {}",
-                    plane_index,
-                    plane.object_index
-                );
-            };
-            let plane_offset = usize::try_from(plane.offset)
-                .with_context(|| "GStreamer NV12 plane offset exceeds usize")?;
-            if plane_offset >= object.size {
-                eros::bail!(
-                    "GStreamer NV12 plane {} offset {} exceeds DMA-BUF object {} size {}",
-                    plane_index,
-                    plane.offset,
-                    plane.object_index,
-                    object.size
-                );
-            }
-            offsets[plane_index] = object_offsets[plane.object_index]
-                .checked_add(plane_offset)
-                .with_context(|| "GStreamer NV12 plane offset exceeds usize")?;
-            strides[plane_index] = i32::try_from(plane.stride)
-                .with_context(|| "GStreamer NV12 plane stride exceeds i32")?;
-        }
-
-        let input_caps = match expected {
-            Some((caps, _)) => caps.to_owned(),
-            None => dmabuf_caps(frame, modifier, Some(frame_rate))?,
-        };
-        let va_context = frame
-            .va_backing
-            .as_ref()
-            .map(|backing| backing.context.clone());
-        let mut buffer = match &frame.va_backing {
-            Some(backing) => backing
-                .buffer
-                .copy_region(gstreamer::BufferCopyFlags::MEMORY, ..)
-                .with_context(|| "Failed to reference the VA DMA-BUF input memory")?,
-            None => {
-                let allocator = gstreamer_allocators::DmaBufAllocator::new();
-                let mut buffer = gstreamer::Buffer::new();
-                let Some(buffer_mut) = buffer.get_mut() else {
-                    eros::bail!("New GStreamer DMA-BUF input buffer is unexpectedly shared");
-                };
-                for (object_index, object) in frame.objects.iter().enumerate() {
-                    let fd = object.fd.try_clone().with_context(|| {
-                        format!(
-                            "Failed to duplicate DMA-BUF object {} for GStreamer",
-                            object_index
-                        )
-                    })?;
-                    let memory =
-                        unsafe { allocator.alloc_dmabuf(fd, object.size) }.with_context(|| {
-                            format!(
-                                "Failed to wrap DMA-BUF object {} as GStreamer memory",
-                                object_index
-                            )
-                        })?;
-                    buffer_mut.append_memory(memory);
-                }
-                buffer
-            }
-        };
-        let Some(buffer_mut) = buffer.get_mut() else {
-            eros::bail!("New GStreamer DMA-BUF input buffer is unexpectedly shared");
-        };
-        gstreamer_video::VideoMeta::add_full(
-            buffer_mut,
-            gstreamer_video::VideoFrameFlags::empty(),
-            gstreamer_video::VideoFormat::DmaDrm,
-            frame.size.width,
-            frame.size.height,
-            &offsets[..frame.planes.len()],
-            &strides[..frame.planes.len()],
-        )
-        .with_context(|| "Failed to attach NV12 DMA-BUF layout to GStreamer input frame")?;
-        if let Some(lease) = &frame.lease {
-            let owner = gstreamer::Buffer::from_mut_slice(DmaBufLeaseOwner {
-                _lease: lease.clone(),
-                storage: [],
-            });
-            gstreamer::meta::ParentBufferMeta::add(buffer_mut, &owner);
-        }
-
-        validate_dmabuf_buffer(&buffer)?;
-
-        let probe = source.probe.clone();
-        if let Some(probe) = &probe {
-            let Some(buffer) = buffer.get_mut() else {
-                eros::bail!("New GStreamer DMA-BUF input buffer is unexpectedly shared");
-            };
-            buffer.set_pts(gstreamer::ClockTime::from_nseconds(probe.pts_ns()));
-        }
-
-        Ok(Self {
-            buffer,
-            input_caps,
-            input_signature,
-            probe,
-            va_context,
-        })
-    }
-
-    pub(crate) fn input_caps(&self) -> &gstreamer::CapsRef {
-        &self.input_caps
-    }
-}
-
-fn validate_dmabuf_buffer(buffer: &gstreamer::BufferRef) -> eros::Result<()> {
-    if buffer.n_memory() == 0 {
-        eros::bail!("GStreamer video frame does not contain DMA-BUF memory");
-    }
-
-    for (index, memory) in buffer.iter_memories().enumerate() {
-        if !memory.is_memory_type::<gstreamer_allocators::DmaBufMemory>() {
-            eros::bail!("GStreamer video frame memory {} is not DMA-BUF", index);
-        }
-    }
-
-    let Some(video) = buffer.meta::<gstreamer_video::VideoMeta>() else {
-        eros::bail!("GStreamer DMA-BUF video frame is missing VideoMeta");
-    };
-
-    if video.format() != gstreamer_video::VideoFormat::DmaDrm {
-        eros::bail!(
-            "GStreamer DMA-BUF video frame has non-DRM format {}",
-            video.format()
-        );
-    }
-
-    Ok(())
-}
-
-fn dmabuf_caps(
-    frame: &DmaBufFrame,
-    modifier: DrmModifier,
-    frame_rate: Option<FrameRate>,
-) -> eros::Result<gstreamer::Caps> {
-    let width = i32::try_from(frame.size.width)
-        .with_context(|| "GStreamer NV12 frame width exceeds i32")?;
-    let height = i32::try_from(frame.size.height)
-        .with_context(|| "GStreamer NV12 frame height exceeds i32")?;
-    let drm_format = if modifier == DrmModifier::Invalid {
-        match frame.format {
-            DrmFourcc::Nv12 => String::from("NV12"),
-            DrmFourcc::Xrgb8888 => String::from("XR24"),
-            format => eros::bail!("Unsupported modifierless DMA-BUF format: {:?}", format),
-        }
-    } else {
-        gstreamer_video::dma_drm_fourcc_to_string(frame.format as u32, modifier.into()).to_string()
-    };
-    let colorimetry = match frame.format {
-        DrmFourcc::Nv12 => "bt709",
-        DrmFourcc::Xrgb8888 => "sRGB",
-        format => eros::bail!("Unsupported DMA-BUF colorimetry for format: {:?}", format),
-    };
-
-    let frame_rate = match frame_rate {
-        Some(frame_rate) => gstreamer::Fraction::new(
-            i32::try_from(frame_rate.numerator())
-                .with_context(|| "GStreamer frame-rate numerator exceeds i32")?,
-            i32::try_from(frame_rate.denominator())
-                .with_context(|| "GStreamer frame-rate denominator exceeds i32")?,
-        ),
-        None => gstreamer::Fraction::new(0, 1),
-    };
-
-    Ok(gstreamer::Caps::builder("video/x-raw")
-        .features(["memory:DMABuf"])
-        .field("format", "DMA_DRM")
-        .field("drm-format", drm_format)
-        .field("width", width)
-        .field("height", height)
-        .field("framerate", frame_rate)
-        .field("interlace-mode", "progressive")
-        .field("colorimetry", colorimetry)
-        .build())
-}
+use pipeline_util::{
+    H264_BITRATE_KBPS, H264_CPB_SIZE_KBITS, create_pipeline_stage_queue, is_hardware_video_encoder,
+    rtp_mtu, terminal_message_result, terminal_messages,
+};
 
 pub(crate) fn hardware_h264_encoder_for(
     frame: &DmaBufFrame,
@@ -461,73 +143,7 @@ pub(crate) fn va_vpp_input_modifiers(format: DrmFourcc) -> eros::Result<Vec<DrmM
 }
 
 #[derive(Debug)]
-pub(crate) struct GStreamerRtpPacket {
-    payload: bytes::Bytes,
-    marker: bool,
-    pts_ns: Option<u64>,
-}
 
-impl TryFrom<gstreamer::Sample> for GStreamerRtpPacket {
-    type Error = eros::ErrorUnion;
-
-    fn try_from(sample: gstreamer::Sample) -> Result<Self, Self::Error> {
-        let Some(caps) = sample.caps() else {
-            eros::bail!("GStreamer encoded packet sample is missing caps");
-        };
-
-        if !caps.is_subset(&h264_rtp_caps()) {
-            eros::bail!("GStreamer encoded packet has non-H.264 RTP caps {}", caps);
-        }
-
-        let Some(buffer) = sample.buffer_owned() else {
-            eros::bail!("GStreamer H.264 RTP sample is missing its buffer");
-        };
-        let pts_ns = buffer.pts().map(gstreamer::ClockTime::nseconds);
-        let Ok(buffer) = buffer.into_mapped_buffer_readable() else {
-            eros::bail!("Failed to map GStreamer H.264 RTP packet for reading");
-        };
-        let payload = bytes::Bytes::from_owner(buffer);
-
-        if payload.len() < 12 {
-            eros::bail!("GStreamer H.264 RTP packet is shorter than its 12-byte fixed header");
-        }
-        if payload[0] >> 6 != 2 {
-            eros::bail!(
-                "GStreamer H.264 RTP packet has unsupported RTP version {}",
-                payload[0] >> 6
-            );
-        }
-        let marker = payload[1] & 0x80 != 0;
-
-        Ok(Self {
-            payload,
-            marker,
-            pts_ns,
-        })
-    }
-}
-
-impl GStreamerRtpPacket {
-    pub(crate) fn is_frame_end(&self) -> bool {
-        self.marker
-    }
-
-    fn pts_ns(&self) -> Option<u64> {
-        self.pts_ns
-    }
-
-    fn payload_len(&self) -> usize {
-        self.payload.len()
-    }
-}
-
-impl From<GStreamerRtpPacket> for bytes::Bytes {
-    fn from(packet: GStreamerRtpPacket) -> Self {
-        packet.payload
-    }
-}
-
-#[derive(Debug)]
 pub(crate) struct GStreamerVideoEncoder {
     pipeline: gstreamer::Pipeline,
     source: gstreamer_app::AppSrc,
@@ -1047,155 +663,6 @@ impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
     }
 }
 
-fn terminal_messages(
-    pipeline: &gstreamer::Pipeline,
-) -> eros::Result<flume::Receiver<gstreamer::Message>> {
-    let Some(bus) = pipeline.bus() else {
-        eros::bail!("GStreamer H.264 encoding pipeline has no Bus");
-    };
-    let (sender, receiver) = flume::bounded(1);
-
-    bus.set_sync_handler(move |_, message| {
-        if matches!(
-            message.view(),
-            gstreamer::MessageView::Error(_) | gstreamer::MessageView::Eos(_)
-        ) {
-            let _ = sender.try_send(message.to_owned());
-        }
-
-        gstreamer::BusSyncReply::Drop
-    });
-
-    Ok(receiver)
-}
-
-fn terminal_message_result(message: &gstreamer::MessageRef) -> eros::Result<()> {
-    match message.view() {
-        gstreamer::MessageView::Eos(_) => Ok(()),
-        gstreamer::MessageView::Error(error) => {
-            let source = match error.src() {
-                Some(source) => source.path_string().to_string(),
-                None => String::from("unknown source"),
-            };
-            let message = error.error();
-
-            match error.debug() {
-                Some(debug) => eros::bail!(
-                    "GStreamer H.264 pipeline failed at {}: {}; debug: {}",
-                    source,
-                    message,
-                    debug
-                ),
-                None => eros::bail!("GStreamer H.264 pipeline failed at {}: {}", source, message),
-            }
-        }
-        _ => eros::bail!("GStreamer terminal channel received a non-terminal message"),
-    }
-}
-
-fn rtp_mtu(max_rtp_packet_size: usize) -> eros::Result<u32> {
-    let Ok(rtp_mtu) = u32::try_from(max_rtp_packet_size) else {
-        eros::bail!(
-            "GStreamer RTP packet size exceeds u32: {}",
-            max_rtp_packet_size
-        );
-    };
-
-    if rtp_mtu < 28 {
-        eros::bail!(
-            "GStreamer RTP packet size must be at least 28 bytes, got {}",
-            max_rtp_packet_size
-        );
-    }
-
-    Ok(rtp_mtu)
-}
-
-fn create_required_element(factory: &str, name: &str) -> eros::Result<gstreamer::Element> {
-    Ok(gstreamer::ElementFactory::make(factory)
-        .name(name)
-        .build()
-        .with_context(|| format!("Failed to create required GStreamer element {factory}"))?)
-}
-
-fn create_pipeline_stage_queue(
-    name: &str,
-    max_size_buffers: u32,
-) -> eros::Result<gstreamer::Element> {
-    let queue = create_required_element("queue", name)?;
-    queue.set_property("max-size-buffers", max_size_buffers);
-    queue.set_property("max-size-bytes", 0_u32);
-    queue.set_property("max-size-time", 0_u64);
-
-    Ok(queue)
-}
-
-fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gstreamer::Caps> {
-    let structure = input
-        .structure(0)
-        .with_context(|| "VAAPI VPP input caps are empty")?;
-    let width = structure
-        .get::<i32>("width")
-        .with_context(|| "VAAPI VPP input caps do not contain a fixed width")?;
-    let height = structure
-        .get::<i32>("height")
-        .with_context(|| "VAAPI VPP input caps do not contain a fixed height")?;
-    let framerate = structure
-        .get::<gstreamer::Fraction>("framerate")
-        .with_context(|| "VAAPI VPP input caps do not contain a fixed framerate")?;
-
-    Ok(gstreamer::Caps::builder("video/x-raw")
-        .features(["memory:VAMemory"])
-        .field("format", "NV12")
-        .field("width", width)
-        .field("height", height)
-        .field("framerate", framerate)
-        .field("colorimetry", "bt709")
-        .build())
-}
-
-const H264_BITRATE_KBPS: u32 = 50_000;
-const H264_CPB_SIZE_KBITS: u32 = 5_000;
-const H264_KEY_INT_MAX: u32 = 1_024;
-
-fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
-    let is_vaapi = encoder
-        .factory()
-        .is_some_and(|factory| factory.name().starts_with("va"));
-    if !is_vaapi {
-        return;
-    }
-
-    encoder.set_property("b-frames", 0_u32);
-    encoder.set_property("ref-frames", 1_u32);
-    encoder.set_property("target-usage", 7_u32);
-    if encoder.find_property("mbbrc").is_some() {
-        encoder.set_property_from_str("mbbrc", "disabled");
-    }
-    encoder.set_property_from_str("rate-control", "cbr");
-    encoder.set_property("bitrate", H264_BITRATE_KBPS);
-    encoder.set_property("cpb-size", H264_CPB_SIZE_KBITS);
-    encoder.set_property("key-int-max", H264_KEY_INT_MAX);
-}
-
-fn h264_rtp_caps() -> gstreamer::Caps {
-    gstreamer::Caps::builder("application/x-rtp")
-        .field("media", "video")
-        .field("encoding-name", "H264")
-        .field("clock-rate", 90_000_i32)
-        .build()
-}
-
-fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
-    let Some(class) = factory.metadata("klass") else {
-        return false;
-    };
-
-    ["Encoder", "Video", "Hardware"]
-        .into_iter()
-        .all(|required| class.split('/').any(|component| component == required))
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1525,7 +992,7 @@ mod tests {
                 MAX_RTP_PACKET_SIZE,
                 move |packet| {
                     assert!(
-                        packet.payload.len() <= MAX_RTP_PACKET_SIZE,
+                        packet.payload_len() <= MAX_RTP_PACKET_SIZE,
                         "Encoded RTP packet should respect the transport packet size"
                     );
                     rtp_packets_for_callback.set(rtp_packets_for_callback.get() + 1);
@@ -1904,7 +1371,7 @@ mod tests {
         let packet = GStreamerRtpPacket::try_from(sample)
             .expect("An H.264 RTP sample should satisfy the encoded packet boundary");
 
-        assert_eq!(packet.payload.len(), 12);
+        assert_eq!(packet.payload_len(), 12);
         assert!(packet.is_frame_end());
     }
 

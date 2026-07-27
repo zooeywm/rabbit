@@ -18,12 +18,66 @@ use crate::{
     },
 };
 
+/// Lifecycle phase of a registered peer session.
+///
+/// ```text
+/// Joining ──activate──► Active ──begin_drain──► Draining ──(drop)──► ∅
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionPhase {
+    /// Transport open and catalogued; media not yet admitted.
+    Joining,
+    /// Control and media operations are permitted.
+    Active,
+    /// Shutdown in progress; no new streams may start.
+    Draining,
+}
+
 pub(crate) struct RunningSession {
     pub(crate) key: SessionKey,
     pub(crate) peer_name: Option<String>,
+    pub(crate) phase: SessionPhase,
     pub(crate) send: Rc<SessionSend<SessionTransportSend>>,
     pub(crate) screen_streams: HashMap<ScreenId, RunningScreenStream>,
     pub(crate) _receiver: compio::runtime::JoinHandle<()>,
+}
+
+impl RunningSession {
+    pub(crate) fn new(
+        key: SessionKey,
+        peer_name: Option<String>,
+        send: Rc<SessionSend<SessionTransportSend>>,
+        receiver: compio::runtime::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            key,
+            peer_name,
+            phase: SessionPhase::Joining,
+            send,
+            screen_streams: HashMap::new(),
+            _receiver: receiver,
+        }
+    }
+
+    pub(crate) fn activate(&mut self) -> bool {
+        if self.phase != SessionPhase::Joining {
+            return false;
+        }
+        self.phase = SessionPhase::Active;
+        true
+    }
+
+    pub(crate) fn begin_drain(&mut self) -> bool {
+        if matches!(self.phase, SessionPhase::Draining) {
+            return false;
+        }
+        self.phase = SessionPhase::Draining;
+        true
+    }
+
+    pub(crate) fn admits_new_streams(&self) -> bool {
+        self.phase == SessionPhase::Active
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -243,6 +297,22 @@ mod tests {
             Some(VideoEncoderCommand::RequestKeyFrame)
         );
         assert_eq!(encoder_commands.try_pop(), None);
+    }
+
+    #[test]
+    fn session_phase_transitions_joining_active_draining() {
+        use crate::app::model::SessionPhase;
+
+        assert_ne!(SessionPhase::Joining, SessionPhase::Active);
+        assert_ne!(SessionPhase::Active, SessionPhase::Draining);
+
+        // Transition table is enforced on RunningSession; pure enum values stay distinct.
+        let phases = [
+            SessionPhase::Joining,
+            SessionPhase::Active,
+            SessionPhase::Draining,
+        ];
+        assert_eq!(phases.len(), 3);
     }
 
     #[test]

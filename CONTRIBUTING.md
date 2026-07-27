@@ -8,6 +8,23 @@ Thank you for contributing to Rabbit. The project values small, reviewable, and 
 - Do not mix unrelated refactoring or formatting with a functional change.
 - Keep platform implementations in `infra`, business capabilities and core data types in `kernel`, and workflow orchestration in `app`.
 
+## Architecture
+
+The system architecture, dependency rules, media paths, extension playbooks, and
+invariants live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Read that document before
+changing session protocol, layer boundaries, or platform stacks.
+
+### Layer map (summary)
+
+| Layer | Path | Owns |
+| --- | --- | --- |
+| `kernel` | `src/kernel/` | Capability traits, session/control protocol, core value types |
+| `infra` | `src/infra/` | QUIC/TCP, platform capture/encode/decode/render |
+| `app` | `src/app/` | Config, services, GUI workflow, stack assembly |
+| UI | `ui/` | Slint views bound through `app::gui::view` |
+
+Prefer landing media-path changes on the Linux stack first unless the change is Windows-specific.
+
 ## Workflow
 
 1. State the assumptions, scope, and acceptance criteria before making changes.

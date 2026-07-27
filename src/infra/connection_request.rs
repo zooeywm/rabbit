@@ -15,18 +15,29 @@ use crate::{
         TcpEndpoint,
         transport::{QuicTransport, TcpTransport},
     },
-    kernel::connection_request::{ConnectionRequest, ConnectionResponse},
+    kernel::{
+        connection_request::{
+            ConnectionRequest, ConnectionResponse, EncoderProfileTag, PeerCapabilities,
+        },
+        protocol::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
+    },
 };
 
 const REQUESTER_NAME_LENGTH_SIZE: usize = size_of::<u16>();
+const PROTOCOL_VERSION_SIZE: usize = size_of::<u16>() * 2;
+const CAPABILITY_HEADER_SIZE: usize = size_of::<u8>() * 2;
 const RESPONSE_SIZE: usize = size_of::<u8>();
-const TCP_REQUEST_MAGIC: &[u8; 5] = b"RBTC\x01";
+/// TCP handshake preface for protocol-aware connection requests.
+const TCP_REQUEST_MAGIC: &[u8; 5] = b"RBTC\x02";
 const TCP_ENDPOINT_IDENTITY_SIZE: usize = 16;
+const MAX_ENCODER_PROFILES: usize = 16;
+const MAX_REQUESTER_NAME_BYTES: usize = 512;
 
 pub(crate) enum DirectConnectionOutcome {
     Connected(SessionTransport),
     Rejected,
     SelfConnection,
+    ProtocolMismatch { peer_major: u16, peer_minor: u16 },
 }
 
 pub(crate) enum PendingConnectionRequest {
@@ -188,6 +199,8 @@ async fn request_quic_transport(
         .await
         .with_context(|| "Failed to open QUIC connection request stream")?;
 
+    let local_major = request.protocol_major;
+    let local_minor = request.protocol_minor;
     send_quic_request(&mut request_stream, request).await?;
 
     let response = recv_quic_response(&mut response_stream).await?;
@@ -199,6 +212,10 @@ async fn request_quic_transport(
         )),
         ConnectionResponse::Rejected => Ok(DirectConnectionOutcome::Rejected),
         ConnectionResponse::SelfConnection => Ok(DirectConnectionOutcome::SelfConnection),
+        ConnectionResponse::ProtocolMismatch => Ok(DirectConnectionOutcome::ProtocolMismatch {
+            peer_major: local_major,
+            peer_minor: local_minor,
+        }),
     }
 }
 
@@ -210,6 +227,8 @@ async fn request_tcp_transport(
     let remote_address = stream
         .peer_addr()
         .with_context(|| "Failed to read TCP connection request peer address")?;
+    let local_major = request.protocol_major;
+    let local_minor = request.protocol_minor;
     send_tcp_request(&mut stream, endpoint_identity, request).await?;
     let response = recv_tcp_response(&mut stream).await?;
     log_response(remote_address, response);
@@ -220,6 +239,10 @@ async fn request_tcp_transport(
         )),
         ConnectionResponse::Rejected => Ok(DirectConnectionOutcome::Rejected),
         ConnectionResponse::SelfConnection => Ok(DirectConnectionOutcome::SelfConnection),
+        ConnectionResponse::ProtocolMismatch => Ok(DirectConnectionOutcome::ProtocolMismatch {
+            peer_major: local_major,
+            peer_minor: local_minor,
+        }),
     }
 }
 
@@ -260,12 +283,26 @@ async fn receive_quic_request(
         }
     };
     let request = recv_quic_request(&mut request_stream).await?;
+    if !request.is_protocol_compatible() {
+        warn_protocol_mismatch(remote_address, &request);
+        let mut response_stream = response_stream;
+        send_quic_response(&mut response_stream, ConnectionResponse::ProtocolMismatch).await?;
+        connection.close(
+            compio::quic::VarInt::from_u32(0),
+            b"Protocol major version mismatch",
+        );
+        return Ok(None);
+    }
 
     info!(
         event = "connection_request_received",
         transport = "quic",
         %remote_address,
         requester_name = %request.requester_name,
+        protocol_major = request.protocol_major,
+        protocol_minor = request.protocol_minor,
+        max_screens = request.capabilities.max_screens,
+        encoder_profiles = request.capabilities.encoder_profiles.len(),
         "Connection request received"
     );
     debug!(
@@ -305,11 +342,25 @@ async fn receive_tcp_request(
         return Ok(None);
     }
 
+    if !request.is_protocol_compatible() {
+        warn_protocol_mismatch(remote_address, &request);
+        send_tcp_response(&mut stream, ConnectionResponse::ProtocolMismatch).await?;
+        stream
+            .shutdown()
+            .await
+            .with_context(|| "Failed to close protocol-mismatched TCP connection")?;
+        return Ok(None);
+    }
+
     info!(
         event = "connection_request_received",
         transport = "tcp",
         %remote_address,
         requester_name = %request.requester_name,
+        protocol_major = request.protocol_major,
+        protocol_minor = request.protocol_minor,
+        max_screens = request.capabilities.max_screens,
+        encoder_profiles = request.capabilities.encoder_profiles.len(),
         "Connection request received"
     );
     debug!(
@@ -388,6 +439,7 @@ fn log_response(remote_address: SocketAddr, response: ConnectionResponse) {
         ConnectionResponse::Accepted => "accepted",
         ConnectionResponse::Rejected => "rejected",
         ConnectionResponse::SelfConnection => "self_connection",
+        ConnectionResponse::ProtocolMismatch => "protocol_mismatch",
     };
     info!(
         event = "connection_response_received",
@@ -397,18 +449,122 @@ fn log_response(remote_address: SocketAddr, response: ConnectionResponse) {
     );
 }
 
+fn warn_protocol_mismatch(remote_address: SocketAddr, request: &ConnectionRequest) {
+    tracing::warn!(
+        event = "connection_protocol_mismatch",
+        %remote_address,
+        peer_major = request.protocol_major,
+        peer_minor = request.protocol_minor,
+        local_major = PROTOCOL_MAJOR,
+        local_minor = PROTOCOL_MINOR,
+        "Rejected connection request for protocol major mismatch"
+    );
+}
+
+fn encode_connection_request_body(request: &ConnectionRequest) -> eros::Result<Bytes> {
+    if request.requester_name.len() > MAX_REQUESTER_NAME_BYTES {
+        eros::bail!(
+            "Connection requester name exceeds {} bytes",
+            MAX_REQUESTER_NAME_BYTES
+        );
+    }
+    if request.capabilities.encoder_profiles.len() > MAX_ENCODER_PROFILES {
+        eros::bail!(
+            "Connection request advertises more than {} encoder profiles",
+            MAX_ENCODER_PROFILES
+        );
+    }
+
+    let requester_name = request.requester_name.as_bytes();
+    let requester_name_length = u16::try_from(requester_name.len())
+        .with_context(|| "Failed to encode connection requester name length")?;
+    let profile_count = u8::try_from(request.capabilities.encoder_profiles.len())
+        .with_context(|| "Failed to encode encoder profile count")?;
+
+    let mut body = BytesMut::with_capacity(
+        PROTOCOL_VERSION_SIZE
+            + CAPABILITY_HEADER_SIZE
+            + request.capabilities.encoder_profiles.len()
+            + REQUESTER_NAME_LENGTH_SIZE
+            + requester_name.len(),
+    );
+    body.put_u16(request.protocol_major);
+    body.put_u16(request.protocol_minor);
+    body.put_u8(request.capabilities.max_screens);
+    body.put_u8(profile_count);
+    for profile in &request.capabilities.encoder_profiles {
+        body.put_u8(profile.as_u8());
+    }
+    body.put_u16(requester_name_length);
+    body.extend_from_slice(requester_name);
+    Ok(body.freeze())
+}
+
+fn decode_connection_request_body(mut body: Bytes) -> eros::Result<ConnectionRequest> {
+    if body.len() < PROTOCOL_VERSION_SIZE + CAPABILITY_HEADER_SIZE + REQUESTER_NAME_LENGTH_SIZE {
+        eros::bail!(
+            "Connection request body is too short ({} bytes)",
+            body.len()
+        );
+    }
+
+    let protocol_major = u16::from_be_bytes([body[0], body[1]]);
+    let protocol_minor = u16::from_be_bytes([body[2], body[3]]);
+    let max_screens = body[4];
+    let profile_count = usize::from(body[5]);
+    body = body.split_off(CAPABILITY_HEADER_SIZE + PROTOCOL_VERSION_SIZE);
+
+    if profile_count > MAX_ENCODER_PROFILES {
+        eros::bail!(
+            "Connection request advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})"
+        );
+    }
+    if body.len() < profile_count + REQUESTER_NAME_LENGTH_SIZE {
+        eros::bail!("Connection request truncated while reading encoder profiles");
+    }
+
+    let mut encoder_profiles = Vec::with_capacity(profile_count);
+    for tag in body.split_to(profile_count) {
+        // Unknown tags are ignored so minor upgrades remain additive.
+        if let Ok(profile) = EncoderProfileTag::try_from(tag) {
+            encoder_profiles.push(profile);
+        }
+    }
+
+    if body.len() < REQUESTER_NAME_LENGTH_SIZE {
+        eros::bail!("Connection request truncated while reading requester name length");
+    }
+    let requester_name_length = usize::from(u16::from_be_bytes([body[0], body[1]]));
+    body = body.split_off(REQUESTER_NAME_LENGTH_SIZE);
+    if requester_name_length > MAX_REQUESTER_NAME_BYTES {
+        eros::bail!("Connection requester name length {requester_name_length} exceeds limit");
+    }
+    if body.len() != requester_name_length {
+        eros::bail!(
+            "Connection request name length {requester_name_length} does not match remaining {} bytes",
+            body.len()
+        );
+    }
+    let requester_name = String::from_utf8(body.to_vec())
+        .with_context(|| "Failed to decode connection requester name as UTF-8")?;
+
+    Ok(ConnectionRequest {
+        protocol_major,
+        protocol_minor,
+        requester_name,
+        capabilities: PeerCapabilities {
+            max_screens,
+            encoder_profiles,
+        },
+    })
+}
+
 async fn send_quic_request(
     stream: &mut compio::quic::SendStream,
     request: ConnectionRequest,
 ) -> eros::Result<()> {
-    let requester_name = Bytes::from(request.requester_name);
-    let requester_name_length = u16::try_from(requester_name.len())
-        .with_context(|| "Failed to encode connection requester name length")?;
-    let mut header = BytesMut::with_capacity(REQUESTER_NAME_LENGTH_SIZE);
-
-    header.put_u16(requester_name_length);
-
-    let mut chunks = [header.freeze(), requester_name];
+    let body = encode_connection_request_body(&request)?;
+    let mut chunks = [body];
 
     stream
         .write_all_chunks(&mut chunks)
@@ -424,17 +580,23 @@ async fn send_quic_request(
 async fn recv_quic_request(
     stream: &mut compio::quic::RecvStream,
 ) -> eros::Result<ConnectionRequest> {
-    let header = read_quic_exact(stream, REQUESTER_NAME_LENGTH_SIZE)
-        .await
-        .with_context(|| "Failed to receive QUIC connection request header")?;
-    let requester_name_length = usize::from(u16::from_be_bytes([header[0], header[1]]));
-    let requester_name = read_quic_exact(stream, requester_name_length)
-        .await
-        .with_context(|| "Failed to receive QUIC connection requester name")?;
-    let requester_name = String::from_utf8(requester_name.into())
-        .with_context(|| "Failed to decode QUIC connection requester name as UTF-8")?;
+    let mut body = BytesMut::new();
+    loop {
+        let Some(chunk) = stream
+            .read_chunk(64 * 1024, true)
+            .await
+            .with_context(|| "Failed to read QUIC connection request stream")?
+        else {
+            break;
+        };
+        body.extend_from_slice(&chunk.bytes);
+        if body.len() > 8 * 1024 {
+            eros::bail!("QUIC connection request exceeds 8 KiB");
+        }
+    }
 
-    Ok(ConnectionRequest { requester_name })
+    decode_connection_request_body(body.freeze())
+        .with_context(|| "Failed to decode QUIC connection request")
 }
 
 async fn send_quic_response(
@@ -492,19 +654,12 @@ async fn send_tcp_request(
     endpoint_identity: [u8; TCP_ENDPOINT_IDENTITY_SIZE],
     request: ConnectionRequest,
 ) -> eros::Result<()> {
-    let requester_name = request.requester_name.into_bytes();
-    let requester_name_length = u16::try_from(requester_name.len())
-        .with_context(|| "Failed to encode TCP connection requester name length")?;
-    let mut message = BytesMut::with_capacity(
-        TCP_REQUEST_MAGIC.len()
-            + TCP_ENDPOINT_IDENTITY_SIZE
-            + REQUESTER_NAME_LENGTH_SIZE
-            + requester_name.len(),
-    );
+    let body = encode_connection_request_body(&request)?;
+    let mut message =
+        BytesMut::with_capacity(TCP_REQUEST_MAGIC.len() + TCP_ENDPOINT_IDENTITY_SIZE + body.len());
     message.extend_from_slice(TCP_REQUEST_MAGIC);
     message.extend_from_slice(&endpoint_identity);
-    message.put_u16(requester_name_length);
-    message.extend_from_slice(&requester_name);
+    message.extend_from_slice(&body);
 
     Ok(stream
         .write_all(message.freeze())
@@ -516,30 +671,59 @@ async fn send_tcp_request(
 async fn recv_tcp_request_message(
     stream: &mut compio::net::TcpStream,
 ) -> eros::Result<([u8; TCP_ENDPOINT_IDENTITY_SIZE], ConnectionRequest)> {
-    let header_length =
-        TCP_REQUEST_MAGIC.len() + TCP_ENDPOINT_IDENTITY_SIZE + REQUESTER_NAME_LENGTH_SIZE;
-    let header = read_tcp_exact(stream, header_length, "TCP connection request header").await?;
-    if &header[..TCP_REQUEST_MAGIC.len()] != TCP_REQUEST_MAGIC {
+    let preface_length = TCP_REQUEST_MAGIC.len() + TCP_ENDPOINT_IDENTITY_SIZE;
+    let preface = read_tcp_exact(stream, preface_length, "TCP connection request preface").await?;
+    if &preface[..TCP_REQUEST_MAGIC.len()] != TCP_REQUEST_MAGIC {
         eros::bail!("TCP connection request has an invalid protocol preface");
     }
     let identity_start = TCP_REQUEST_MAGIC.len();
     let identity_end = identity_start + TCP_ENDPOINT_IDENTITY_SIZE;
     let mut endpoint_identity = [0; TCP_ENDPOINT_IDENTITY_SIZE];
-    endpoint_identity.copy_from_slice(&header[identity_start..identity_end]);
+    endpoint_identity.copy_from_slice(&preface[identity_start..identity_end]);
+
+    // Fixed header of the body before name: version(4) + caps(2) + profiles(N) + name_len(2) + name
+    let fixed = read_tcp_exact(
+        stream,
+        PROTOCOL_VERSION_SIZE + CAPABILITY_HEADER_SIZE,
+        "TCP connection request capability header",
+    )
+    .await?;
+    let profile_count = usize::from(fixed[5]);
+    if profile_count > MAX_ENCODER_PROFILES {
+        eros::bail!(
+            "TCP connection request advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})"
+        );
+    }
+    let profiles_and_name_len = read_tcp_exact(
+        stream,
+        profile_count + REQUESTER_NAME_LENGTH_SIZE,
+        "TCP connection request profiles",
+    )
+    .await?;
+    let name_len_offset = profile_count;
     let requester_name_length = usize::from(u16::from_be_bytes([
-        header[identity_end],
-        header[identity_end + 1],
+        profiles_and_name_len[name_len_offset],
+        profiles_and_name_len[name_len_offset + 1],
     ]));
+    if requester_name_length > MAX_REQUESTER_NAME_BYTES {
+        eros::bail!("TCP connection requester name is too long");
+    }
     let requester_name = read_tcp_exact(
         stream,
         requester_name_length,
         "TCP connection requester name",
     )
     .await?;
-    let requester_name = String::from_utf8(requester_name)
-        .with_context(|| "Failed to decode TCP connection requester name as UTF-8")?;
 
-    Ok((endpoint_identity, ConnectionRequest { requester_name }))
+    let mut body =
+        BytesMut::with_capacity(fixed.len() + profiles_and_name_len.len() + requester_name.len());
+    body.extend_from_slice(&fixed);
+    body.extend_from_slice(&profiles_and_name_len);
+    body.extend_from_slice(&requester_name);
+    let request = decode_connection_request_body(body.freeze())
+        .with_context(|| "Failed to decode TCP connection request")?;
+
+    Ok((endpoint_identity, request))
 }
 
 async fn send_tcp_response(
@@ -612,6 +796,8 @@ mod tests {
                 .expect("TCP connection request should be received")
                 .expect("TCP connection request should require approval");
                 assert_eq!(request.request().requester_name, "outgoing");
+                assert!(request.request().is_protocol_compatible());
+                assert!(!request.request().capabilities.encoder_profiles.is_empty());
                 request
                     .accept()
                     .await
@@ -621,9 +807,10 @@ mod tests {
                 &ConnectionEndpoint::Tcp(outgoing),
                 "localhost".to_string(),
                 Some(incoming_address.port()),
-                ConnectionRequest {
-                    requester_name: "outgoing".to_string(),
-                },
+                ConnectionRequest::local(
+                    "outgoing".to_string(),
+                    crate::kernel::connection_request::PeerCapabilities::default(),
+                ),
             )
             .await
             .expect("TCP connection request should complete");
@@ -665,9 +852,10 @@ mod tests {
                 &ConnectionEndpoint::Tcp(endpoint),
                 address.ip().to_string(),
                 Some(address.port()),
-                ConnectionRequest {
-                    requester_name: "self".to_string(),
-                },
+                ConnectionRequest::local(
+                    "self".to_string(),
+                    crate::kernel::connection_request::PeerCapabilities::default(),
+                ),
             )
             .await
             .expect("TCP self-connection should receive a response");

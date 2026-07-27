@@ -1,3 +1,12 @@
+//! Control-plane messages on the session control channel.
+//!
+//! Domain types for stream configuration live in [`crate::kernel::screen_configuration`].
+//! This module owns wire tags, binary codecs (`binrw`), and conversion to
+//! [`crate::kernel::transport::TransportMessage`].
+//!
+//! Adding a message: domain type → wire tag → codec → role checks in `session`.
+//! Bump [`crate::kernel::protocol`] version accordingly.
+
 use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binread, binrw, io::Cursor};
 use bytes::Bytes;
 use eros::Context;
