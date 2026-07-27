@@ -161,41 +161,58 @@ impl QuicEndpoint {
     }
 
     pub(crate) async fn accept_connection(&self) -> eros::Result<Option<compio::quic::Connection>> {
-        let Some(incoming) = self.endpoint.wait_incoming().await else {
-            return Ok(None);
-        };
-        let remote_address = incoming.remote_address();
-        info!(
-            event = "quic_connection_started",
-            direction = "incoming",
-            %remote_address,
-            "QUIC connection started"
-        );
-        let started_at = Instant::now();
-        let connection = incoming
-            .await
-            .with_context(|| format!("Failed to accept QUIC connection from {remote_address}"))?;
-        let elapsed = started_at.elapsed();
-        let rtt = connection.rtt();
+        loop {
+            let Some(incoming) = self.endpoint.wait_incoming().await else {
+                return Ok(None);
+            };
+            let remote_address = incoming.remote_address();
+            info!(
+                event = "quic_connection_started",
+                direction = "incoming",
+                %remote_address,
+                "QUIC connection started"
+            );
+            let started_at = Instant::now();
+            let connection = match incoming.await {
+                Ok(connection) => connection,
+                Err(compio::quic::ConnectionError::ApplicationClosed(close))
+                    if close.reason.as_ref() == SELF_CONNECTION_CLOSE_REASON =>
+                {
+                    info!(
+                        event = "self_connection_rejected",
+                        %remote_address,
+                        "Ignored rejected QUIC self-connection"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Ok(Err(error).with_context(|| {
+                        format!("Failed to accept QUIC connection from {remote_address}")
+                    })?);
+                }
+            };
+            let elapsed = started_at.elapsed();
+            let rtt = connection.rtt();
 
-        info!(
-            event = "quic_connection_established",
-            direction = "incoming",
-            %remote_address,
-            elapsed_ms = elapsed.as_millis(),
-            rtt_ms = rtt.as_millis(),
-            "QUIC connection established"
-        );
+            info!(
+                event = "quic_connection_established",
+                direction = "incoming",
+                %remote_address,
+                elapsed_ms = elapsed.as_millis(),
+                rtt_ms = rtt.as_millis(),
+                "QUIC connection established"
+            );
 
-        debug!(
-            %remote_address,
-            elapsed_ms = elapsed.as_millis(),
-            rtt_ms = rtt.as_millis(),
-            stats = ?connection.stats(),
-            "Established incoming QUIC connection"
-        );
+            debug!(
+                %remote_address,
+                elapsed_ms = elapsed.as_millis(),
+                rtt_ms = rtt.as_millis(),
+                stats = ?connection.stats(),
+                "Established incoming QUIC connection"
+            );
 
-        Ok(Some(connection))
+            return Ok(Some(connection));
+        }
     }
 }
 
