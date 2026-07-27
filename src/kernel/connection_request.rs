@@ -105,6 +105,29 @@ pub enum ConnectionResponse {
     ProtocolMismatch = 3,
 }
 
+/// Full handshake reply after a connection request.
+///
+/// On accept, the host advertises its capabilities so the controller can size
+/// stream requests without guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionHandshakeReply {
+    Accepted { host_capabilities: PeerCapabilities },
+    Rejected,
+    SelfConnection,
+    ProtocolMismatch,
+}
+
+impl ConnectionHandshakeReply {
+    pub fn status(&self) -> ConnectionResponse {
+        match self {
+            Self::Accepted { .. } => ConnectionResponse::Accepted,
+            Self::Rejected => ConnectionResponse::Rejected,
+            Self::SelfConnection => ConnectionResponse::SelfConnection,
+            Self::ProtocolMismatch => ConnectionResponse::ProtocolMismatch,
+        }
+    }
+}
+
 impl From<ConnectionResponse> for u8 {
     fn from(response: ConnectionResponse) -> Self {
         response as Self

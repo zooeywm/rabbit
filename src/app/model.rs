@@ -7,10 +7,7 @@ use std::{
 use eros::Context as _;
 
 use crate::{
-    app::{
-        platform::ApplicationStack,
-        runtime::session_lifecycle::SessionPhaseEvent,
-    },
+    app::{platform::ApplicationStack, runtime::session_lifecycle::SessionPhaseEvent},
     infra::{PendingConnectionRequest, SessionTransportSend, unsync_queue::UnsyncQueue},
     kernel::{
         connection_request::PeerCapabilities,

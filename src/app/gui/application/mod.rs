@@ -189,7 +189,10 @@ where
             .iter()
             .find(|session| session.send.id() == session_id)
         else {
-            eros::bail!("Session {} is not registered for stream configuration", session_id.0);
+            eros::bail!(
+                "Session {} is not registered for stream configuration",
+                session_id.0
+            );
         };
         evaluate_set_screen_streams(
             request,

@@ -15,7 +15,7 @@ use crate::{
         init_logging,
         model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
         platform::{ApplicationStack, RunnableApp},
-        runtime::host_policy::evaluate_set_screen_streams,
+        runtime::host_control::{HostControlDecision, classify_host_session_message},
         screen_stream::run_host_screen_stream,
         services::host_stream::HostStreamPlan,
     },
@@ -29,7 +29,7 @@ use crate::{
         protocol::{PROTOCOL_NAME, protocol_version_string},
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole},
-        session_control::{ControlMessage, OutgoingScreenList},
+        session_control::OutgoingScreenList,
         transport::TransportRecv,
         video_encoder::VideoEncoder,
     },
@@ -68,8 +68,7 @@ where
         worker_reaper_handle,
     )?;
     app.run_app().await?;
-    let local_capabilities =
-        PeerCapabilities::local_host(ScreenLayoutManager::screens(&app).len());
+    let local_capabilities = PeerCapabilities::local_host(ScreenLayoutManager::screens(&app).len());
     let mut model = ApplicationModel::new(app, requester_name, local_capabilities);
     let screens = ScreenLayoutManager::screens(&model.app).to_vec();
     info!(
@@ -228,7 +227,7 @@ where
         "Auto-accepting controller connection"
     );
 
-    let transport = request.accept().await?;
+    let transport = request.accept(model.local_capabilities.clone()).await?;
     let id = model.next_session_id()?;
     let session = Session::new(id, SessionRole::Host, transport);
     let (send, recv) = session.split();
@@ -268,30 +267,23 @@ where
     <Stack::App as FramePipelineManager>::Subscription: Unpin,
     <Stack::ScreenStreamEncoder as VideoEncoder>::Packet: Into<bytes::Bytes>,
 {
-    match message {
-        SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
-            let Some(session) = model.sessions.iter().find(|session| session.send.id() == id)
-            else {
-                warn!(session_id = id.0, "No session for stream request");
-                return Ok(());
-            };
-            let evaluation = match evaluate_set_screen_streams(
-                request,
-                |screen_id| model.app.screen(screen_id).cloned(),
-                &model.local_capabilities,
-                &session.peer_capabilities,
-                session.admits_new_streams(),
-            ) {
-                Ok(evaluation) => evaluation,
-                Err(error) => {
-                    warn!(
-                        session_id = id.0,
-                        error = %error,
-                        "Headless host rejected stream request by policy"
-                    );
-                    return Ok(());
-                }
-            };
+    let Some(session) = model
+        .sessions
+        .iter()
+        .find(|session| session.send.id() == id)
+    else {
+        warn!(session_id = id.0, "No session for host control message");
+        return Ok(());
+    };
+    let decision = classify_host_session_message(
+        message,
+        &model.local_capabilities,
+        &session.peer_capabilities,
+        session.admits_new_streams(),
+        |screen_id| model.app.screen(screen_id).cloned(),
+    );
+    match decision {
+        HostControlDecision::SetScreenStreams(Ok(evaluation)) => {
             let session_send = Rc::clone(&session.send);
             let finished = sender.clone();
             compio::runtime::spawn(async move {
@@ -306,37 +298,34 @@ where
             })
             .detach();
         }
-        SessionMessage::Control(ControlMessage::RequestKeyFrame(request)) => {
+        HostControlDecision::SetScreenStreams(Err(error)) => {
+            warn!(
+                session_id = id.0,
+                error = %error,
+                "Headless host rejected stream request by policy"
+            );
+        }
+        HostControlDecision::RequestKeyFrame(screen_id) => {
             if let Some(session) = model
                 .sessions
                 .iter_mut()
                 .find(|session| session.send.id() == id)
-                && let Some(stream) = session.screen_streams.get(&request.screen_id)
+                && let Some(stream) = session.screen_streams.get(&screen_id)
             {
                 stream.request_key_frame();
             }
         }
-        SessionMessage::Control(ControlMessage::StopScreenStream(stop)) => {
+        HostControlDecision::StopScreenStream(screen_id) => {
             if let Some(session) = model
                 .sessions
                 .iter_mut()
                 .find(|session| session.send.id() == id)
             {
-                session.screen_streams.remove(&stop.screen_id);
+                session.screen_streams.remove(&screen_id);
             }
         }
-        SessionMessage::Control(other) => {
-            warn!(
-                session_id = id.0,
-                message = ?std::mem::discriminant(&other),
-                "Headless host ignored control message"
-            );
-        }
-        SessionMessage::Video(_) | SessionMessage::KeyFrameRequired(_) => {
-            warn!(
-                session_id = id.0,
-                "Headless host ignored controller media message"
-            );
+        HostControlDecision::Ignore => {
+            warn!(session_id = id.0, "Headless host ignored session message");
         }
     }
     Ok(())

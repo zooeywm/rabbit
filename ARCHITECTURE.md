@@ -87,10 +87,12 @@ Violations of this rule are architecture bugs (see `src/architecture.rs`).
 
 Peers **must** share a major version. Hosts reply with
 `ConnectionResponse::ProtocolMismatch` and drop the request when majors differ.
-Minor is additive; unknown encoder profile tags are ignored.
+On **accept**, the host returns `ConnectionHandshakeReply::Accepted { host_capabilities }`
+so the controller stores peer budgets on its session. Minor is additive; unknown
+encoder profile tags are ignored.
 
-Stream setup consults `kernel::capability` (and `app::runtime::host_policy`) so
-advertised budgets are enforced.
+Stream setup consults `kernel::capability` (and `app::runtime::host_policy` /
+`host_control`) so advertised budgets are enforced.
 
 Transport channel mapping **must** stay aligned with protocol constants.
 
@@ -327,10 +329,9 @@ Completed foundation:
 
 Further product increments (not structural blockers):
 
-1. Handshake **response** carries host capabilities to controllers.
-2. Session FSM timeouts / reconnect events.
-3. Headless controller / record-to-file sinks.
-4. Continue splitting remaining mega-files (gstreamer encode body).
+1. Session FSM timeouts / reconnect events.
+2. Headless controller / record-to-file sinks.
+3. Continue splitting remaining mega-files (gstreamer encode body).
 
 ---
 

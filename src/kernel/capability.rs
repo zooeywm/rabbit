@@ -120,7 +120,10 @@ mod tests {
             false,
         )
         .expect_err("must reject");
-        assert_eq!(err.kind, crate::kernel::domain_error::DomainErrorKind::SessionState);
+        assert_eq!(
+            err.kind,
+            crate::kernel::domain_error::DomainErrorKind::SessionState
+        );
     }
 
     #[test]
@@ -136,7 +139,10 @@ mod tests {
             true,
         )
         .expect_err("must reject");
-        assert_eq!(err.kind, crate::kernel::domain_error::DomainErrorKind::Capability);
+        assert_eq!(
+            err.kind,
+            crate::kernel::domain_error::DomainErrorKind::Capability
+        );
     }
 
     #[test]

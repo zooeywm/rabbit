@@ -48,9 +48,9 @@ impl SessionPhase {
             (P::Draining, E::Activate) => Err(DomainError::session_state(
                 "cannot Activate a Draining session",
             )),
-            (P::Draining, E::BeginDrain) => Err(DomainError::session_state(
-                "session is already Draining",
-            )),
+            (P::Draining, E::BeginDrain) => {
+                Err(DomainError::session_state("session is already Draining"))
+            }
         }
     }
 }

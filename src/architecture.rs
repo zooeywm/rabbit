@@ -56,12 +56,7 @@ fn services_and_runtime_do_not_depend_on_slint_or_gui_messages() {
         let dir = crate_src().join(rel);
         for file in rust_sources_under(&dir) {
             let text = source_imports(&file);
-            for forbidden in [
-                "slint::",
-                "RootMessage",
-                "GuiIntent",
-                "crate::app::gui::",
-            ] {
+            for forbidden in ["slint::", "RootMessage", "GuiIntent", "crate::app::gui::"] {
                 assert!(
                     !text.contains(forbidden),
                     "{} must not reference {forbidden}",

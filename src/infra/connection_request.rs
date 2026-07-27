@@ -17,7 +17,8 @@ use crate::{
     },
     kernel::{
         connection_request::{
-            ConnectionRequest, ConnectionResponse, EncoderProfileTag, PeerCapabilities,
+            ConnectionHandshakeReply, ConnectionRequest, ConnectionResponse, EncoderProfileTag,
+            PeerCapabilities,
         },
         protocol::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
     },
@@ -34,10 +35,16 @@ const MAX_ENCODER_PROFILES: usize = 16;
 const MAX_REQUESTER_NAME_BYTES: usize = 512;
 
 pub(crate) enum DirectConnectionOutcome {
-    Connected(SessionTransport),
+    Connected {
+        transport: SessionTransport,
+        host_capabilities: PeerCapabilities,
+    },
     Rejected,
     SelfConnection,
-    ProtocolMismatch { peer_major: u16, peer_minor: u16 },
+    ProtocolMismatch {
+        peer_major: u16,
+        peer_minor: u16,
+    },
 }
 
 pub(crate) enum PendingConnectionRequest {
@@ -204,18 +211,23 @@ async fn request_quic_transport(
     send_quic_request(&mut request_stream, request).await?;
 
     let response = recv_quic_response(&mut response_stream).await?;
-    log_response(remote_address, response);
+    log_response(remote_address, &response);
 
     match response {
-        ConnectionResponse::Accepted => Ok(DirectConnectionOutcome::Connected(
-            SessionTransport::Quic(QuicTransport::open(connection).await?),
-        )),
-        ConnectionResponse::Rejected => Ok(DirectConnectionOutcome::Rejected),
-        ConnectionResponse::SelfConnection => Ok(DirectConnectionOutcome::SelfConnection),
-        ConnectionResponse::ProtocolMismatch => Ok(DirectConnectionOutcome::ProtocolMismatch {
-            peer_major: local_major,
-            peer_minor: local_minor,
-        }),
+        ConnectionHandshakeReply::Accepted { host_capabilities } => {
+            Ok(DirectConnectionOutcome::Connected {
+                transport: SessionTransport::Quic(QuicTransport::open(connection).await?),
+                host_capabilities,
+            })
+        }
+        ConnectionHandshakeReply::Rejected => Ok(DirectConnectionOutcome::Rejected),
+        ConnectionHandshakeReply::SelfConnection => Ok(DirectConnectionOutcome::SelfConnection),
+        ConnectionHandshakeReply::ProtocolMismatch => {
+            Ok(DirectConnectionOutcome::ProtocolMismatch {
+                peer_major: local_major,
+                peer_minor: local_minor,
+            })
+        }
     }
 }
 
@@ -231,18 +243,23 @@ async fn request_tcp_transport(
     let local_minor = request.protocol_minor;
     send_tcp_request(&mut stream, endpoint_identity, request).await?;
     let response = recv_tcp_response(&mut stream).await?;
-    log_response(remote_address, response);
+    log_response(remote_address, &response);
 
     match response {
-        ConnectionResponse::Accepted => Ok(DirectConnectionOutcome::Connected(
-            SessionTransport::Tcp(TcpTransport::new(stream)?),
-        )),
-        ConnectionResponse::Rejected => Ok(DirectConnectionOutcome::Rejected),
-        ConnectionResponse::SelfConnection => Ok(DirectConnectionOutcome::SelfConnection),
-        ConnectionResponse::ProtocolMismatch => Ok(DirectConnectionOutcome::ProtocolMismatch {
-            peer_major: local_major,
-            peer_minor: local_minor,
-        }),
+        ConnectionHandshakeReply::Accepted { host_capabilities } => {
+            Ok(DirectConnectionOutcome::Connected {
+                transport: SessionTransport::Tcp(TcpTransport::new(stream)?),
+                host_capabilities,
+            })
+        }
+        ConnectionHandshakeReply::Rejected => Ok(DirectConnectionOutcome::Rejected),
+        ConnectionHandshakeReply::SelfConnection => Ok(DirectConnectionOutcome::SelfConnection),
+        ConnectionHandshakeReply::ProtocolMismatch => {
+            Ok(DirectConnectionOutcome::ProtocolMismatch {
+                peer_major: local_major,
+                peer_minor: local_minor,
+            })
+        }
     }
 }
 
@@ -286,7 +303,11 @@ async fn receive_quic_request(
     if !request.is_protocol_compatible() {
         warn_protocol_mismatch(remote_address, &request);
         let mut response_stream = response_stream;
-        send_quic_response(&mut response_stream, ConnectionResponse::ProtocolMismatch).await?;
+        send_quic_response(
+            &mut response_stream,
+            &ConnectionHandshakeReply::ProtocolMismatch,
+        )
+        .await?;
         connection.close(
             compio::quic::VarInt::from_u32(0),
             b"Protocol major version mismatch",
@@ -329,7 +350,7 @@ async fn receive_tcp_request(
     let (peer_identity, request) = recv_tcp_request_message(&mut stream).await?;
 
     if peer_identity == endpoint_identity {
-        send_tcp_response(&mut stream, ConnectionResponse::SelfConnection).await?;
+        send_tcp_response(&mut stream, &ConnectionHandshakeReply::SelfConnection).await?;
         stream
             .shutdown()
             .await
@@ -344,7 +365,7 @@ async fn receive_tcp_request(
 
     if !request.is_protocol_compatible() {
         warn_protocol_mismatch(remote_address, &request);
-        send_tcp_response(&mut stream, ConnectionResponse::ProtocolMismatch).await?;
+        send_tcp_response(&mut stream, &ConnectionHandshakeReply::ProtocolMismatch).await?;
         stream
             .shutdown()
             .await
@@ -391,17 +412,20 @@ impl PendingConnectionRequest {
         }
     }
 
-    pub(crate) async fn accept(self) -> eros::Result<SessionTransport> {
+    pub(crate) async fn accept(
+        self,
+        host_capabilities: PeerCapabilities,
+    ) -> eros::Result<SessionTransport> {
+        let reply = ConnectionHandshakeReply::Accepted { host_capabilities };
         match self {
             Self::Quic(mut request) => {
-                send_quic_response(&mut request.response_stream, ConnectionResponse::Accepted)
-                    .await?;
+                send_quic_response(&mut request.response_stream, &reply).await?;
                 Ok(SessionTransport::Quic(
                     QuicTransport::accept(request.connection).await?,
                 ))
             }
             Self::Tcp(mut request) => {
-                send_tcp_response(&mut request.stream, ConnectionResponse::Accepted).await?;
+                send_tcp_response(&mut request.stream, &reply).await?;
                 Ok(SessionTransport::Tcp(TcpTransport::new(request.stream)?))
             }
         }
@@ -410,8 +434,11 @@ impl PendingConnectionRequest {
     pub(crate) async fn reject(self) -> eros::Result<()> {
         match self {
             Self::Quic(mut request) => {
-                send_quic_response(&mut request.response_stream, ConnectionResponse::Rejected)
-                    .await?;
+                send_quic_response(
+                    &mut request.response_stream,
+                    &ConnectionHandshakeReply::Rejected,
+                )
+                .await?;
                 request.response_stream.stopped().await.with_context(
                     || "Failed while confirming the rejected QUIC connection response",
                 )?;
@@ -421,7 +448,7 @@ impl PendingConnectionRequest {
                 );
             }
             Self::Tcp(mut request) => {
-                send_tcp_response(&mut request.stream, ConnectionResponse::Rejected).await?;
+                send_tcp_response(&mut request.stream, &ConnectionHandshakeReply::Rejected).await?;
                 request
                     .stream
                     .shutdown()
@@ -434,12 +461,12 @@ impl PendingConnectionRequest {
     }
 }
 
-fn log_response(remote_address: SocketAddr, response: ConnectionResponse) {
+fn log_response(remote_address: SocketAddr, response: &ConnectionHandshakeReply) {
     let decision = match response {
-        ConnectionResponse::Accepted => "accepted",
-        ConnectionResponse::Rejected => "rejected",
-        ConnectionResponse::SelfConnection => "self_connection",
-        ConnectionResponse::ProtocolMismatch => "protocol_mismatch",
+        ConnectionHandshakeReply::Accepted { .. } => "accepted",
+        ConnectionHandshakeReply::Rejected => "rejected",
+        ConnectionHandshakeReply::SelfConnection => "self_connection",
+        ConnectionHandshakeReply::ProtocolMismatch => "protocol_mismatch",
     };
     info!(
         event = "connection_response_received",
@@ -461,6 +488,53 @@ fn warn_protocol_mismatch(remote_address: SocketAddr, request: &ConnectionReques
     );
 }
 
+fn encode_peer_capabilities(capabilities: &PeerCapabilities) -> eros::Result<BytesMut> {
+    if capabilities.encoder_profiles.len() > MAX_ENCODER_PROFILES {
+        eros::bail!(
+            "Connection advertises more than {} encoder profiles",
+            MAX_ENCODER_PROFILES
+        );
+    }
+    let profile_count = u8::try_from(capabilities.encoder_profiles.len())
+        .with_context(|| "Failed to encode encoder profile count")?;
+    let mut body =
+        BytesMut::with_capacity(CAPABILITY_HEADER_SIZE + capabilities.encoder_profiles.len());
+    body.put_u8(capabilities.max_screens);
+    body.put_u8(profile_count);
+    for profile in &capabilities.encoder_profiles {
+        body.put_u8(profile.as_u8());
+    }
+    Ok(body)
+}
+
+fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, Bytes)> {
+    if body.len() < CAPABILITY_HEADER_SIZE {
+        eros::bail!("Capability header is too short ({} bytes)", body.len());
+    }
+    let max_screens = body[0];
+    let profile_count = usize::from(body[1]);
+    body = body.split_off(CAPABILITY_HEADER_SIZE);
+    if profile_count > MAX_ENCODER_PROFILES {
+        eros::bail!("Advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})");
+    }
+    if body.len() < profile_count {
+        eros::bail!("Truncated while reading encoder profiles");
+    }
+    let mut encoder_profiles = Vec::with_capacity(profile_count);
+    for tag in body.split_to(profile_count) {
+        if let Ok(profile) = EncoderProfileTag::try_from(tag) {
+            encoder_profiles.push(profile);
+        }
+    }
+    Ok((
+        PeerCapabilities {
+            max_screens,
+            encoder_profiles,
+        },
+        body,
+    ))
+}
+
 fn encode_connection_request_body(request: &ConnectionRequest) -> eros::Result<Bytes> {
     if request.requester_name.len() > MAX_REQUESTER_NAME_BYTES {
         eros::bail!(
@@ -468,33 +542,17 @@ fn encode_connection_request_body(request: &ConnectionRequest) -> eros::Result<B
             MAX_REQUESTER_NAME_BYTES
         );
     }
-    if request.capabilities.encoder_profiles.len() > MAX_ENCODER_PROFILES {
-        eros::bail!(
-            "Connection request advertises more than {} encoder profiles",
-            MAX_ENCODER_PROFILES
-        );
-    }
 
     let requester_name = request.requester_name.as_bytes();
     let requester_name_length = u16::try_from(requester_name.len())
         .with_context(|| "Failed to encode connection requester name length")?;
-    let profile_count = u8::try_from(request.capabilities.encoder_profiles.len())
-        .with_context(|| "Failed to encode encoder profile count")?;
-
+    let caps = encode_peer_capabilities(&request.capabilities)?;
     let mut body = BytesMut::with_capacity(
-        PROTOCOL_VERSION_SIZE
-            + CAPABILITY_HEADER_SIZE
-            + request.capabilities.encoder_profiles.len()
-            + REQUESTER_NAME_LENGTH_SIZE
-            + requester_name.len(),
+        PROTOCOL_VERSION_SIZE + caps.len() + REQUESTER_NAME_LENGTH_SIZE + requester_name.len(),
     );
     body.put_u16(request.protocol_major);
     body.put_u16(request.protocol_minor);
-    body.put_u8(request.capabilities.max_screens);
-    body.put_u8(profile_count);
-    for profile in &request.capabilities.encoder_profiles {
-        body.put_u8(profile.as_u8());
-    }
+    body.extend_from_slice(&caps);
     body.put_u16(requester_name_length);
     body.extend_from_slice(requester_name);
     Ok(body.freeze())
@@ -510,26 +568,8 @@ fn decode_connection_request_body(mut body: Bytes) -> eros::Result<ConnectionReq
 
     let protocol_major = u16::from_be_bytes([body[0], body[1]]);
     let protocol_minor = u16::from_be_bytes([body[2], body[3]]);
-    let max_screens = body[4];
-    let profile_count = usize::from(body[5]);
-    body = body.split_off(CAPABILITY_HEADER_SIZE + PROTOCOL_VERSION_SIZE);
-
-    if profile_count > MAX_ENCODER_PROFILES {
-        eros::bail!(
-            "Connection request advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})"
-        );
-    }
-    if body.len() < profile_count + REQUESTER_NAME_LENGTH_SIZE {
-        eros::bail!("Connection request truncated while reading encoder profiles");
-    }
-
-    let mut encoder_profiles = Vec::with_capacity(profile_count);
-    for tag in body.split_to(profile_count) {
-        // Unknown tags are ignored so minor upgrades remain additive.
-        if let Ok(profile) = EncoderProfileTag::try_from(tag) {
-            encoder_profiles.push(profile);
-        }
-    }
+    body = body.split_off(PROTOCOL_VERSION_SIZE);
+    let (capabilities, mut body) = decode_peer_capabilities(body)?;
 
     if body.len() < REQUESTER_NAME_LENGTH_SIZE {
         eros::bail!("Connection request truncated while reading requester name length");
@@ -552,11 +592,45 @@ fn decode_connection_request_body(mut body: Bytes) -> eros::Result<ConnectionReq
         protocol_major,
         protocol_minor,
         requester_name,
-        capabilities: PeerCapabilities {
-            max_screens,
-            encoder_profiles,
-        },
+        capabilities,
     })
+}
+
+fn encode_connection_reply(reply: &ConnectionHandshakeReply) -> eros::Result<Bytes> {
+    match reply {
+        ConnectionHandshakeReply::Accepted { host_capabilities } => {
+            let caps = encode_peer_capabilities(host_capabilities)?;
+            let mut body = BytesMut::with_capacity(1 + caps.len());
+            body.put_u8(ConnectionResponse::Accepted.into());
+            body.extend_from_slice(&caps);
+            Ok(body.freeze())
+        }
+        other => Ok(Bytes::copy_from_slice(&[other.status().into()])),
+    }
+}
+
+fn decode_connection_reply(mut body: Bytes) -> eros::Result<ConnectionHandshakeReply> {
+    if body.is_empty() {
+        eros::bail!("Connection response is empty");
+    }
+    let status = ConnectionResponse::try_from(body[0])
+        .with_context(|| "Failed to decode connection response status")?;
+    body = body.split_off(1);
+    match status {
+        ConnectionResponse::Accepted => {
+            let (host_capabilities, rest) = decode_peer_capabilities(body)?;
+            if !rest.is_empty() {
+                eros::bail!(
+                    "Accepted connection response has {} trailing bytes",
+                    rest.len()
+                );
+            }
+            Ok(ConnectionHandshakeReply::Accepted { host_capabilities })
+        }
+        ConnectionResponse::Rejected => Ok(ConnectionHandshakeReply::Rejected),
+        ConnectionResponse::SelfConnection => Ok(ConnectionHandshakeReply::SelfConnection),
+        ConnectionResponse::ProtocolMismatch => Ok(ConnectionHandshakeReply::ProtocolMismatch),
+    }
 }
 
 async fn send_quic_request(
@@ -601,12 +675,13 @@ async fn recv_quic_request(
 
 async fn send_quic_response(
     stream: &mut compio::quic::SendStream,
-    response: ConnectionResponse,
+    reply: &ConnectionHandshakeReply,
 ) -> eros::Result<()> {
-    let mut response = [Bytes::copy_from_slice(&[response.into()])];
+    let body = encode_connection_reply(reply)?;
+    let mut chunks = [body];
 
     stream
-        .write_all_chunks(&mut response)
+        .write_all_chunks(&mut chunks)
         .await
         .with_context(|| "Failed to send QUIC connection response")?;
     stream
@@ -618,13 +693,23 @@ async fn send_quic_response(
 
 async fn recv_quic_response(
     stream: &mut compio::quic::RecvStream,
-) -> eros::Result<ConnectionResponse> {
-    let response = read_quic_exact(stream, RESPONSE_SIZE)
-        .await
-        .with_context(|| "Failed to receive QUIC connection response")?;
-
-    Ok(ConnectionResponse::try_from(response[0])
-        .with_context(|| "Failed to decode QUIC connection response")?)
+) -> eros::Result<ConnectionHandshakeReply> {
+    let mut body = BytesMut::new();
+    loop {
+        let Some(chunk) = stream
+            .read_chunk(64 * 1024, true)
+            .await
+            .with_context(|| "Failed to receive QUIC connection response")?
+        else {
+            break;
+        };
+        body.extend_from_slice(&chunk.bytes);
+        if body.len() > 4 * 1024 {
+            eros::bail!("QUIC connection response exceeds 4 KiB");
+        }
+    }
+    decode_connection_reply(body.freeze())
+        .with_context(|| "Failed to decode QUIC connection response")
 }
 
 async fn read_quic_exact(
@@ -728,10 +813,11 @@ async fn recv_tcp_request_message(
 
 async fn send_tcp_response(
     stream: &mut compio::net::TcpStream,
-    response: ConnectionResponse,
+    reply: &ConnectionHandshakeReply,
 ) -> eros::Result<()> {
+    let body = encode_connection_reply(reply)?;
     Ok(stream
-        .write_all(Bytes::copy_from_slice(&[response.into()]))
+        .write_all(body)
         .await
         .0
         .with_context(|| "Failed to send TCP connection response")?)
@@ -739,11 +825,34 @@ async fn send_tcp_response(
 
 async fn recv_tcp_response(
     stream: &mut compio::net::TcpStream,
-) -> eros::Result<ConnectionResponse> {
-    let response = read_tcp_exact(stream, RESPONSE_SIZE, "TCP connection response").await?;
-
-    Ok(ConnectionResponse::try_from(response[0])
-        .with_context(|| "Failed to decode TCP connection response")?)
+) -> eros::Result<ConnectionHandshakeReply> {
+    let status = read_tcp_exact(stream, RESPONSE_SIZE, "TCP connection response status").await?;
+    let status = ConnectionResponse::try_from(status[0])
+        .with_context(|| "Failed to decode TCP connection response status")?;
+    match status {
+        ConnectionResponse::Accepted => {
+            let header =
+                read_tcp_exact(stream, CAPABILITY_HEADER_SIZE, "TCP host capability header")
+                    .await?;
+            let profile_count = usize::from(header[1]);
+            if profile_count > MAX_ENCODER_PROFILES {
+                eros::bail!(
+                    "Accepted TCP response advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})"
+                );
+            }
+            let profiles =
+                read_tcp_exact(stream, profile_count, "TCP host encoder profiles").await?;
+            let mut body = BytesMut::with_capacity(1 + header.len() + profiles.len());
+            body.put_u8(ConnectionResponse::Accepted.into());
+            body.extend_from_slice(&header);
+            body.extend_from_slice(&profiles);
+            decode_connection_reply(body.freeze())
+                .with_context(|| "Failed to decode accepted TCP connection response")
+        }
+        ConnectionResponse::Rejected => Ok(ConnectionHandshakeReply::Rejected),
+        ConnectionResponse::SelfConnection => Ok(ConnectionHandshakeReply::SelfConnection),
+        ConnectionResponse::ProtocolMismatch => Ok(ConnectionHandshakeReply::ProtocolMismatch),
+    }
 }
 
 async fn read_tcp_exact(
@@ -799,7 +908,7 @@ mod tests {
                 assert!(request.request().is_protocol_compatible());
                 assert!(!request.request().capabilities.encoder_profiles.is_empty());
                 request
-                    .accept()
+                    .accept(crate::kernel::connection_request::PeerCapabilities::local_host(2))
                     .await
                     .expect("TCP connection request should be accepted")
             });
@@ -814,9 +923,13 @@ mod tests {
             )
             .await
             .expect("TCP connection request should complete");
-            let DirectConnectionOutcome::Connected(_) = outcome else {
+            let DirectConnectionOutcome::Connected {
+                host_capabilities, ..
+            } = outcome
+            else {
                 panic!("TCP connection request should establish a transport");
             };
+            assert_eq!(host_capabilities.max_screens, 2);
             incoming_task
                 .await
                 .expect("Incoming TCP approval task should finish");

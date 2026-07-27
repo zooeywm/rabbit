@@ -84,11 +84,12 @@ kernel → ∅   （无 app、无 infra、无 GUI）
 - 请求方显示名
 
 对等方 **必须** 共享 major。major 不同时 Host 回复
-`ConnectionResponse::ProtocolMismatch` 并丢弃请求。minor 可加；未知编码
-profile 标签被忽略。
+`ConnectionResponse::ProtocolMismatch` 并丢弃请求。**接受**时 Host 返回
+`ConnectionHandshakeReply::Accepted { host_capabilities }`，Controller 将预算写入
+会话。minor 可加；未知编码 profile 标签被忽略。
 
-开流前经 `kernel::capability`（及 `app::runtime::host_policy`）校验，使宣告预算
-真正生效。
+开流前经 `kernel::capability`（及 `app::runtime::host_policy` / `host_control`）
+校验，使宣告预算真正生效。
 
 传输信道映射 **必须** 与协议常量对齐。
 
@@ -321,10 +322,9 @@ Linux 视频编码（`infra/.../video_encoder/gstreamer/`）：
 
 后续产品增量（非结构阻塞）：
 
-1. 握手 **响应** 向 Controller 回传 host 能力。
-2. 会话 FSM 超时 / 重连事件。
-3. Headless controller / 录到文件 sink。
-4. 继续拆分超大文件（gstreamer 编码主体）。
+1. 会话 FSM 超时 / 重连事件。
+2. Headless controller / 录到文件 sink。
+3. 继续拆分超大文件（gstreamer 编码主体）。
 
 ---
 

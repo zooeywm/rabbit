@@ -3,5 +3,6 @@
 //! Nothing in this module depends on the presentation shell or view publishers.
 //! Entry points call these policies, then perform I/O.
 
+pub mod host_control;
 pub mod host_policy;
 pub mod session_lifecycle;

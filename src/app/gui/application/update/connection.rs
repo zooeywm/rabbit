@@ -88,7 +88,10 @@ where
             }
             RootMessage::DirectConnectionFinished(result) => {
                 match result {
-                    Ok(DirectConnectionOutcome::Connected(transport)) => {
+                    Ok(DirectConnectionOutcome::Connected {
+                        transport,
+                        host_capabilities,
+                    }) => {
                         let peer_address = transport.remote_address();
                         self.listener
                             .direct_connection
@@ -97,12 +100,10 @@ where
                         let session = Session::new(id, SessionRole::Controller, transport);
                         let (send, recv) = session.split();
 
-                        // Host capabilities are not yet returned on accept; use defaults
-                        // until the handshake response carries host ads.
                         self.start_session(
                             peer_address,
                             None,
-                            crate::kernel::connection_request::PeerCapabilities::default(),
+                            host_capabilities,
                             send,
                             recv,
                             sender,
@@ -158,11 +159,12 @@ where
                     decision = "accepted",
                     "Connection request decided"
                 );
+                let host_capabilities = self.model.local_capabilities.clone();
                 compio::runtime::spawn(async move {
                     approval_sender.post(RootMessage::ConnectionAccepted {
                         peer_name,
                         peer_capabilities,
-                        result: request.accept().await,
+                        result: request.accept(host_capabilities).await,
                     });
                 })
                 .detach();
