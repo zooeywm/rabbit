@@ -143,9 +143,15 @@ where
         apply_headless_timeouts(&mut model, &timeout_policy);
         match messages.pop().await {
             HeadlessMessage::Shutdown => {
-                info!(event = "headless_shutdown_started", "Headless host shutting down");
+                info!(
+                    event = "headless_shutdown_started",
+                    "Headless host shutting down"
+                );
                 shutdown_headless(&mut model).await;
-                info!(event = "headless_shutdown_finished", "Headless host stopped");
+                info!(
+                    event = "headless_shutdown_finished",
+                    "Headless host stopped"
+                );
                 return Ok(());
             }
             HeadlessMessage::ListenerFailed(error) => {

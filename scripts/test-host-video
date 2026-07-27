@@ -4,6 +4,9 @@ set -eu
 
 : "${RABBIT_KMS_SCREEN:?Set RABBIT_KMS_SCREEN to the DRM connector name}"
 
+# Optional: RABBIT_HOST_VIDEO_TEST_FRAME_RATE=144 or 144/1
+# Default: use the KMS-reported refresh (e.g. 144 on HDMI-A-1 @ 144 Hz).
+
 run_seconds=${1:-5}
 case "$run_seconds" in
     ''|*[!0-9]*)

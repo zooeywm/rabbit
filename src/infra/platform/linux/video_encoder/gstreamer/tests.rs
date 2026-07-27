@@ -279,11 +279,19 @@ fn streams_several_host_video_frames() {
     let test_timeout = run_duration
         .checked_add(SHUTDOWN_TIMEOUT)
         .expect("Host video test timeout should fit Duration");
-    let source_size = host_video_test_source_size(&screen_name);
+    let (source_size, source_frame_rate) = host_video_test_source_geometry(&screen_name);
     let target_size = host_video_test_target_size(source_size);
+    let target_frame_rate = host_video_test_target_frame_rate(source_frame_rate);
     eprintln!(
-        "Host video test source: {}x{}, target: {}x{}",
-        source_size.width, source_size.height, target_size.width, target_size.height
+        "Host video test source: {}x{} @ {}/{} fps, target: {}x{} @ {}/{} fps",
+        source_size.width,
+        source_size.height,
+        source_frame_rate.numerator(),
+        source_frame_rate.denominator(),
+        target_size.width,
+        target_size.height,
+        target_frame_rate.numerator(),
+        target_frame_rate.denominator(),
     );
     let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
     let encoded_frames = Rc::new(Cell::new(0_u64));
@@ -302,7 +310,11 @@ fn streams_several_host_video_frames() {
                 crate::infra::platform::video_encoder::va_vpp_input_profiles,
             ),
             pipeline: GbmFramePipelineManagerState::new(reaper_handle),
-            screens: vec![host_video_test_screen(screen_name, source_size)],
+            screens: vec![host_video_test_screen(
+                screen_name,
+                source_size,
+                source_frame_rate,
+            )],
         };
         let frames = GbmFramePipelineManager::inj_ref_mut(&mut deps)
             .subscribe(
@@ -310,14 +322,14 @@ fn streams_several_host_video_frames() {
                 FramePipelineParameters {
                     frame_size: target_size,
                 },
-                FrameRate::new(120, 1).expect("Host video test frame rate should be valid"),
+                target_frame_rate,
             )
             .expect("Host video frame pipeline should start");
         let frames = TimedFrames::new(frames, run_duration);
         let encoding = GStreamerVideoEncoder::run_inner(
             frames,
             futures_util::stream::pending(),
-            FrameRate::new(120, 1).expect("Host video test frame rate should be valid"),
+            target_frame_rate,
             MAX_RTP_PACKET_SIZE,
             move |packet| {
                 assert!(
@@ -339,9 +351,13 @@ fn streams_several_host_video_frames() {
             .expect("Host video chain should encode H.264 RTP frames");
     });
 
+    let min_frames = host_video_test_min_encoded_frames(target_frame_rate, run_seconds)
+        .max(REQUIRED_ENCODED_FRAMES);
     assert!(
-        encoded_frames.get() >= REQUIRED_ENCODED_FRAMES,
-        "Host video chain should encode at least {REQUIRED_ENCODED_FRAMES} frames, got {}",
+        encoded_frames.get() >= min_frames,
+        "Host video chain should encode at least {min_frames} frames for {}/{} fps over {run_seconds}s, got {}",
+        target_frame_rate.numerator(),
+        target_frame_rate.denominator(),
         encoded_frames.get()
     );
     assert!(
@@ -1047,7 +1063,8 @@ fn average_ms(total: Duration, count: u64) -> f64 {
     duration_ms(total) / count as f64
 }
 
-fn host_video_test_source_size(screen_name: &str) -> PixelSize {
+/// Probe native size and refresh from one KMS frame (DRM mode, not a hardcoded fps).
+fn host_video_test_source_geometry(screen_name: &str) -> (PixelSize, FrameRate) {
     let (_reaper, reaper_handle) = WorkerReaper::new().expect("Test worker reaper should start");
     let ScreenCaptureSource { lease, receiver } = KmsCaptureLease::new(
         screen_name.to_owned(),
@@ -1072,9 +1089,10 @@ fn host_video_test_source_size(screen_name: &str) -> PixelSize {
         } => output_size,
         crate::infra::platform::screen_capture::KmsCapturedSource::Composed(buffer) => buffer.size,
     };
+    let frame_rate = frame.frame_rate;
     drop(lease);
 
-    size
+    (size, frame_rate)
 }
 
 fn host_video_test_target_size(source_size: PixelSize) -> PixelSize {
@@ -1096,12 +1114,44 @@ fn host_video_test_target_size(source_size: PixelSize) -> PixelSize {
     PixelSize { width, height }
 }
 
-fn host_video_test_screen(name: String, resolution: PixelSize) -> Screen {
+/// Optional override: `RABBIT_HOST_VIDEO_TEST_FRAME_RATE=144` or `144/1`.
+/// Default: use the KMS-reported source refresh (e.g. 144 on HDMI-A-1).
+fn host_video_test_target_frame_rate(source: FrameRate) -> FrameRate {
+    let Ok(raw) = std::env::var("RABBIT_HOST_VIDEO_TEST_FRAME_RATE") else {
+        return source;
+    };
+    let (numerator, denominator) = if let Some((num, den)) = raw.split_once('/') {
+        (
+            num.parse::<u32>()
+                .expect("RABBIT_HOST_VIDEO_TEST_FRAME_RATE numerator should be a positive integer"),
+            den.parse::<u32>().expect(
+                "RABBIT_HOST_VIDEO_TEST_FRAME_RATE denominator should be a positive integer",
+            ),
+        )
+    } else {
+        (
+            raw.parse::<u32>()
+                .expect("RABBIT_HOST_VIDEO_TEST_FRAME_RATE should be FPS or NUM/DEN"),
+            1,
+        )
+    };
+    FrameRate::new(numerator, denominator)
+        .expect("RABBIT_HOST_VIDEO_TEST_FRAME_RATE should be a positive frame rate")
+}
+
+/// Expect at least ~80% of the target refresh over the run (allows short warmup).
+fn host_video_test_min_encoded_frames(frame_rate: FrameRate, run_seconds: u64) -> u64 {
+    let frames_per_second = f64::from(frame_rate.numerator()) / f64::from(frame_rate.denominator());
+    let expected = frames_per_second * run_seconds as f64 * 0.8;
+    expected.floor().max(1.0) as u64
+}
+
+fn host_video_test_screen(name: String, resolution: PixelSize, frame_rate: FrameRate) -> Screen {
     Screen {
         id: ScreenId(0),
         name,
         resolution,
-        frame_rate: FrameRate::new(60, 1).expect("Test frame rate should be valid"),
+        frame_rate,
         layout: ScreenLayout {
             rect: ScreenRect {
                 x: 0,

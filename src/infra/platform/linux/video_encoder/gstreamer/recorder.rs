@@ -182,9 +182,12 @@ impl GStreamerScreenRecorder {
         let sink = create_required_element("filesink", "file-output")?;
         sink.set_property(
             "location",
-            output_path
-                .to_str()
-                .with_context(|| format!("Recording path is not valid UTF-8: {}", output_path.display()))?,
+            output_path.to_str().with_context(|| {
+                format!(
+                    "Recording path is not valid UTF-8: {}",
+                    output_path.display()
+                )
+            })?,
         );
         sink.set_property("sync", false);
         sink.set_property("async", false);
@@ -291,10 +294,7 @@ impl GStreamerScreenRecorder {
         }
     }
 
-    fn prepare_frame(
-        &self,
-        frame: Rc<GbmFramePipelineFrame>,
-    ) -> eros::Result<GStreamerVideoFrame> {
+    fn prepare_frame(&self, frame: Rc<GbmFramePipelineFrame>) -> eros::Result<GStreamerVideoFrame> {
         if frame.source_frame_rate != self.source_frame_rate {
             eros::bail!(
                 "Frame-pipeline source frame rate changed from {:?} to {:?}",
@@ -331,7 +331,10 @@ impl GStreamerScreenRecorder {
         // Wait briefly for mp4mux to finalize the file after EOS.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
-            match self.terminal_messages.recv_timeout(Duration::from_millis(100)) {
+            match self
+                .terminal_messages
+                .recv_timeout(Duration::from_millis(100))
+            {
                 Ok(message) => {
                     terminal_message_result(&message)?;
                     break;

@@ -198,10 +198,7 @@ impl Config {
         if configured.is_empty() {
             let base = default_videos_rabbit_dir()?;
             fs::create_dir_all(&base).with_context(|| {
-                format!(
-                    "Failed to create recording directory {}",
-                    base.display()
-                )
+                format!("Failed to create recording directory {}", base.display())
             })?;
             return Ok(base.join(default_recording_file_name()));
         }
@@ -211,11 +208,12 @@ impl Config {
         if path
             .extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| {
-                matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov")
-            })
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov"))
         {
-            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
                 fs::create_dir_all(parent).with_context(|| {
                     format!(
                         "Failed to create recording parent directory {}",
@@ -226,12 +224,8 @@ impl Config {
             return Ok(path);
         }
 
-        fs::create_dir_all(&path).with_context(|| {
-            format!(
-                "Failed to create recording directory {}",
-                path.display()
-            )
-        })?;
+        fs::create_dir_all(&path)
+            .with_context(|| format!("Failed to create recording directory {}", path.display()))?;
         Ok(path.join(default_recording_file_name()))
     }
 }
@@ -256,11 +250,8 @@ pub fn default_videos_rabbit_dir() -> eros::Result<std::path::PathBuf> {
 }
 
 fn default_recording_file_name() -> String {
-    let now = time::OffsetDateTime::now_local()
-        .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-    let format = time::macros::format_description!(
-        "[year][month][day]-[hour][minute][second]"
-    );
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let format = time::macros::format_description!("[year][month][day]-[hour][minute][second]");
     let stamp = now.format(&format).unwrap_or_else(|_| "recording".into());
     format!("rabbit-{stamp}.mp4")
 }
@@ -269,10 +260,7 @@ fn expand_user_path(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")
     {
-        return format!(
-            "{home}{}{rest}",
-            std::path::MAIN_SEPARATOR
-        );
+        return format!("{home}{}{rest}", std::path::MAIN_SEPARATOR);
     }
     if path == "~"
         && let Ok(home) = std::env::var("HOME")
@@ -384,19 +372,14 @@ output_path = "~/Videos/rabbit-out.mp4"
 
     #[test]
     fn resolve_recording_output_path_uses_file_or_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "rabbit-record-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("rabbit-record-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
 
         let file = dir.join("clip.mp4");
         let mut config = Config::default();
         config.recording.output_path = file.to_string_lossy().into_owned();
-        let resolved = config
-            .resolve_recording_output_path()
-            .expect("file path");
+        let resolved = config.resolve_recording_output_path().expect("file path");
         assert_eq!(resolved, file);
 
         config.recording.output_path = dir.to_string_lossy().into_owned();
@@ -418,10 +401,7 @@ output_path = "~/Videos/rabbit-out.mp4"
     fn default_recording_dir_is_under_videos_rabbit() {
         let dir = crate::app::config::default_videos_rabbit_dir().expect("videos dir");
         assert!(
-            dir.ends_with("rabbit")
-                || dir
-                    .components()
-                    .any(|c| c.as_os_str() == "rabbit"),
+            dir.ends_with("rabbit") || dir.components().any(|c| c.as_os_str() == "rabbit"),
             "expected .../rabbit, got {}",
             dir.display()
         );
