@@ -227,24 +227,16 @@ impl DmaBufPool {
         }
     }
 
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub(crate) fn acquire(
         &mut self,
         mut allocate: impl FnMut() -> eros::Result<DmaBufFrame>,
         mut wait_on_fence: impl FnMut(OwnedFd) -> eros::Result<()>,
     ) -> eros::Result<Option<DmaBufFrame>> {
-        while let Ok(release) = self.released.try_recv() {
-            if !release.reusable {
-                self.slots[release.slot] = None;
-                continue;
-            }
-            if let Some(fence) = release.readiness_fence
-                && let Err(error) = wait_on_fence(fence)
-            {
-                self.slots[release.slot] = None;
-                return Err(error);
-            }
-            self.available.push_back(release.slot);
-        }
+        self.drain_releases(&mut wait_on_fence)?;
 
         let slot = match self.available.pop_front() {
             Some(slot) => slot,
@@ -272,6 +264,55 @@ impl DmaBufPool {
         let lease = DmaBufLease::new(slot, self.release.clone());
 
         Ok(Some(frame.try_clone_with_lease(lease)?))
+    }
+
+    /// Like [`acquire`], but waits until a slot is free instead of returning `None`.
+    /// Used by lossless recording so encode backpressure never drops frames.
+    pub(crate) fn acquire_blocking(
+        &mut self,
+        mut allocate: impl FnMut() -> eros::Result<DmaBufFrame>,
+        mut wait_on_fence: impl FnMut(OwnedFd) -> eros::Result<()>,
+    ) -> eros::Result<DmaBufFrame> {
+        loop {
+            if let Some(frame) = self.acquire(&mut allocate, &mut wait_on_fence)? {
+                return Ok(frame);
+            }
+            // Pool full: wait for at least one lease drop (GStreamer finished with the buffer).
+            let release = self
+                .released
+                .recv()
+                .with_context(|| "DMA-BUF pool release channel disconnected while waiting")?;
+            self.apply_release(release, &mut wait_on_fence)?;
+        }
+    }
+
+    fn drain_releases(
+        &mut self,
+        wait_on_fence: &mut impl FnMut(OwnedFd) -> eros::Result<()>,
+    ) -> eros::Result<()> {
+        while let Ok(release) = self.released.try_recv() {
+            self.apply_release(release, wait_on_fence)?;
+        }
+        Ok(())
+    }
+
+    fn apply_release(
+        &mut self,
+        release: DmaBufRelease,
+        wait_on_fence: &mut impl FnMut(OwnedFd) -> eros::Result<()>,
+    ) -> eros::Result<()> {
+        if !release.reusable {
+            self.slots[release.slot] = None;
+            return Ok(());
+        }
+        if let Some(fence) = release.readiness_fence
+            && let Err(error) = wait_on_fence(fence)
+        {
+            self.slots[release.slot] = None;
+            return Err(error);
+        }
+        self.available.push_back(release.slot);
+        Ok(())
     }
 }
 

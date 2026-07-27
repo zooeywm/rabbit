@@ -123,12 +123,17 @@ struct GpuPipeline {
     outputs: LatestSender<eros::Result<GbmFramePipelineFrame>>,
     output_strategy: Option<FrameOutputStrategy>,
     output_pool: DmaBufPool,
+    /// When true, wait for a free pool slot instead of dropping (recording).
+    block_on_pool_exhaustion: bool,
     output_pool_exhaustion_warned: bool,
     first_output: Option<DmaBufFrame>,
     va_nv12_allocator: Option<VaDmaBufAllocator>,
 }
 
+/// Streaming pool depth (latest-frame keeps few surfaces in flight).
 const OUTPUT_POOL_CAPACITY: usize = 6;
+/// Cap recording pool size to limit VRAM while still covering encode pipeline depth.
+const RECORD_OUTPUT_POOL_CAPACITY: usize = 48;
 
 struct GpuScreen {
     device: Option<Receiver<eros::Result<GpuDevice>>>,
@@ -176,6 +181,7 @@ struct LatestSender<T> {
     overflow_receiver: Receiver<T>,
     /// When true, drop older frames on full queue. When false, block until space.
     drop_to_latest: bool,
+    queue_capacity: usize,
 }
 
 #[derive(Debug)]
@@ -233,6 +239,7 @@ impl GpuWorker {
             sender: output_sender,
             overflow_receiver: frames.clone(),
             drop_to_latest,
+            queue_capacity: capacity,
         };
 
         self.commands
@@ -351,6 +358,14 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                 parameters,
                 outputs,
             })) => {
+                let block_on_pool = !outputs.drop_to_latest;
+                let pool_capacity = if block_on_pool {
+                    outputs
+                        .queue_capacity
+                        .clamp(OUTPUT_POOL_CAPACITY, RECORD_OUTPUT_POOL_CAPACITY)
+                } else {
+                    OUTPUT_POOL_CAPACITY
+                };
                 pipelines.insert(
                     id,
                     GpuPipeline {
@@ -358,7 +373,8 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                         parameters,
                         outputs,
                         output_strategy: None,
-                        output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
+                        output_pool: DmaBufPool::new(pool_capacity),
+                        block_on_pool_exhaustion: block_on_pool,
                         output_pool_exhaustion_warned: false,
                         first_output: None,
                         va_nv12_allocator: None,
@@ -838,30 +854,37 @@ fn process_pipeline_frame(
         }
     };
     let va_nv12_allocator = pipeline.va_nv12_allocator.as_ref();
-    let buffer = pipeline.output_pool.acquire(
-        || match first.take() {
-            Some(buffer) => Ok(buffer),
-            None => allocate_output(context, parameters.frame_size, strategy, va_nv12_allocator),
-        },
-        |fence| {
-            context
-                .egl()
-                .wait_on_native_fence(fence)
-                .with_context(|| "Failed to enqueue frame-pipeline output reuse fence")
-        },
-    )?;
-    let Some(mut buffer) = buffer else {
-        if !pipeline.output_pool_exhaustion_warned {
-            tracing::warn!(
-                target: "rabbit::frame_pipeline",
-                screen_id = pipeline.screen_id.0,
-                strategy = strategy.name(),
-                capacity = OUTPUT_POOL_CAPACITY,
-                "Frame-pipeline output pool exhausted; dropping source frames until an output surface is released"
-            );
-            pipeline.output_pool_exhaustion_warned = true;
-        }
-        return Ok(None);
+    let wait_fence = |fence| {
+        context
+            .egl()
+            .wait_on_native_fence(fence)
+            .with_context(|| "Failed to enqueue frame-pipeline output reuse fence")
+    };
+    let allocate = || match first.take() {
+        Some(buffer) => Ok(buffer),
+        None => allocate_output(context, parameters.frame_size, strategy, va_nv12_allocator),
+    };
+    let mut buffer = if pipeline.block_on_pool_exhaustion {
+        // Lossless recording: never drop for pool exhaustion; wait for GStreamer to
+        // release ParentBufferMeta leases so DMA-BUF slots return to the pool.
+        pipeline
+            .output_pool
+            .acquire_blocking(allocate, wait_fence)?
+    } else {
+        let Some(buffer) = pipeline.output_pool.acquire(allocate, wait_fence)? else {
+            if !pipeline.output_pool_exhaustion_warned {
+                tracing::warn!(
+                    target: "rabbit::frame_pipeline",
+                    screen_id = pipeline.screen_id.0,
+                    strategy = strategy.name(),
+                    capacity = pipeline.output_pool.capacity(),
+                    "Frame-pipeline output pool exhausted; dropping source frames until an output surface is released"
+                );
+                pipeline.output_pool_exhaustion_warned = true;
+            }
+            return Ok(None);
+        };
+        buffer
     };
     match strategy {
         FrameOutputStrategy::PassthroughXrgb(_) => {
@@ -1124,9 +1147,11 @@ mod tests {
                         sender: matching_sender,
                         overflow_receiver: matching_frames.clone(),
                         drop_to_latest: true,
+                        queue_capacity: 1,
                     },
                     output_strategy: None,
                     output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
+                    block_on_pool_exhaustion: false,
                     output_pool_exhaustion_warned: false,
                     first_output: None,
                     va_nv12_allocator: None,
@@ -1141,9 +1166,11 @@ mod tests {
                         sender: other_sender,
                         overflow_receiver: other_frames.clone(),
                         drop_to_latest: true,
+                        queue_capacity: 1,
                     },
                     output_strategy: None,
                     output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
+                    block_on_pool_exhaustion: false,
                     output_pool_exhaustion_warned: false,
                     first_output: None,
                     va_nv12_allocator: None,
@@ -1197,6 +1224,7 @@ mod tests {
             sender,
             overflow_receiver: receiver.clone(),
             drop_to_latest: true,
+            queue_capacity: 1,
         };
 
         outputs.publish(1_u8);

@@ -37,9 +37,9 @@ const RECORD_BITRATE_KBPS: u32 = 80_000;
 const RECORD_CPB_SIZE_KBITS: u32 = 40_000;
 /// ~2s GOP at 144 Hz; better compression than per-frame IDR streaming defaults.
 const RECORD_KEY_INT_MAX: u32 = 288;
-/// Enough to absorb short encode stalls without appsrc overflow.
-const RECORD_APPSRC_MAX_BUFFERS: u64 = 64;
-const RECORD_STAGE_QUEUE_BUFFERS: u32 = 32;
+/// Keep appsrc depth within the VA NV12 output pool so leases can recycle.
+const RECORD_APPSRC_MAX_BUFFERS: u64 = 32;
+const RECORD_STAGE_QUEUE_BUFFERS: u32 = 16;
 
 /// Records a processed frame subscription to an H.264 MP4 file until cancelled
 /// or the frame stream ends.
