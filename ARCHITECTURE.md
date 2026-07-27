@@ -66,7 +66,7 @@ Violations of this rule are architecture bugs (see `src/architecture.rs`).
 
 | Surface | Modules | Responsibility |
 | --- | --- | --- |
-| **Protocol** | `protocol`, `connection_request`, `session_control`, `transport` | Version identity, handshake, control tags, channels/delivery |
+| **Protocol** | `protocol`, `connection_request`, `session_control` (`wire`), `transport` | Version identity, handshake, control tags/codecs, channels/delivery |
 | **Session** | `session` (`rtp`, `role`) | Role-gated send/recv, RTP assembly, session messages |
 | **Screen** | `geometry`, `screen_manager`, `screen_capture`, `screen_configuration` | Topology, capture port, stream negotiation types |
 | **Media** | `frame_pipeline`, `screen_stream`, `video_encoder`, `video_decoder`, `video_renderer` | Processing ports between capture and network/display |
@@ -176,7 +176,9 @@ call runtime/services, update state groups.
 | --- | --- |
 | `services::host_stream` | Plan host pipelines from screens + request |
 | `services::session_catalog` | Stable ordering of host sessions/streams |
-| `runtime::host_policy` | Capability + phase admission then plan |
+| `runtime::host_policy` / `host_control` | Host admission + control classification |
+| `runtime::controller_policy` | Controller stream request admission |
+| `runtime::host_stream_launch` | Shared encode-task spawn for GUI/headless |
 | `runtime::session_lifecycle` | Exhaustive Joining/Active/Draining transitions |
 
 These modules must not import the presentation shell.

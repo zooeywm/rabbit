@@ -64,7 +64,7 @@ kernel → ∅   （无 app、无 infra、无 GUI）
 
 | 面 | 模块 | 职责 |
 | --- | --- | --- |
-| **协议** | `protocol`, `connection_request`, `session_control`, `transport` | 版本身份、握手、控制标签、信道/投递 |
+| **协议** | `protocol`, `connection_request`, `session_control`（`wire`）、`transport` | 版本身份、握手、控制标签/编解码、信道/投递 |
 | **会话** | `session`（`rtp`, `role`） | 角色门禁收发、RTP 组装、会话消息 |
 | **屏幕** | `geometry`, `screen_manager`, `screen_capture`, `screen_configuration` | 拓扑、采集端口、串流协商类型 |
 | **媒体** | `frame_pipeline`, `screen_stream`, `video_encoder`, `video_decoder`, `video_renderer` | 采集与网络/显示之间的处理端口 |
@@ -172,7 +172,9 @@ runtime/services、更新状态组。
 | --- | --- |
 | `services::host_stream` | 根据屏与请求规划 host 管线 |
 | `services::session_catalog` | Host 会话/串流稳定排序 |
-| `runtime::host_policy` | 能力 + 相位准入后规划 |
+| `runtime::host_policy` / `host_control` | Host 准入 + 控制消息分类 |
+| `runtime::controller_policy` | Controller 开流请求准入 |
+| `runtime::host_stream_launch` | GUI/headless 共享编码任务启动 |
 | `runtime::session_lifecycle` | Joining/Active/Draining 穷尽迁移 |
 
 这些模块不得依赖展示壳。

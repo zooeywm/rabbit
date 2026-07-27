@@ -13,10 +13,12 @@ use crate::{
     app::{
         config::Config,
         init_logging,
-        model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
+        model::{ApplicationModel, RunningSession, SessionKey},
         platform::{ApplicationStack, RunnableApp},
-        runtime::host_control::{HostControlDecision, classify_host_session_message},
-        screen_stream::run_host_screen_stream,
+        runtime::{
+            host_control::{HostControlDecision, classify_host_session_message},
+            host_stream_launch::launch_host_stream,
+        },
         services::host_stream::HostStreamPlan,
     },
     infra::{
@@ -342,57 +344,18 @@ where
     <Stack::App as FramePipelineManager>::Subscription: Unpin,
     <Stack::ScreenStreamEncoder as VideoEncoder>::Packet: Into<bytes::Bytes>,
 {
-    let frames = FramePipelineManager::subscribe(
-        &mut model.app,
-        &plan.screen_id,
-        plan.parameters,
-        plan.frame_rate,
-    )?;
-    let stream_id = model.next_screen_stream_id()?;
-    let Some(session) = model
-        .sessions
-        .iter_mut()
-        .find(|session| session.send.id() == session_id)
-    else {
-        eros::bail!("Session {} missing while starting stream", session_id.0);
-    };
-    if !session.admits_new_streams() {
-        eros::bail!("Session {} does not admit new streams", session_id.0);
-    }
-
-    let session_send = Rc::clone(&session.send);
-    let cancellation = UnsyncQueue::default();
-    let task_cancellation = cancellation.clone();
-    let encoder_commands = UnsyncQueue::default();
-    let task_encoder_commands = encoder_commands.clone();
-    let finished = sender.clone();
     let screen_id = plan.screen_id;
-    let frame_rate = plan.frame_rate;
-    let task = compio::runtime::spawn(async move {
-        let result = run_host_screen_stream::<_, _, Stack::ScreenStreamEncoder>(
-            frames,
-            screen_id,
-            session_send,
-            task_cancellation,
-            task_encoder_commands,
-            frame_rate,
-        )
-        .await;
-        finished.push(HeadlessMessage::ScreenStreamFinished(
-            session_id, screen_id, stream_id, result,
-        ));
-    });
-
-    session.screen_streams.insert(
-        screen_id,
-        RunningScreenStream {
-            id: stream_id,
-            cancellation,
-            encoder_commands,
-            task: Some(task),
+    let finished = sender.clone();
+    launch_host_stream(
+        model,
+        session_id,
+        plan,
+        move |session_id, screen_id, stream_id, result| {
+            finished.push(HeadlessMessage::ScreenStreamFinished(
+                session_id, screen_id, stream_id, result,
+            ));
         },
-    );
-
+    )?;
     info!(
         event = "headless_stream_started",
         session_id = session_id.0,

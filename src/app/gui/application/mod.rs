@@ -23,8 +23,11 @@ use crate::app::{
         view::{GuiIntent, ViewPublisher},
     },
     model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
-    runtime::host_policy::{HostStreamEvaluation, evaluate_set_screen_streams},
-    services::session_catalog,
+    runtime::{
+        host_policy::{HostStreamEvaluation, evaluate_set_screen_streams},
+        host_stream_launch::launch_host_stream,
+    },
+    services::{host_stream::HostStreamPlan, session_catalog},
 };
 
 use crate::{
@@ -33,7 +36,6 @@ use crate::{
         config::Config,
         init_logging,
         platform::{ApplicationStack, RemoteVideoStack, RunnableApp},
-        screen_stream::run_host_screen_stream,
     },
     infra::{
         ConnectionEndpoint, PendingConnectionRequest, SessionTransportSend, WorkerReaper,
@@ -41,7 +43,7 @@ use crate::{
     },
     kernel::{
         connection_request::PeerCapabilities,
-        frame_pipeline::{FramePipelineManager, FramePipelineParameters},
+        frame_pipeline::FramePipelineParameters,
         geometry::FrameRate,
         protocol::{PROTOCOL_NAME, protocol_version_string},
         screen_configuration::SetScreenStreams,
@@ -271,65 +273,22 @@ where
         frame_rate: FrameRate,
         sender: &MessageSender,
     ) -> eros::Result<()> {
-        let frames = FramePipelineManager::subscribe(
-            &mut self.model.app,
-            &screen_id,
+        let plan = HostStreamPlan {
+            screen_id,
             parameters,
             frame_rate,
-        )?;
-        let stream_id = self.model.next_screen_stream_id()?;
-        let Some(session) = self
-            .model
-            .sessions
-            .iter_mut()
-            .find(|session| session.send.id() == session_id)
-        else {
-            eros::bail!(
-                "Session {} closed before screen {} stream could start",
-                session_id.0,
-                screen_id.0
-            );
         };
-        if !session.admits_new_streams() {
-            eros::bail!(
-                "Session {} is {:?} and cannot start screen {} stream",
-                session_id.0,
-                session.phase,
-                screen_id.0
-            );
-        }
-        let session_send = Rc::clone(&session.send);
-        let cancellation = UnsyncQueue::default();
-        let task_cancellation = cancellation.clone();
-        let encoder_commands = UnsyncQueue::default();
-        let task_encoder_commands = encoder_commands.clone();
         let task_sender = sender.clone();
-        let task = compio::runtime::spawn(async move {
-            let result = run_host_screen_stream::<_, _, Stack::ScreenStreamEncoder>(
-                frames,
-                screen_id,
-                session_send,
-                task_cancellation,
-                task_encoder_commands,
-                frame_rate,
-            )
-            .await;
-            task_sender.post(RootMessage::ScreenStreamFinished(
-                session_id, screen_id, stream_id, result,
-            ));
-        });
-
-        session.screen_streams.insert(
-            screen_id,
-            RunningScreenStream {
-                id: stream_id,
-                cancellation,
-                encoder_commands,
-                task: Some(task),
+        launch_host_stream(
+            &mut self.model,
+            session_id,
+            plan,
+            move |session_id, screen_id, stream_id, result| {
+                task_sender.post(RootMessage::ScreenStreamFinished(
+                    session_id, screen_id, stream_id, result,
+                ));
             },
-        );
-
-        Ok(())
+        )
     }
 
     pub(super) fn remove_session(&mut self, id: SessionId) {

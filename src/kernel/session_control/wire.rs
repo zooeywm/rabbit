@@ -1,16 +1,10 @@
-//! Control-plane messages on the session control channel.
-//!
-//! Domain types for stream configuration live in [`crate::kernel::screen_configuration`].
-//! This module owns wire tags, binary codecs (`binrw`), and conversion to
-//! [`crate::kernel::transport::TransportMessage`].
-//!
-//! Adding a message: domain type → wire tag → codec → role checks in `session`.
-//! Bump [`crate::kernel::protocol`] version accordingly.
+//! Binary wire codecs for control-plane messages (`binrw`).
 
 use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binread, binrw, io::Cursor};
 use bytes::Bytes;
 use eros::Context;
 
+use super::{ControlMessage, OutgoingScreenList, ScreenInfo};
 use crate::kernel::{
     geometry::{FrameRate, PixelSize},
     screen_configuration::{
@@ -22,30 +16,9 @@ use crate::kernel::{
     transport::{Delivery, TransportChannel, TransportMessage},
 };
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ScreenInfo {
-    pub id: ScreenId,
-    pub name: String,
-    pub resolution: PixelSize,
-    pub frame_rate: FrameRate,
-    pub layout: ScreenLayout,
-}
-
-#[derive(Debug)]
-pub struct OutgoingScreenList(TransportMessage);
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ControlMessage {
-    ScreenList(Vec<ScreenInfo>),
-    SetScreenStreams(SetScreenStreams),
-    ScreenStreamsConfigured(ScreenStreamsConfigured),
-    StopScreenStream(StopScreenStream),
-    RequestKeyFrame(RequestKeyFrame),
-}
-
 #[derive(BinRead, BinWrite)]
 #[brw(repr = u8)]
-enum WireControlMessageTag {
+pub(super) enum WireControlMessageTag {
     ScreenList = 0,
     SetScreenStreams = 1,
     ScreenStreamsConfigured = 2,
@@ -55,13 +28,13 @@ enum WireControlMessageTag {
 
 #[derive(BinRead, BinWrite)]
 #[brw(repr = u8)]
-enum WireRemoteDisplayMode {
+pub(super) enum WireRemoteDisplayMode {
     Preserve = 0,
 }
 
 #[derive(BinRead, BinWrite)]
 #[brw(repr = u8)]
-enum WireScreenTransform {
+pub(super) enum WireScreenTransform {
     Normal = 0,
     Rotate90 = 1,
     Rotate180 = 2,
@@ -73,56 +46,56 @@ enum WireScreenTransform {
 }
 
 #[derive(BinRead, BinWrite)]
-struct WirePixelSize {
-    width: u32,
-    height: u32,
+pub(super) struct WirePixelSize {
+    pub(super) width: u32,
+    pub(super) height: u32,
 }
 
 #[derive(BinRead, BinWrite)]
-struct WireFrameRate {
-    numerator: u32,
-    denominator: u32,
+pub(super) struct WireFrameRate {
+    pub(super) numerator: u32,
+    pub(super) denominator: u32,
 }
 
 #[derive(BinRead, BinWrite)]
-struct WireScreenRect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+pub(super) struct WireScreenRect {
+    pub(super) x: u32,
+    pub(super) y: u32,
+    pub(super) width: u32,
+    pub(super) height: u32,
 }
 
 #[derive(BinRead, BinWrite)]
-struct WireScreenLayout {
-    rect: WireScreenRect,
-    scale: f64,
-    transform: WireScreenTransform,
+pub(super) struct WireScreenLayout {
+    pub(super) rect: WireScreenRect,
+    pub(super) scale: f64,
+    pub(super) transform: WireScreenTransform,
 }
 
 #[derive(BinWrite)]
-struct WireScreenInfoRef<'a> {
-    id: u8,
-    name_length: u16,
-    name: &'a [u8],
-    resolution: WirePixelSize,
-    frame_rate: WireFrameRate,
-    layout: WireScreenLayout,
+pub(super) struct WireScreenInfoRef<'a> {
+    pub(super) id: u8,
+    pub(super) name_length: u16,
+    pub(super) name: &'a [u8],
+    pub(super) resolution: WirePixelSize,
+    pub(super) frame_rate: WireFrameRate,
+    pub(super) layout: WireScreenLayout,
 }
 
 #[binread]
-struct WireScreenInfo {
-    id: u8,
+pub(super) struct WireScreenInfo {
+    pub(super) id: u8,
     #[br(temp)]
     name_length: u16,
     #[br(count = name_length)]
-    name: Vec<u8>,
-    resolution: WirePixelSize,
-    frame_rate: WireFrameRate,
-    layout: WireScreenLayout,
+    pub(super) name: Vec<u8>,
+    pub(super) resolution: WirePixelSize,
+    pub(super) frame_rate: WireFrameRate,
+    pub(super) layout: WireScreenLayout,
 }
 
 #[binread]
-struct WireScreenList {
+pub(super) struct WireScreenList {
     #[br(temp)]
     screen_count: u8,
     #[br(count = screen_count)]
@@ -130,7 +103,7 @@ struct WireScreenList {
 }
 
 #[derive(BinRead, BinWrite)]
-struct WireScreenStreamRequest {
+pub(super) struct WireScreenStreamRequest {
     screen_id: u8,
     remote_display: WireRemoteDisplayMode,
     frame_size: WirePixelSize,
@@ -138,17 +111,17 @@ struct WireScreenStreamRequest {
 }
 
 #[derive(BinRead, BinWrite)]
-struct WireStopScreenStream {
+pub(super) struct WireStopScreenStream {
     screen_id: u8,
 }
 
 #[derive(BinRead, BinWrite)]
-struct WireRequestKeyFrame {
+pub(super) struct WireRequestKeyFrame {
     screen_id: u8,
 }
 
 #[binrw]
-struct WireSetScreenStreams {
+pub(super) struct WireSetScreenStreams {
     request_id: u32,
     #[br(temp)]
     #[bw(try_calc(u8::try_from(desired_streams.len())))]
@@ -159,7 +132,7 @@ struct WireSetScreenStreams {
 
 #[derive(BinRead, BinWrite)]
 #[br(return_unexpected_error)]
-enum WireResolutionResult {
+pub(super) enum WireResolutionResult {
     #[brw(magic(0u8))]
     Exact { applied: WirePixelSize },
     #[brw(magic(1u8))]
@@ -176,7 +149,7 @@ enum WireResolutionResult {
 
 #[derive(BinRead, BinWrite)]
 #[br(return_unexpected_error)]
-enum WireOptionalPixelSize {
+pub(super) enum WireOptionalPixelSize {
     #[brw(magic(0u8))]
     None,
     #[brw(magic(1u8))]
@@ -185,7 +158,7 @@ enum WireOptionalPixelSize {
 
 #[derive(BinRead, BinWrite)]
 #[br(return_unexpected_error)]
-enum WireScreenResolutionStatus {
+pub(super) enum WireScreenResolutionStatus {
     #[brw(magic(0u8))]
     Configured(WireResolutionResult),
     #[brw(magic(1u8))]
@@ -196,13 +169,13 @@ enum WireScreenResolutionStatus {
 }
 
 #[derive(BinRead, BinWrite)]
-struct WireScreenResolutionOutcome {
+pub(super) struct WireScreenResolutionOutcome {
     screen_id: u8,
     status: WireScreenResolutionStatus,
 }
 
 #[binrw]
-struct WireScreenStreamsConfigured {
+pub(super) struct WireScreenStreamsConfigured {
     request_id: u32,
     #[br(temp)]
     #[bw(try_calc(u8::try_from(outcomes.len())))]
@@ -747,116 +720,3 @@ fn write_screen_info(writer: &mut Cursor<Vec<u8>>, screen: &Screen) -> eros::Res
 }
 
 // Focused test: cargo test kernel::session_control::tests --lib
-#[cfg(test)]
-mod tests {
-    use crate::kernel::{
-        geometry::{FrameRate, PixelSize},
-        screen_configuration::{
-            RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
-        },
-        screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
-        session_control::{
-            ControlMessage, OutgoingScreenList, ScreenInfo, WireFrameRate, WirePixelSize,
-            WireScreenInfo, WireScreenLayout, WireScreenRect, WireScreenTransform,
-        },
-        transport::TransportMessage,
-    };
-
-    #[test]
-    fn screen_list_round_trip_preserves_frame_rate() {
-        let expected =
-            FrameRate::new(143_855, 1_000).expect("Test screen frame rate should be valid");
-        let screens = [Screen {
-            id: ScreenId(2),
-            name: "HDMI-A-1".to_string(),
-            resolution: PixelSize {
-                width: 2560,
-                height: 1440,
-            },
-            frame_rate: expected,
-            layout: ScreenLayout {
-                rect: ScreenRect {
-                    x: 0,
-                    y: 0,
-                    width: 2560,
-                    height: 1440,
-                },
-                scale: 1.0,
-                transform: ScreenTransform::Normal,
-            },
-        }];
-        let message = TransportMessage::from(
-            OutgoingScreenList::try_from(screens.as_slice())
-                .expect("Screen list with a frame rate should encode"),
-        );
-
-        let ControlMessage::ScreenList(decoded) =
-            ControlMessage::try_from(message).expect("Screen list with a frame rate should decode")
-        else {
-            panic!("Decoded control message should be a screen list");
-        };
-
-        assert_eq!(decoded[0].frame_rate, expected);
-    }
-
-    #[test]
-    fn screen_info_rejects_invalid_frame_rate() {
-        let wire = WireScreenInfo {
-            id: 3,
-            name: b"eDP-1".to_vec(),
-            resolution: WirePixelSize {
-                width: 1920,
-                height: 1080,
-            },
-            frame_rate: WireFrameRate {
-                numerator: 0,
-                denominator: 1,
-            },
-            layout: WireScreenLayout {
-                rect: WireScreenRect {
-                    x: 0,
-                    y: 0,
-                    width: 1920,
-                    height: 1080,
-                },
-                scale: 1.0,
-                transform: WireScreenTransform::Normal,
-            },
-        };
-
-        let error = ScreenInfo::try_from(wire).expect_err("Zero frame rate should be rejected");
-
-        assert!(
-            format!("{error:?}").contains("Failed to decode ScreenInfo 3 frame rate"),
-            "Invalid frame rate error should identify the ScreenInfo boundary: {error:?}"
-        );
-    }
-
-    #[test]
-    fn screen_stream_request_round_trip_preserves_client_settings() {
-        let expected = ScreenStreamRequest {
-            screen_id: ScreenId(4),
-            remote_display: RemoteDisplayMode::Preserve,
-            frame_size: PixelSize {
-                width: 1920,
-                height: 1080,
-            },
-            frame_rate: FrameRate::new(59_940, 1_000)
-                .expect("Test stream frame rate should be valid"),
-        };
-        let message = TransportMessage::try_from(SetScreenStreams {
-            request_id: ScreenStreamRequestId(9),
-            desired_streams: vec![expected],
-        })
-        .expect("Screen stream request should encode");
-
-        let ControlMessage::SetScreenStreams(decoded) =
-            ControlMessage::try_from(message).expect("Screen stream request should decode")
-        else {
-            panic!("Decoded control message should be a screen stream request");
-        };
-
-        assert_eq!(decoded.request_id, ScreenStreamRequestId(9));
-        assert_eq!(decoded.desired_streams, vec![expected]);
-    }
-}

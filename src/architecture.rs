@@ -110,6 +110,7 @@ fn runtime_exposes_host_and_controller_policies() {
     for name in [
         "host_policy.rs",
         "host_control.rs",
+        "host_stream_launch.rs",
         "controller_policy.rs",
         "session_lifecycle.rs",
     ] {
