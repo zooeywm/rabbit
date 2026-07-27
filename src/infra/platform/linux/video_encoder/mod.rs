@@ -2,7 +2,7 @@ mod gstreamer;
 
 #[cfg(test)]
 pub(crate) use gstreamer::va_vpp_input_modifier;
-pub(crate) use gstreamer::{GStreamerVideoEncoder, VaDmaBufAllocator};
+pub(crate) use gstreamer::{GStreamerVideoEncoder, VaDmaBufAllocator, record_frames_to_mp4};
 pub(crate) use gstreamer::{
     hardware_h264_encoder_for, va_vpp_input_modifiers, va_vpp_input_profiles,
 };

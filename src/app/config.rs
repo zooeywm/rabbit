@@ -21,6 +21,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub network: NetworkConfig,
     pub video: VideoConfig,
+    pub recording: RecordingConfig,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,6 +75,25 @@ impl Default for VideoConfig {
     }
 }
 
+/// Local screen recording path (`rabbit record`).
+///
+/// Screen and duration are CLI options; only the file/directory path lives here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingConfig {
+    /// Output file path, or a directory (timestamped `.mp4` is created inside).
+    /// Empty defaults to the standard Videos directory under `rabbit/`.
+    pub output_path: String,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            output_path: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoDisplayPreference {
@@ -109,6 +129,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             network: NetworkConfig::default(),
             video: VideoConfig::default(),
+            recording: RecordingConfig::default(),
             project_dirs: None,
             app_name: APP_NAME,
         }
@@ -166,6 +187,99 @@ impl Config {
 
         Ok(config)
     }
+
+    /// Resolves the recording output file path from config.
+    ///
+    /// Empty `output_path` → standard Videos dir / `rabbit` / `rabbit-<timestamp>.mp4`.
+    pub fn resolve_recording_output_path(&self) -> eros::Result<std::path::PathBuf> {
+        use std::path::PathBuf;
+
+        let configured = self.recording.output_path.trim();
+        if configured.is_empty() {
+            let base = default_videos_rabbit_dir()?;
+            fs::create_dir_all(&base).with_context(|| {
+                format!(
+                    "Failed to create recording directory {}",
+                    base.display()
+                )
+            })?;
+            return Ok(base.join(default_recording_file_name()));
+        }
+
+        let expanded = expand_user_path(configured);
+        let path = PathBuf::from(expanded);
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov")
+            })
+        {
+            if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create recording parent directory {}",
+                        parent.display()
+                    )
+                })?;
+            }
+            return Ok(path);
+        }
+
+        fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "Failed to create recording directory {}",
+                path.display()
+            )
+        })?;
+        Ok(path.join(default_recording_file_name()))
+    }
+}
+
+/// Standard user Videos directory + `rabbit` (e.g. `~/Videos/rabbit`).
+pub fn default_videos_rabbit_dir() -> eros::Result<std::path::PathBuf> {
+    use directories::UserDirs;
+    use std::path::PathBuf;
+
+    if let Some(user_dirs) = UserDirs::new()
+        && let Some(videos) = user_dirs.video_dir()
+    {
+        return Ok(videos.join(APP_NAME));
+    }
+
+    // Fallback when XDG video dir is unavailable.
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok(PathBuf::from(home).join("Videos").join(APP_NAME));
+    }
+
+    Ok(PathBuf::from("Videos").join(APP_NAME))
+}
+
+fn default_recording_file_name() -> String {
+    let now = time::OffsetDateTime::now_local()
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let format = time::macros::format_description!(
+        "[year][month][day]-[hour][minute][second]"
+    );
+    let stamp = now.format(&format).unwrap_or_else(|_| "recording".into());
+    format!("rabbit-{stamp}.mp4")
+}
+
+fn expand_user_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!(
+            "{home}{}{rest}",
+            std::path::MAIN_SEPARATOR
+        );
+    }
+    if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return home;
+    }
+    path.to_owned()
 }
 
 const fn default_app_name() -> &'static str {
@@ -174,7 +288,7 @@ const fn default_app_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::config::{Config, NetworkTransport, VideoDisplayPreference};
+    use crate::app::config::{Config, NetworkTransport, RecordingConfig, VideoDisplayPreference};
 
     #[test]
     fn network_transport_defaults_to_quic() {
@@ -250,6 +364,69 @@ mod tests {
 
             assert_eq!(config.video.display_backend, expected);
         }
+    }
+
+    #[test]
+    fn recording_config_only_has_output_path() {
+        let defaults = Config::default().recording;
+        assert!(defaults.output_path.is_empty());
+
+        let config = toml::from_str::<Config>(
+            r#"
+[recording]
+output_path = "~/Videos/rabbit-out.mp4"
+"#,
+        )
+        .expect("recording config should deserialize");
+        assert_eq!(config.recording.output_path, "~/Videos/rabbit-out.mp4");
+        let _ = RecordingConfig::default();
+    }
+
+    #[test]
+    fn resolve_recording_output_path_uses_file_or_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "rabbit-record-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let file = dir.join("clip.mp4");
+        let mut config = Config::default();
+        config.recording.output_path = file.to_string_lossy().into_owned();
+        let resolved = config
+            .resolve_recording_output_path()
+            .expect("file path");
+        assert_eq!(resolved, file);
+
+        config.recording.output_path = dir.to_string_lossy().into_owned();
+        let resolved = config
+            .resolve_recording_output_path()
+            .expect("directory path");
+        assert_eq!(resolved.parent(), Some(dir.as_path()));
+        assert!(
+            resolved
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rabbit-") && name.ends_with(".mp4"))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_recording_dir_is_under_videos_rabbit() {
+        let dir = crate::app::config::default_videos_rabbit_dir().expect("videos dir");
+        assert!(
+            dir.ends_with("rabbit")
+                || dir
+                    .components()
+                    .any(|c| c.as_os_str() == "rabbit"),
+            "expected .../rabbit, got {}",
+            dir.display()
+        );
+        let parent = dir.file_name().and_then(|n| n.to_str());
+        assert_eq!(parent, Some("rabbit"));
     }
 }
 

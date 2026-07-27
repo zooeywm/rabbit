@@ -402,7 +402,7 @@ impl GStreamerVideoEncoder {
         Ok(factories)
     }
 
-    pub(super) fn select_hardware_h264_encoder(
+    pub(crate) fn select_hardware_h264_encoder(
         input_caps: &gstreamer::CapsRef,
     ) -> eros::Result<gstreamer::ElementFactory> {
         let factory = Self::find_hardware_h264_encoders()?
@@ -419,7 +419,7 @@ impl GStreamerVideoEncoder {
         Ok(factory)
     }
 
-    pub(super) fn is_nv12_dmabuf_input_caps(caps: &gstreamer::CapsRef) -> bool {
+    pub(crate) fn is_nv12_dmabuf_input_caps(caps: &gstreamer::CapsRef) -> bool {
         if caps.size() != 1 || !caps.is_fixed() {
             return false;
         }
@@ -437,7 +437,7 @@ impl GStreamerVideoEncoder {
                 .is_ok_and(|format| format == "NV12" || format.starts_with("NV12:"))
     }
 
-    fn is_xrgb_dmabuf_input_caps(caps: &gstreamer::CapsRef) -> bool {
+    pub(crate) fn is_xrgb_dmabuf_input_caps(caps: &gstreamer::CapsRef) -> bool {
         if caps.size() != 1 || !caps.is_fixed() {
             return false;
         }

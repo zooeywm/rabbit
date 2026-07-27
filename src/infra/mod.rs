@@ -15,9 +15,10 @@ pub(crate) use connection_request::{
 };
 #[cfg(target_os = "linux")]
 pub(crate) use platform::{
-    GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder, GbmFramePipelineManager,
-    GbmFramePipelineManagerState, KmsScreenCaptureManager, KmsScreenCaptureManagerState,
-    NiriScreenLayoutManager, NiriScreenLayoutManagerState,
+    GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder, GbmFramePipelineFrame,
+    GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
+    KmsScreenCaptureManagerState, NiriScreenLayoutManager, NiriScreenLayoutManagerState,
+    record_frames_to_mp4,
 };
 pub(crate) use platform::{
     NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,

@@ -101,7 +101,8 @@ Transport channel mapping **must** stay aligned with protocol constants.
 | API | Role |
 | --- | --- |
 | `rabbit::run()` | GUI Host + Controller (Slint) |
-| `rabbit::run_headless()` / `--headless` | Headless Host, auto-accept controllers, shared services/encode path |
+| `rabbit::run_headless()` / `rabbit headless` | Headless Host, auto-accept controllers, shared services/encode path |
+| `rabbit::run_record()` / `rabbit record` | Local screen → MP4 (path from config; screen/duration from CLI) |
 
 ### Session roles
 

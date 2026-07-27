@@ -47,6 +47,21 @@ pub(crate) fn run_headless(config: Config) -> eros::Result<()> {
     }
 }
 
+pub(crate) fn run_record(
+    config: Config,
+    options: crate::app::cli::RecordOptions,
+) -> eros::Result<()> {
+    match select_application_stack(&config) {
+        LinuxApplicationStack::NiriKmsGbm => {
+            let runtime =
+                compio::runtime::Runtime::new().expect("Record Compio runtime should start");
+            runtime.block_on(crate::app::record::run::<NiriKmsGbmApplicationStack>(
+                config, options,
+            ))
+        }
+    }
+}
+
 /// Selects the Linux media backend.
 ///
 /// Today only the niri + KMS + GBM + GStreamer stack is wired. Additional

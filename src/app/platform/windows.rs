@@ -48,6 +48,21 @@ pub(crate) fn run_headless(config: Config) -> eros::Result<()> {
     }
 }
 
+pub(crate) fn run_record(
+    config: Config,
+    options: crate::app::cli::RecordOptions,
+) -> eros::Result<()> {
+    match select_application_stack(&config) {
+        WindowsApplicationStack::WgcD3d11 => {
+            let runtime =
+                compio::runtime::Runtime::new().expect("Record Compio runtime should start");
+            runtime.block_on(crate::app::record::run::<WgcD3d11ApplicationStack>(
+                config, options,
+            ))
+        }
+    }
+}
+
 /// Selects the Windows media backend.
 ///
 /// The WGC + D3D11 + Media Foundation stack is the only wired option and trails

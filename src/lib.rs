@@ -3,7 +3,8 @@
 //! # Entry points
 //!
 //! - [`run`] — full GUI Host/Controller application
-//! - [`run_headless`] — headless Host (auto-accept controllers, no Slint)
+//! - [`run_headless`] — headless Host (auto-accept controllers, no GUI)
+//! - [`run_record`] — local screen capture to an MP4 file (no network session)
 //!
 //! Domain types and protocol constants are available through [`kernel`].
 
@@ -14,6 +15,13 @@ mod infra;
 
 #[cfg(test)]
 mod architecture;
+
+/// CLI types for the binary entrypoint.
+pub mod cli {
+    pub use crate::app::{Cli, Command, RecordOptions};
+}
+
+pub use app::{Cli, Command, RecordOptions};
 
 /// Creates and runs the Rabbit GUI application.
 pub fn run() -> eros::Result<()> {
@@ -27,4 +35,13 @@ pub fn run() -> eros::Result<()> {
 /// GUI host role. Application services under `app::services` are shared.
 pub fn run_headless() -> eros::Result<()> {
     app::run_headless()
+}
+
+/// Records a local screen to a file using the host capture/encode path.
+///
+/// Output path comes from config `[recording].output_path` (default:
+/// standard Videos directory / `rabbit` / timestamped `.mp4`). Screen and
+/// duration come from [`RecordOptions`] (CLI).
+pub fn run_record(options: RecordOptions) -> eros::Result<()> {
+    app::run_record(options)
 }

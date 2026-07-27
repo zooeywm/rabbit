@@ -38,7 +38,7 @@ pub(crate) struct GStreamerVideoFrame {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DmaBufInputSignature {
-    pub(super) size: crate::kernel::geometry::PixelSize,
+    pub(crate) size: crate::kernel::geometry::PixelSize,
     pub(super) format: DrmFourcc,
     pub(super) modifier: DrmModifier,
     pub(super) frame_rate: FrameRate,

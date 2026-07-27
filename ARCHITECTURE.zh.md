@@ -98,7 +98,8 @@ kernel → ∅   （无 app、无 infra、无 GUI）
 | API | 角色 |
 | --- | --- |
 | `rabbit::run()` | GUI Host + Controller（Slint） |
-| `rabbit::run_headless()` / `--headless` | 无界面 Host，自动接受 Controller，共享 services/编码路径 |
+| `rabbit::run_headless()` / `rabbit headless` | 无界面 Host，自动接受 Controller，共享 services/编码路径 |
+| `rabbit::run_record()` / `rabbit record` | 本机屏幕 → MP4（路径来自 config；屏幕/时长来自 CLI） |
 
 ### 会话角色
 

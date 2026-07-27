@@ -1,3 +1,4 @@
+pub(crate) mod cli;
 pub(crate) mod config;
 
 mod deps;
@@ -6,6 +7,7 @@ pub(crate) mod headless;
 mod logging;
 mod model;
 mod platform;
+pub(crate) mod record;
 pub(crate) mod runtime;
 mod screen_stream;
 pub(crate) mod services;
@@ -21,6 +23,9 @@ use crate::{
 pub(crate) use logging::{LoggerGuard, init_logging};
 pub(crate) use platform::run as run_gui;
 pub(crate) use platform::run_headless;
+pub(crate) use platform::run_record;
+
+pub use cli::{Cli, Command, RecordOptions};
 
 /// Root application state and dependency container.
 pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState> {

@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use crate::{
-    app::{App, config::Config, gui::VideoViewStack},
+    app::{App, cli::RecordOptions, config::Config, gui::VideoViewStack},
     infra::{ConnectionEndpoint, WorkerReaper, WorkerReaperHandle},
     kernel::{
         frame_pipeline::FramePipelineManager,
@@ -84,6 +84,11 @@ pub(crate) fn run() -> eros::Result<()> {
 pub(crate) fn run_headless() -> eros::Result<()> {
     let config = Config::new()?;
     platform::run_headless(config)
+}
+
+pub(crate) fn run_record(options: RecordOptions) -> eros::Result<()> {
+    let config = Config::new()?;
+    platform::run_record(config, options)
 }
 
 #[cfg(test)]

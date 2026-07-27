@@ -14,6 +14,7 @@ mod encoder;
 mod frame;
 mod pipeline_util;
 mod probe;
+mod recorder;
 mod rtp;
 mod va_surface;
 
@@ -24,13 +25,17 @@ mod tests;
 pub(crate) use discovery::va_vpp_input_modifier;
 pub(crate) use discovery::{va_vpp_input_modifiers, va_vpp_input_profiles};
 pub(crate) use encoder::GStreamerVideoEncoder;
+pub(crate) use recorder::record_frames_to_mp4;
 #[cfg(test)]
 pub(crate) use frame::validate_dmabuf_buffer;
-pub(crate) use frame::{GStreamerVideoFrame, dmabuf_caps};
+#[cfg(test)]
+pub(crate) use frame::GStreamerVideoFrame;
+pub(crate) use frame::dmabuf_caps;
+#[cfg(test)]
 pub(crate) use pipeline_util::{
     H264_KEY_INT_MAX, configure_low_latency_encoder, create_required_element, h264_rtp_caps,
-    va_vpp_output_caps,
 };
+pub(crate) use pipeline_util::va_vpp_output_caps;
 pub(crate) use rtp::GStreamerRtpPacket;
 pub(crate) use va_surface::VaDmaBufAllocator;
 
