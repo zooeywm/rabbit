@@ -106,7 +106,7 @@ pub enum VideoDisplayPreference {
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            console_level: LogLevel::Debug,
+            console_level: LogLevel::Info,
             file_level: LogLevel::Info,
         }
     }
