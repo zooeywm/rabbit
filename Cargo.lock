@@ -4377,7 +4377,6 @@ dependencies = [
  "drm 0.15.0",
  "eros",
  "flume",
- "futures-channel",
  "futures-core",
  "futures-util",
  "gbm",
