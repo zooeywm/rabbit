@@ -204,6 +204,7 @@ impl WaylandVideoRenderer {
 
         let surface = compositor.create_surface(&queue_handle, ());
         let subsurface = subcompositor.get_subsurface(&surface, &parent, &queue_handle, ());
+        subsurface.place_below(&parent);
         subsurface.set_desync();
         let viewport = viewporter.get_viewport(&surface, &queue_handle, ());
         let input_region = compositor.create_region(&queue_handle, ());

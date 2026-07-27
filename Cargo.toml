@@ -24,7 +24,7 @@ rcgen = "0.14"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
-slint = { version = "1.17.1", default-features = false, features = ["accessibility", "backend-winit", "compat-1-2", "raw-window-handle-06", "renderer-femtovg", "std"] }
+slint = { version = "1.17.1", default-features = false, features = ["accessibility", "backend-winit", "compat-1-2", "raw-window-handle-06", "renderer-femtovg", "std", "unstable-winit-030"] }
 socket2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]

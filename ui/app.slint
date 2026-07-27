@@ -42,7 +42,7 @@ export component RabbitWindow inherits Window {
     min-width: 720px;
     min-height: 480px;
     max-width: 100000px;
-    background: root.video-fill-window-active ? #17191c : #f7f8fa;
+    background: root.page == AppPage.streaming ? transparent : #f7f8fa;
 
     in property <AppPage> page: AppPage.connect;
     in property <NavigationSection> section: NavigationSection.remote-devices;
@@ -88,6 +88,46 @@ export component RabbitWindow inherits Window {
     callback retry-connect();
     callback stop-stream();
 
+    // Keep every pixel outside the video viewport opaque while leaving the
+    // viewport itself transparent for a native video surface below this window.
+    if root.page == AppPage.streaming: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.video-viewport-y;
+        background: #f7f8fa;
+    }
+
+    if root.page == AppPage.streaming: Rectangle {
+        x: 0px;
+        y: root.video-viewport-y;
+        width: root.video-viewport-x;
+        height: root.video-viewport-height;
+        background: #f7f8fa;
+    }
+
+    if root.page == AppPage.streaming: Rectangle {
+        x: root.video-viewport-x + root.video-viewport-width;
+        y: root.video-viewport-y;
+        width: max(
+            0px,
+            root.width - root.video-viewport-x - root.video-viewport-width,
+        );
+        height: root.video-viewport-height;
+        background: #f7f8fa;
+    }
+
+    if root.page == AppPage.streaming: Rectangle {
+        x: 0px;
+        y: root.video-viewport-y + root.video-viewport-height;
+        width: root.width;
+        height: max(
+            0px,
+            root.height - root.video-viewport-y - root.video-viewport-height,
+        );
+        background: #f7f8fa;
+    }
+
     HorizontalLayout {
         spacing: 0px;
 
@@ -104,7 +144,7 @@ export component RabbitWindow inherits Window {
             min-width: 0px;
             horizontal-stretch: 1;
             vertical-stretch: 1;
-            background: root.video-fill-window-active ? #17191c : #f7f8fa;
+            background: root.page == AppPage.streaming ? transparent : #f7f8fa;
 
             VerticalLayout {
                 width: 100%;

@@ -349,6 +349,7 @@ where
                 let window = weak_window
                     .upgrade()
                     .with_context(|| "Slint window closed before video display initialization")?;
+                let initialized_display = display.is_none();
                 if display.is_none() {
                     *display = Some(create_video_display(
                         preference,
@@ -364,6 +365,12 @@ where
                     probe_interval,
                     *frame,
                 )?;
+                if initialized_display && matches!(display, Some(ActiveVideoDisplay::Native(_))) {
+                    // Wayland subsurface stacking is latched by the parent
+                    // surface's next commit. Schedule exactly one Slint redraw
+                    // after native display initialization to apply place_below.
+                    window.window().request_redraw();
+                }
                 if activate_stream(active_stream, session_id, screen_id) {
                     presented = Some((session_id, screen_id));
                 }

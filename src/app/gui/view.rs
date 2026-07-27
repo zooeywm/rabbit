@@ -90,6 +90,7 @@ where
     ) -> eros::Result<(Self, ViewPublisher<VideoView>, flume::Receiver<GuiIntent>)> {
         slint::BackendSelector::new()
             .require_opengl_es_with_version(3, 0)
+            .with_winit_window_attributes_hook(|attributes| attributes.with_transparent(true))
             .select()
             .context("Failed to select the Slint OpenGL ES 3 renderer")?;
         let window = RabbitWindow::new().context("Failed to create the Slint Rabbit window")?;

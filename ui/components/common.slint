@@ -27,10 +27,10 @@ export component Card inherits Rectangle {
     drop-shadow-offset-y: 4px;
 }
 
-// Defines the video layout region. On Wayland this rectangle is covered by a
-// DMA-BUF subsurface; the Slint backend draws into the same region.
+// Defines a transparent hole in the Slint surface. Native video is presented
+// below the window while Slint remains free to draw UI above this region.
 export component VideoDisplaySurface inherits Rectangle {
-    background: #17191c;
+    background: transparent;
     border-radius: 10px;
 }
 
