@@ -13,8 +13,9 @@ use crate::app::{
     },
     platform::ApplicationStack,
 };
-use crate::kernel::screen_configuration::{
-    RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams,
+use crate::kernel::{
+    capability::validate_controller_set_screen_streams,
+    screen_configuration::{RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams},
 };
 
 impl<Stack> RootApplication<Stack>
@@ -239,28 +240,26 @@ where
                         );
                         return Ok(false);
                     };
-                    let Some(session) = self
-                        .model
-                        .sessions
-                        .iter()
-                        .find(|session| session.send.id() == session_id)
-                    else {
-                        warn!(
-                            session_id = session_id.0,
-                            "Session closed before screen stream could be requested"
-                        );
-                        return Ok(false);
+                    let (session_send, peer_capabilities, admits_streams) = {
+                        let Some(session) = self
+                            .model
+                            .sessions
+                            .iter()
+                            .find(|session| session.send.id() == session_id)
+                        else {
+                            warn!(
+                                session_id = session_id.0,
+                                "Session closed before screen stream could be requested"
+                            );
+                            return Ok(false);
+                        };
+                        (
+                            Rc::clone(&session.send),
+                            session.peer_capabilities.clone(),
+                            session.admits_new_streams(),
+                        )
                     };
-                    let session_send = Rc::clone(&session.send);
                     let request_id = self.model.next_screen_stream_request_id()?;
-                    self.remote_stream.screen_stream.begin(ScreenStreamTarget {
-                        request_id,
-                        session_id,
-                        screen_id,
-                        screen_name,
-                        frame_size,
-                        frame_rate,
-                    });
                     let request = SetScreenStreams {
                         request_id,
                         desired_streams: vec![ScreenStreamRequest {
@@ -270,6 +269,29 @@ where
                             frame_rate,
                         }],
                     };
+                    if let Err(error) = validate_controller_set_screen_streams(
+                        &request,
+                        &self.model.local_capabilities,
+                        &peer_capabilities,
+                        admits_streams,
+                    ) {
+                        warn!(
+                            session_id = session_id.0,
+                            error = %error,
+                            "Controller rejected local stream request by capability policy"
+                        );
+                        self.workspace.stream_settings_error = error.to_string();
+                        self.set_connection_status(format!("Cannot open remote screen: {error}"));
+                        return Ok(true);
+                    }
+                    self.remote_stream.screen_stream.begin(ScreenStreamTarget {
+                        request_id,
+                        session_id,
+                        screen_id,
+                        screen_name,
+                        frame_size,
+                        frame_rate,
+                    });
 
                     let request_sender = sender.clone();
                     compio::runtime::spawn(async move {

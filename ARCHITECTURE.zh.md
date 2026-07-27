@@ -231,9 +231,11 @@ Linux 视频编码（`infra/.../video_encoder/gstreamer/`）：
 | --- | --- |
 | `frame` | DMA-BUF → GStreamer buffer + caps |
 | `rtp` | Sample → RTP 包字节 |
+| `discovery` | VAAPI VPP 输入格式/modifier 发现 |
+| `encoder` | 长生命周期 H.264 编码管线 |
 | `pipeline_util` | Bus、元素、低延迟编码器配置 |
 | `va_surface` / `probe` | VA 分配与时延探针 |
-| 根 `gstreamer.rs` | 编码器生命周期 + 集成测试 |
+| 根 `gstreamer.rs` | 再导出 + 集成测试 |
 
 帧管线 worker：`worker/{mod,composition,output}` 与
 [`PROTOCOL.zh.md`](src/infra/platform/linux/frame_pipeline/worker/PROTOCOL.zh.md)。

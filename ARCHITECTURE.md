@@ -237,9 +237,11 @@ Linux video encoder (`infra/.../video_encoder/gstreamer/`):
 | --- | --- |
 | `frame` | DMA-BUF → GStreamer buffer + caps |
 | `rtp` | Sample → RTP packet bytes |
+| `discovery` | VAAPI VPP input format/modifier discovery |
+| `encoder` | Long-lived H.264 encode pipeline |
 | `pipeline_util` | Bus, elements, low-latency encoder config |
 | `va_surface` / `probe` | VA allocator & latency probes |
-| root `gstreamer.rs` | Encoder lifecycle + integration tests |
+| root `gstreamer.rs` | Re-exports + integration tests |
 
 Frame pipeline worker: `worker/{mod,composition,output}` plus
 [`PROTOCOL.md`](src/infra/platform/linux/frame_pipeline/worker/PROTOCOL.md).

@@ -83,6 +83,20 @@ pub fn validate_set_screen_streams(
     Ok(())
 }
 
+/// Controller-side admission before sending [`SetScreenStreams`].
+///
+/// - `controller` is the local consumer budget
+/// - `host` is the remote host capabilities from the handshake accept reply
+pub fn validate_controller_set_screen_streams(
+    request: &SetScreenStreams,
+    controller: &PeerCapabilities,
+    host: &PeerCapabilities,
+    admits_streams: bool,
+) -> Result<(), DomainError> {
+    // Reuse host admission with roles swapped into the host-local / peer-remote slots.
+    validate_set_screen_streams(request, host, controller, admits_streams)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +168,24 @@ mod tests {
             true,
         )
         .expect("compatible request");
+    }
+
+    #[test]
+    fn controller_validation_rejects_when_host_max_screens_is_zero() {
+        let host = PeerCapabilities {
+            max_screens: 0,
+            encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+        };
+        let err = validate_controller_set_screen_streams(
+            &request_with_n_streams(1),
+            &PeerCapabilities::default(),
+            &host,
+            true,
+        )
+        .expect_err("host max_screens 0");
+        assert_eq!(
+            err.kind,
+            crate::kernel::domain_error::DomainErrorKind::Capability
+        );
     }
 }
