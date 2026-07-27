@@ -1,6 +1,7 @@
 SHELL := /bin/sh
 
 CARGO ?= cargo
+CARGO_XWIN ?= cargo xwin
 SLINT_LSP ?= slint-lsp
 SUDO ?= sudo
 
@@ -8,6 +9,12 @@ RELEASE_BIN ?= target/release/rabbit
 RABBIT_CAPS ?= cap_sys_admin+ep
 ARGS ?=
 RUN_ARGS ?= $(ARGS)
+# Extra args after `record` (e.g. RECORD_ARGS="-s HDMI-A-1 -d 30")
+RECORD_ARGS ?=
+# Cross-compile target for cargo-xwin
+XWIN_TARGET ?= x86_64-pc-windows-msvc
+# Optional: RABBIT_KMS_SCREEN for host-video / record hardware paths
+# RABBIT_KMS_SCREEN ?= HDMI-A-1
 
 .DEFAULT_GOAL := help
 
@@ -17,15 +24,22 @@ help:
 	@printf '%s\n' '  make run-release [RUN_ARGS="..."]   Build release, sudo setcap, then cargo run -r'
 	@printf '%s\n' '  make setcap-release                 sudo setcap $(RABBIT_CAPS) $(RELEASE_BIN)'
 	@printf '%s\n' '  make clearcap-release               Remove capabilities from $(RELEASE_BIN)'
+	@printf '%s\n' '  make record [RECORD_ARGS="..."]     Build release, setcap, run: rabbit record …'
 	@printf '%s\n' '  make format-slint                   Format every ui/**/*.slint file with slint-lsp'
 	@printf '%s\n' '  make test-gpu                       Run scripts/test-gpu'
 	@printf '%s\n' '  make test-kms                       Run scripts/test-kms'
 	@printf '%s\n' '  make test-gstreamer                 Run scripts/test-gstreamer'
 	@printf '%s\n' '  make test-host-video [ARGS="..."]   Run scripts/test-host-video'
 	@printf '%s\n' '  make test-client-video [ARGS="..."] Run scripts/test-client-video'
+	@printf '%s\n' '  make xwin-build                     cargo xwin build --release --target $(XWIN_TARGET)'
+	@printf '%s\n' '  make xwin-check                     cargo xwin check --target $(XWIN_TARGET)'
+	@printf '%s\n' '  make xwin-test                      cargo xwin test --target $(XWIN_TARGET)'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Overrides:'
-	@printf '%s\n' '  RABBIT_CAPS="cap_sys_admin+ep" RELEASE_BIN="target/release/rabbit"'
+	@printf '%s\n' '  RABBIT_CAPS  RELEASE_BIN  RECORD_ARGS  XWIN_TARGET  RABBIT_KMS_SCREEN'
+	@printf '%s\n' 'Examples:'
+	@printf '%s\n' '  make record RECORD_ARGS="-s HDMI-A-1 -d 30"'
+	@printf '%s\n' '  make xwin-build XWIN_TARGET=x86_64-pc-windows-msvc'
 
 .PHONY: build-release
 build-release:
@@ -48,6 +62,11 @@ clearcap-release:
 .PHONY: run-release
 run-release: setcap-release
 	$(CARGO) run -r -- $(RUN_ARGS)
+
+# Local screen recording (needs cap_sys_admin for KMS, same as run-release).
+.PHONY: record
+record: setcap-release
+	$(CARGO) run -r -- record $(RECORD_ARGS)
 
 .PHONY: format-slint slint-format
 format-slint slint-format:
@@ -73,3 +92,26 @@ test-host-video:
 
 test-client-video:
 	./scripts/test-client-video $(ARGS)
+
+# Windows cross-compile via cargo-xwin (MSVC CRT + Windows SDK from xwin).
+.PHONY: xwin-build xwin-check xwin-test
+xwin-build:
+	@command -v cargo-xwin >/dev/null 2>&1 || { \
+		printf '%s\n' 'cargo-xwin not found; install with: cargo install cargo-xwin' >&2; \
+		exit 127; \
+	}
+	$(CARGO_XWIN) build --release --target $(XWIN_TARGET)
+
+xwin-check:
+	@command -v cargo-xwin >/dev/null 2>&1 || { \
+		printf '%s\n' 'cargo-xwin not found; install with: cargo install cargo-xwin' >&2; \
+		exit 127; \
+	}
+	$(CARGO_XWIN) check --target $(XWIN_TARGET)
+
+xwin-test:
+	@command -v cargo-xwin >/dev/null 2>&1 || { \
+		printf '%s\n' 'cargo-xwin not found; install with: cargo install cargo-xwin' >&2; \
+		exit 127; \
+	}
+	$(CARGO_XWIN) test --target $(XWIN_TARGET)
