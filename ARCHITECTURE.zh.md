@@ -100,6 +100,7 @@ kernel → ∅   （无 app、无 infra、无 GUI）
 | `rabbit::run()` | GUI Host + Controller（Slint） |
 | `rabbit::run_headless()` / `rabbit headless` | 无界面 Host，自动接受 Controller，共享 services/编码路径 |
 | `rabbit::run_record()` / `rabbit record` | 本机屏幕 → MP4（路径来自 config；屏幕/时长来自 CLI） |
+| 进程停止 | `app::shutdown`：第一次 SIGINT/SIGTERM → 优雅退出（GUI Close / headless drain / record finalize）；第二次 → 强杀 |
 
 ### 会话角色
 

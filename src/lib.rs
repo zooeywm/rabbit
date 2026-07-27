@@ -23,6 +23,13 @@ pub mod cli {
 
 pub use app::{Cli, Command, RecordOptions};
 
+/// Install process-wide SIGINT/SIGTERM handlers (idempotent).
+///
+/// First signal requests graceful shutdown; a second signal force-exits.
+pub fn install_shutdown_handlers() {
+    app::shutdown::install();
+}
+
 /// Creates and runs the Rabbit GUI application.
 pub fn run() -> eros::Result<()> {
     app::run_gui()

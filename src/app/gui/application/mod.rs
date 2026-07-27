@@ -30,6 +30,7 @@ use crate::app::{
         },
     },
     services::{host_stream::HostStreamPlan, session_catalog},
+    shutdown,
 };
 
 use crate::{
@@ -509,6 +510,19 @@ where
         let sender = MessageSender::new(messages.clone());
         let mut application = Self::new(config, view, messages, &sender).await?;
         application.publish_view_state()?;
+
+        // Bridge process signals onto the same Close path as the window chrome.
+        let shutdown_rx = shutdown::subscribe();
+        let shutdown_sender = sender.clone();
+        compio::runtime::spawn(async move {
+            let _ = shutdown_rx.recv_async().await;
+            info!(
+                event = "application_shutdown_signal",
+                "Process stop signal received; starting graceful GUI shutdown"
+            );
+            shutdown_sender.post(RootMessage::Close);
+        })
+        .detach();
 
         while !application.lifecycle.finished {
             let message = application.next_message(&intents).await;

@@ -28,7 +28,11 @@ where
                 Ok(true)
             }
             RootMessage::Close => {
+                if self.lifecycle.closing {
+                    return Ok(false);
+                }
                 self.lifecycle.closing = true;
+                crate::app::shutdown::request();
                 self.stop_video_decoder()?;
                 let tasks = self.model.begin_screen_stream_shutdown();
                 let sessions = self

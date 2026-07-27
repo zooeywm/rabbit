@@ -11,6 +11,7 @@ pub(crate) mod record;
 pub(crate) mod runtime;
 mod screen_stream;
 pub(crate) mod services;
+pub(crate) mod shutdown;
 
 use tracing::{info, warn};
 

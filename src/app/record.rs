@@ -11,6 +11,7 @@ use crate::{
         config::Config,
         init_logging,
         platform::{ApplicationStack, RunnableApp},
+        shutdown,
     },
     infra::{ConnectionEndpoint, WorkerReaper, unsync_queue::UnsyncQueue},
     kernel::{
@@ -120,30 +121,26 @@ where
             .map(|screen| screen.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        eros::bail!(
-            "No screen named `{}` (available: {})",
-            name,
-            available
-        );
+        eros::bail!("No screen named `{}` (available: {})", name, available);
     };
     Ok(screen)
 }
 
 fn spawn_stop_triggers(cancellation: UnsyncQueue<()>, duration_secs: u64, output_path: PathBuf) {
-    // UnsyncQueue is !Send; fan-in stop sources through flume, then push once.
+    // Fan-in: process shutdown (Ctrl-C), optional duration, optional Enter.
     let (stop_tx, stop_rx) = flume::bounded::<()>(1);
 
-    #[cfg(unix)]
     {
         let tx = stop_tx.clone();
+        let shutdown_rx = shutdown::subscribe();
         std::thread::Builder::new()
-            .name("rabbit-record-signal-stop".into())
+            .name("rabbit-record-shutdown-bridge".into())
             .spawn(move || {
-                wait_for_graceful_stop_signal();
+                let _ = shutdown_rx.recv();
                 eprintln!("Stop signal received — finalizing recording…");
                 let _ = tx.send(());
             })
-            .expect("Failed to spawn recording signal-stop thread");
+            .expect("Failed to spawn recording shutdown bridge");
     }
 
     if duration_secs > 0 {
@@ -157,6 +154,7 @@ fn spawn_stop_triggers(cancellation: UnsyncQueue<()>, duration_secs: u64, output
                 output = %path.display(),
                 "Recording duration elapsed"
             );
+            shutdown::request();
             let _ = tx.send(());
         })
         .detach();
@@ -176,6 +174,7 @@ fn spawn_stop_triggers(cancellation: UnsyncQueue<()>, duration_secs: u64, output
                 let stdin = std::io::stdin();
                 let mut line = String::new();
                 let _ = stdin.lock().read_line(&mut line);
+                shutdown::request();
                 let _ = tx.send(());
             })
             .expect("Failed to spawn recording stdin-stop thread");
@@ -186,33 +185,4 @@ fn spawn_stop_triggers(cancellation: UnsyncQueue<()>, duration_secs: u64, output
         cancellation.push(());
     })
     .detach();
-}
-
-/// Blocks until SIGINT/SIGTERM. A second signal force-exits so a hung finalize
-/// cannot trap the user.
-#[cfg(unix)]
-fn wait_for_graceful_stop_signal() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static SIGNAL_COUNT: AtomicU32 = AtomicU32::new(0);
-
-    // SAFETY: handler only touches an atomic and may call `_exit` (async-signal-safe).
-    unsafe extern "C" fn on_stop_signal(_: libc::c_int) {
-        let n = SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst);
-        if n >= 1 {
-            // Second Ctrl-C: abandon finalize rather than hang forever.
-            unsafe { libc::_exit(130) };
-        }
-    }
-
-    unsafe {
-        // On Linux glibc, `sighandler_t` is a raw address-sized integer.
-        let handler = on_stop_signal as *const () as libc::sighandler_t;
-        libc::signal(libc::SIGINT, handler);
-        libc::signal(libc::SIGTERM, handler);
-    }
-
-    while SIGNAL_COUNT.load(Ordering::SeqCst) == 0 {
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }

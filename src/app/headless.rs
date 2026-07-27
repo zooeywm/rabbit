@@ -25,6 +25,7 @@ use crate::{
             session_lifecycle::{ReconnectEligibility, SessionTimeoutPolicy, evaluate_reconnect},
         },
         services::host_stream::HostStreamPlan,
+        shutdown,
     },
     infra::{
         ConnectionEndpoint, PendingConnectionRequest, WorkerReaper, receive_request,
@@ -98,10 +99,21 @@ where
     let sender = messages.clone();
     let timeout_policy = SessionTimeoutPolicy::default();
 
+    let shutdown_rx = shutdown::subscribe();
+    let shutdown_sender = sender.clone();
+    compio::runtime::spawn(async move {
+        let _ = shutdown_rx.recv_async().await;
+        shutdown_sender.push(HeadlessMessage::Shutdown);
+    })
+    .detach();
+
     let listener = connection_endpoint.clone();
     let listener_sender = sender.clone();
     compio::runtime::spawn(async move {
         loop {
+            if shutdown::is_requested() {
+                return;
+            }
             let connection = match listener.accept_connection().await {
                 Ok(Some(connection)) => connection,
                 Ok(None) => return,
@@ -124,12 +136,18 @@ where
     info!(
         event = "headless_listener_ready",
         %local_address,
-        "Waiting for controller connection requests (auto-accept)"
+        "Waiting for controller connection requests (auto-accept); Ctrl-C to stop"
     );
 
     loop {
         apply_headless_timeouts(&mut model, &timeout_policy);
         match messages.pop().await {
+            HeadlessMessage::Shutdown => {
+                info!(event = "headless_shutdown_started", "Headless host shutting down");
+                shutdown_headless(&mut model).await;
+                info!(event = "headless_shutdown_finished", "Headless host stopped");
+                return Ok(());
+            }
             HeadlessMessage::ListenerFailed(error) => {
                 return Err(error).context("Headless connection listener stopped");
             }
@@ -218,6 +236,29 @@ enum HeadlessMessage {
         result: eros::Result<()>,
     },
     ListenerFailed(eros::ErrorUnion),
+    Shutdown,
+}
+
+async fn shutdown_headless<Stack>(model: &mut ApplicationModel<Stack>)
+where
+    Stack: ApplicationStack,
+{
+    let tasks = model.begin_screen_stream_shutdown();
+    let sessions = model
+        .sessions
+        .iter()
+        .map(|session| Rc::clone(&session.send))
+        .collect::<Vec<_>>();
+
+    for task in tasks {
+        if let Err(error) = task.await {
+            error!(error = ?error, "Screen stream task failed during headless shutdown");
+        }
+    }
+    for session in sessions {
+        session.close().await;
+    }
+    model.sessions.clear();
 }
 
 async fn accept_request<Stack>(
