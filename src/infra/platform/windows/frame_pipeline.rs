@@ -101,6 +101,7 @@ where
         screen_id: &ScreenId,
         parameters: FramePipelineParameters,
         frame_rate: FrameRate,
+        _delivery: crate::kernel::frame_pipeline::FrameDelivery,
     ) -> eros::Result<Self::Subscription> {
         let _ = <Deps as AsRef<WgcFramePipelineManagerState>>::as_ref(self.prj_ref());
         let ScreenCaptureSource { lease, receiver } =

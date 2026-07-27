@@ -131,6 +131,7 @@ mod tests {
             Duration::from_secs(2),
             reaper_handle,
             Vec::new(),
+            crate::infra::platform::screen_capture::KmsFrameQueuePolicy::Latest,
         )
         .expect("KMS capture source should start");
         let (device, frames, _fallback) = receiver.into_parts();

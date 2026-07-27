@@ -174,6 +174,8 @@ struct BoundGpu {
 struct LatestSender<T> {
     sender: Sender<T>,
     overflow_receiver: Receiver<T>,
+    /// When true, drop older frames on full queue. When false, block until space.
+    drop_to_latest: bool,
 }
 
 #[derive(Debug)]
@@ -222,11 +224,15 @@ impl GpuWorker {
         id: FramePipelineId,
         screen_id: ScreenId,
         parameters: FramePipelineParameters,
+        queue_capacity: usize,
+        drop_to_latest: bool,
     ) -> eros::Result<GpuPipelineSource> {
-        let (output_sender, frames) = bounded(1);
+        let capacity = queue_capacity.max(1);
+        let (output_sender, frames) = bounded(capacity);
         let outputs = LatestSender {
             sender: output_sender,
             overflow_receiver: frames.clone(),
+            drop_to_latest,
         };
 
         self.commands
@@ -935,6 +941,12 @@ fn process_pipeline_frame(
 
 impl<T> LatestSender<T> {
     fn publish(&self, mut item: T) {
+        if !self.drop_to_latest {
+            // Lossless recording path: block the GPU worker instead of dropping.
+            let _ = self.sender.send(item);
+            return;
+        }
+
         loop {
             match self.sender.try_send(item) {
                 Ok(()) | Err(flume::TrySendError::Disconnected(_)) => return,
@@ -990,10 +1002,10 @@ mod tests {
             },
         };
         let first = worker
-            .register_pipeline(FramePipelineId(0), ScreenId(0), parameters)
+            .register_pipeline(FramePipelineId(0), ScreenId(0), parameters, 1, true)
             .expect("First frame pipeline should register");
         let second = worker
-            .register_pipeline(FramePipelineId(1), ScreenId(0), parameters)
+            .register_pipeline(FramePipelineId(1), ScreenId(0), parameters, 1, true)
             .expect("Second frame pipeline should register");
 
         drop(first);
@@ -1111,6 +1123,7 @@ mod tests {
                     outputs: LatestSender {
                         sender: matching_sender,
                         overflow_receiver: matching_frames.clone(),
+                        drop_to_latest: true,
                     },
                     output_strategy: None,
                     output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
@@ -1127,6 +1140,7 @@ mod tests {
                     outputs: LatestSender {
                         sender: other_sender,
                         overflow_receiver: other_frames.clone(),
+                        drop_to_latest: true,
                     },
                     output_strategy: None,
                     output_pool: DmaBufPool::new(OUTPUT_POOL_CAPACITY),
@@ -1182,6 +1196,7 @@ mod tests {
         let outputs = LatestSender {
             sender,
             overflow_receiver: receiver.clone(),
+            drop_to_latest: true,
         };
 
         outputs.publish(1_u8);

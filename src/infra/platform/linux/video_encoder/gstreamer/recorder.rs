@@ -1,7 +1,8 @@
 //! Local screen recording: DMA-BUF frames → hardware H.264 → MP4 file.
 //!
-//! Shares encoder selection and VPP wiring with the RTP streaming encoder, but
-//! terminates in `mp4mux` + `filesink` instead of `rtph264pay` + `appsink`.
+//! Unlike the RTP streaming encoder, this path is **lossless with respect to
+//! delivered frames**: no leaky queues, no live appsrc drops, and monotonic PTS
+//! at the declared frame rate. Upstream capture must use [`FrameDelivery::Reliable`].
 
 use std::{
     future::{Future, poll_fn},
@@ -17,12 +18,12 @@ use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{
     Cast as _, ElementExt as _, GObjectExtManualGst as _, GstBinExtManual as _, GstObjectExt as _,
 };
+use gstreamer::{ClockTime, Format};
 
 use super::{
     encoder::GStreamerVideoEncoder,
     frame::{DmaBufInputSignature, GStreamerVideoFrame},
     pipeline_util::{
-        H264_BITRATE_KBPS, H264_CPB_SIZE_KBITS, H264_KEY_INT_MAX, configure_low_latency_encoder,
         create_pipeline_stage_queue, create_required_element, terminal_message_result,
         terminal_messages, va_vpp_output_caps,
     },
@@ -31,11 +32,20 @@ use crate::infra::platform::frame_pipeline::GbmFramePipelineFrame;
 use crate::infra::unsync_queue::UnsyncQueue;
 use crate::kernel::geometry::FrameRate;
 
+/// Recording-oriented VAAPI settings: quality over ultra-low latency.
+const RECORD_BITRATE_KBPS: u32 = 80_000;
+const RECORD_CPB_SIZE_KBITS: u32 = 40_000;
+/// ~2s GOP at 144 Hz; better compression than per-frame IDR streaming defaults.
+const RECORD_KEY_INT_MAX: u32 = 288;
+/// Enough to absorb short encode stalls without appsrc overflow.
+const RECORD_APPSRC_MAX_BUFFERS: u64 = 64;
+const RECORD_STAGE_QUEUE_BUFFERS: u32 = 32;
+
 /// Records a processed frame subscription to an H.264 MP4 file until cancelled
 /// or the frame stream ends.
 pub(crate) async fn record_frames_to_mp4<Frames>(
     mut frames: Frames,
-    frame_rate: FrameRate,
+    _subscribe_frame_rate: FrameRate,
     output_path: impl AsRef<Path>,
     cancellation: UnsyncQueue<()>,
 ) -> eros::Result<()>
@@ -49,8 +59,11 @@ where
     };
     let first_frame = first_frame.with_context(|| "Failed to receive first recording frame")?;
     let source_frame_rate = first_frame.source_frame_rate;
-    let first_frame = GStreamerVideoFrame::from_pipeline_frame(first_frame, frame_rate, None)?;
-    let mut recorder = GStreamerScreenRecorder::new(first_frame, source_frame_rate, output_path)?;
+    // Tag caps with the pipeline output rate (min of source/target), not wall clock.
+    let output_rate = first_frame.frame_rate;
+    let first_frame = GStreamerVideoFrame::from_pipeline_frame(first_frame, output_rate, None)?;
+    let mut recorder =
+        GStreamerScreenRecorder::new(first_frame, source_frame_rate, output_rate, output_path)?;
     let result = recorder.drive(&mut frames, &cancellation).await;
     let stop = recorder
         .finalize()
@@ -75,6 +88,8 @@ struct GStreamerScreenRecorder {
     input_caps: gstreamer::Caps,
     input_signature: DmaBufInputSignature,
     source_frame_rate: FrameRate,
+    frame_duration: ClockTime,
+    next_frame_index: u64,
     output_path: PathBuf,
 }
 
@@ -82,9 +97,10 @@ impl GStreamerScreenRecorder {
     fn new(
         first_frame: GStreamerVideoFrame,
         source_frame_rate: FrameRate,
+        output_rate: FrameRate,
         output_path: PathBuf,
     ) -> eros::Result<Self> {
-        let mut recorder = Self::create(first_frame.input_caps(), &output_path)?;
+        let mut recorder = Self::create(first_frame.input_caps(), output_rate, &output_path)?;
         recorder.source_frame_rate = source_frame_rate;
         if let Some(context) = &first_frame.va_context {
             recorder.pipeline.set_context(context);
@@ -99,12 +115,18 @@ impl GStreamerScreenRecorder {
             path = %recorder.output_path.display(),
             width = recorder.input_signature.size.width,
             height = recorder.input_signature.size.height,
-            "Local screen recording started"
+            fps_num = output_rate.numerator(),
+            fps_den = output_rate.denominator(),
+            "Local screen recording started (lossless delivery, fixed PTS)"
         );
         Ok(recorder)
     }
 
-    fn create(input_caps: &gstreamer::CapsRef, output_path: &Path) -> eros::Result<Self> {
+    fn create(
+        input_caps: &gstreamer::CapsRef,
+        output_rate: FrameRate,
+        output_path: &Path,
+    ) -> eros::Result<Self> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;
         let input_signature = DmaBufInputSignature::try_from(input_caps)?;
         let vpp_caps = if GStreamerVideoEncoder::is_xrgb_dmabuf_input_caps(input_caps) {
@@ -132,18 +154,15 @@ impl GStreamerScreenRecorder {
                     factory_name
                 )
             })?;
-        configure_low_latency_encoder(&element);
-        // Prefer slightly longer GOPs for file size when recording (still low-latency friendly).
-        if element.find_property("key-int-max").is_some() {
-            element.set_property("key-int-max", H264_KEY_INT_MAX.min(120));
-        }
+        configure_recording_encoder(&element, output_rate);
         tracing::info!(
             target: "rabbit::video_encoder",
             event = "video_recorder_encoder_selected",
             factory = %factory_name,
-            bitrate_kbps = H264_BITRATE_KBPS,
-            cpb_size_kbits = H264_CPB_SIZE_KBITS,
-            "Selected hardware H.264 encoder for local recording"
+            bitrate_kbps = RECORD_BITRATE_KBPS,
+            cpb_size_kbits = RECORD_CPB_SIZE_KBITS,
+            key_int_max = RECORD_KEY_INT_MAX,
+            "Selected hardware H.264 encoder for lossless local recording"
         );
 
         let source = create_required_element("appsrc", "video-input")?;
@@ -151,18 +170,21 @@ impl GStreamerScreenRecorder {
             eros::bail!("GStreamer appsrc factory returned an unexpected element type");
         };
         source.set_caps(Some(&input_caps));
-        source.set_format(gstreamer::Format::Time);
-        source.set_is_live(true);
-        source.set_do_timestamp(true);
-        source.set_max_buffers(2);
-        source.set_leaky_type(gstreamer_app::AppLeakyType::Downstream);
+        source.set_format(Format::Time);
+        // Non-live + no leaky: block / queue rather than drop when encode lags.
+        source.set_is_live(false);
+        source.set_do_timestamp(false);
+        source.set_block(true);
+        source.set_max_bytes(0);
+        source.set_max_buffers(RECORD_APPSRC_MAX_BUFFERS);
+        source.set_leaky_type(gstreamer_app::AppLeakyType::None);
 
         let vpp = if let Some(vpp_caps) = &vpp_caps {
             let vpp = create_required_element("vapostproc", "video-postprocessor")?;
             let filter = create_required_element("capsfilter", "video-postprocessor-output")?;
             filter.set_property("caps", vpp_caps);
-            let queue = create_pipeline_stage_queue("processed-frame-queue", 1)?;
-            queue.set_property_from_str("leaky", "downstream");
+            let queue = create_pipeline_stage_queue("processed-frame-queue", RECORD_STAGE_QUEUE_BUFFERS)?;
+            // Default leaky=no: never discard.
             Some((vpp, filter, queue))
         } else {
             None
@@ -170,9 +192,9 @@ impl GStreamerScreenRecorder {
 
         let parser = create_required_element("h264parse", "h264-parser")?;
         parser.set_property("config-interval", -1_i32);
-        let encoded_output_queue = create_pipeline_stage_queue("encoded-output-queue", 2)?;
+        let encoded_output_queue =
+            create_pipeline_stage_queue("encoded-output-queue", RECORD_STAGE_QUEUE_BUFFERS)?;
         let mux = create_required_element("mp4mux", "mp4-mux")?;
-        // Live-friendly fragmented-ish settings; still produces a normal mp4 after EOS.
         if mux.find_property("fragment-duration").is_some() {
             mux.set_property("fragment-duration", 0_u32);
         }
@@ -182,12 +204,9 @@ impl GStreamerScreenRecorder {
         let sink = create_required_element("filesink", "file-output")?;
         sink.set_property(
             "location",
-            output_path.to_str().with_context(|| {
-                format!(
-                    "Recording path is not valid UTF-8: {}",
-                    output_path.display()
-                )
-            })?,
+            output_path
+                .to_str()
+                .with_context(|| format!("Recording path is not valid UTF-8: {}", output_path.display()))?,
         );
         sink.set_property("sync", false);
         sink.set_property("async", false);
@@ -225,6 +244,7 @@ impl GStreamerScreenRecorder {
                 .with_context(|| "Failed to link GStreamer H.264 recording pipeline")?;
         }
 
+        let frame_duration = frame_duration_ns(output_rate)?;
         let terminal_messages = terminal_messages(&pipeline)?;
         Ok(Self {
             pipeline,
@@ -233,6 +253,8 @@ impl GStreamerScreenRecorder {
             input_caps,
             input_signature,
             source_frame_rate: input_signature.frame_rate,
+            frame_duration,
+            next_frame_index: 0,
             output_path: output_path.to_path_buf(),
         })
     }
@@ -273,6 +295,7 @@ impl GStreamerScreenRecorder {
                     tracing::info!(
                         event = "local_recording_stop_requested",
                         path = %self.output_path.display(),
+                        frames = self.next_frame_index,
                         "Local recording stop requested"
                     );
                     return Ok(());
@@ -309,7 +332,7 @@ impl GStreamerScreenRecorder {
         )
     }
 
-    fn submit_frame(&mut self, frame: GStreamerVideoFrame) -> eros::Result<()> {
+    fn submit_frame(&mut self, mut frame: GStreamerVideoFrame) -> eros::Result<()> {
         if frame.input_signature != self.input_signature {
             eros::bail!(
                 "Recorder input changed from {:?} to {:?}",
@@ -317,9 +340,29 @@ impl GStreamerScreenRecorder {
                 frame.input_signature
             );
         }
+
+        let pts = self
+            .frame_duration
+            .nseconds()
+            .checked_mul(self.next_frame_index)
+            .with_context(|| "Recording PTS overflowed")?;
+        {
+            let buffer = frame
+                .buffer
+                .make_mut();
+            buffer.set_pts(Some(ClockTime::from_nseconds(pts)));
+            buffer.set_dts(Some(ClockTime::from_nseconds(pts)));
+            buffer.set_duration(Some(self.frame_duration));
+        }
+
+        // block=true on appsrc: wait for space rather than dropping.
         self.source
             .push_buffer(frame.buffer)
             .with_context(|| "Failed to submit DMA-BUF frame to screen recorder")?;
+        self.next_frame_index = self
+            .next_frame_index
+            .checked_add(1)
+            .with_context(|| "Recording frame index overflowed")?;
         Ok(())
     }
 
@@ -328,8 +371,7 @@ impl GStreamerScreenRecorder {
             .end_of_stream()
             .with_context(|| "Failed to send EOS to screen recorder")?;
 
-        // Wait briefly for mp4mux to finalize the file after EOS.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while std::time::Instant::now() < deadline {
             match self
                 .terminal_messages
@@ -350,8 +392,53 @@ impl GStreamerScreenRecorder {
         tracing::info!(
             event = "local_recording_finished",
             path = %self.output_path.display(),
+            frames = self.next_frame_index,
             "Local screen recording finished"
         );
         Ok(())
     }
+}
+
+fn frame_duration_ns(frame_rate: FrameRate) -> eros::Result<ClockTime> {
+    let numer = u128::from(frame_rate.numerator());
+    let denom = u128::from(frame_rate.denominator());
+    // duration = 1e9 * denom / numer nanoseconds
+    let nanos = 1_000_000_000u128
+        .checked_mul(denom)
+        .and_then(|value| value.checked_div(numer))
+        .with_context(|| "Invalid frame rate for recording duration")?;
+    let nanos = u64::try_from(nanos).with_context(|| "Frame duration exceeds u64 nanoseconds")?;
+    if nanos == 0 {
+        eros::bail!("Frame duration collapsed to zero for {frame_rate:?}");
+    }
+    Ok(ClockTime::from_nseconds(nanos))
+}
+
+fn configure_recording_encoder(encoder: &gstreamer::Element, frame_rate: FrameRate) {
+    let is_vaapi = encoder
+        .factory()
+        .is_some_and(|factory| factory.name().starts_with("va"));
+    if !is_vaapi {
+        return;
+    }
+
+    encoder.set_property("b-frames", 0_u32);
+    encoder.set_property("ref-frames", 2_u32);
+    // Prefer quality over pure speed (streaming uses 7).
+    encoder.set_property("target-usage", 4_u32);
+    if encoder.find_property("mbbrc").is_some() {
+        encoder.set_property_from_str("mbbrc", "disabled");
+    }
+    encoder.set_property_from_str("rate-control", "vbr");
+    encoder.set_property("bitrate", RECORD_BITRATE_KBPS);
+    if encoder.find_property("target-percentage").is_some() {
+        encoder.set_property("target-percentage", 95_u32);
+    }
+    encoder.set_property("cpb-size", RECORD_CPB_SIZE_KBITS);
+    let key_int = RECORD_KEY_INT_MAX.min(
+        (u64::from(frame_rate.numerator()).saturating_mul(2)
+            / u64::from(frame_rate.denominator()).max(1))
+        .clamp(30, RECORD_KEY_INT_MAX as u64) as u32,
+    );
+    encoder.set_property("key-int-max", key_int);
 }

@@ -109,7 +109,13 @@ impl FramePipelineManager
         screen_id: &ScreenId,
         parameters: crate::kernel::frame_pipeline::FramePipelineParameters,
         frame_rate: crate::kernel::geometry::FrameRate,
+        delivery: crate::kernel::frame_pipeline::FrameDelivery,
     ) -> eros::Result<Self::Subscription> {
-        GbmFramePipelineManager::inj_ref_mut(self).subscribe(screen_id, parameters, frame_rate)
+        GbmFramePipelineManager::inj_ref_mut(self).subscribe(
+            screen_id,
+            parameters,
+            frame_rate,
+            delivery,
+        )
     }
 }

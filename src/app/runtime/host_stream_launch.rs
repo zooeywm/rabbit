@@ -11,7 +11,7 @@ use crate::{
     },
     infra::{SessionTransportSend, unsync_queue::UnsyncQueue},
     kernel::{
-        frame_pipeline::FramePipelineManager,
+        frame_pipeline::{FrameDelivery, FramePipelineManager},
         session::{SessionId, SessionSend},
         video_encoder::VideoEncoder,
     },
@@ -35,8 +35,13 @@ where
 {
     let screen_id = plan.screen_id;
     let frame_rate = plan.frame_rate;
-    let frames =
-        FramePipelineManager::subscribe(&mut model.app, &screen_id, plan.parameters, frame_rate)?;
+    let frames = FramePipelineManager::subscribe(
+        &mut model.app,
+        &screen_id,
+        plan.parameters,
+        frame_rate,
+        FrameDelivery::Latest,
+    )?;
     let stream_id = model.next_screen_stream_id()?;
     let Some(session) = model
         .sessions

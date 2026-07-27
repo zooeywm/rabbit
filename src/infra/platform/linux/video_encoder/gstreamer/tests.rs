@@ -323,6 +323,7 @@ fn streams_several_host_video_frames() {
                     frame_size: target_size,
                 },
                 target_frame_rate,
+                crate::kernel::frame_pipeline::FrameDelivery::Latest,
             )
             .expect("Host video frame pipeline should start");
         let frames = TimedFrames::new(frames, run_duration);
@@ -1072,6 +1073,7 @@ fn host_video_test_source_geometry(screen_name: &str) -> (PixelSize, FrameRate) 
         Duration::from_secs(2),
         reaper_handle,
         Vec::new(),
+        crate::infra::platform::screen_capture::KmsFrameQueuePolicy::Latest,
     )
     .expect("KMS capture source should start");
     let (device, frames, _fallback) = receiver.into_parts();

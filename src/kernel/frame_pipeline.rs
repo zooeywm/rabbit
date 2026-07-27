@@ -10,6 +10,26 @@ pub struct FramePipelineParameters {
     pub frame_size: PixelSize,
 }
 
+/// How frames move from capture to the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FrameDelivery {
+    /// Low-latency streaming: keep only the newest frame at each stage.
+    Latest,
+    /// Recording / archival: retain every frame in order until capacity is full,
+    /// then apply backpressure instead of dropping.
+    Reliable {
+        /// Max frames buffered between GPU output and the consumer.
+        capacity: usize,
+    },
+}
+
+impl FrameDelivery {
+    /// Default recording buffer (~2s at 144 Hz).
+    pub const fn recording() -> Self {
+        Self::Reliable { capacity: 288 }
+    }
+}
+
 pub trait FramePipelineManager {
     type Frame;
     type Subscription: futures_core::Stream<Item = eros::Result<Rc<Self::Frame>>>;
@@ -19,6 +39,7 @@ pub trait FramePipelineManager {
         screen_id: &ScreenId,
         parameters: FramePipelineParameters,
         frame_rate: FrameRate,
+        delivery: FrameDelivery,
     ) -> eros::Result<Self::Subscription>;
 }
 
@@ -33,7 +54,7 @@ mod tests {
     use futures_core::Stream;
 
     use crate::kernel::{
-        frame_pipeline::{FramePipelineManager, FramePipelineParameters},
+        frame_pipeline::{FrameDelivery, FramePipelineManager, FramePipelineParameters},
         geometry::{FrameRate, PixelSize},
         screen_manager::ScreenId,
     };
@@ -62,6 +83,7 @@ mod tests {
             _screen_id: &ScreenId,
             _parameters: FramePipelineParameters,
             _frame_rate: FrameRate,
+            _delivery: FrameDelivery,
         ) -> eros::Result<Self::Subscription> {
             Ok(EmptyFramePipelineSubscription)
         }
@@ -82,6 +104,7 @@ mod tests {
                 &ScreenId(3),
                 parameters,
                 FrameRate::new(60, 1).expect("Test frame rate should be valid"),
+                FrameDelivery::Latest,
             )
             .expect("Frame pipeline subscription should be created");
     }

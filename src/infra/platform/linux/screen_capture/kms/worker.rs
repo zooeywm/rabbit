@@ -71,6 +71,8 @@ struct KmsCaptureLoop {
     enable_probing: bool,
     probe_interval: Duration,
     encoder_profiles: Vec<DmaBufProfile>,
+    /// When true, overwrite older frames (streaming). When false, block on full queue.
+    drop_to_latest: bool,
 }
 
 #[derive(Debug)]
@@ -92,6 +94,15 @@ pub(crate) struct KmsCompositionFallback {
     commands: Sender<KmsCaptureCommand>,
 }
 
+/// How full capture queues behave when the consumer is slower than vblank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KmsFrameQueuePolicy {
+    /// Streaming: capacity 1, drop older frames (latest only).
+    Latest,
+    /// Recording: deep queue, block the capture thread instead of dropping.
+    Reliable { capacity: usize },
+}
+
 impl KmsCaptureLease {
     pub(crate) fn new(
         screen_name: String,
@@ -99,10 +110,16 @@ impl KmsCaptureLease {
         probe_interval: Duration,
         reaper: WorkerReaperHandle,
         encoder_profiles: Vec<DmaBufProfile>,
+        queue_policy: KmsFrameQueuePolicy,
     ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
         let (commands, command_receiver) = bounded(1);
         let (device_sender, device) = bounded(1);
-        let (frame_sender, frames) = bounded(1);
+        let capacity = match queue_policy {
+            KmsFrameQueuePolicy::Latest => 1,
+            KmsFrameQueuePolicy::Reliable { capacity } => capacity.max(1),
+        };
+        let drop_to_latest = matches!(queue_policy, KmsFrameQueuePolicy::Latest);
+        let (frame_sender, frames) = bounded(capacity);
         let overflow_frames = frames.clone();
         let thread_name = format!("rabbit-kms-{screen_name}");
         let thread = thread::Builder::new().name(thread_name).spawn(move || {
@@ -115,6 +132,7 @@ impl KmsCaptureLease {
                 enable_probing,
                 probe_interval,
                 encoder_profiles,
+                drop_to_latest,
             }
             .run();
         })?;
@@ -228,6 +246,7 @@ impl KmsCaptureLoop {
             enable_probing,
             probe_interval,
             encoder_profiles,
+            drop_to_latest,
         } = self;
 
         let mut capturer = match KmsCapturer::new(&screen_name, encoder_profiles) {
@@ -278,7 +297,13 @@ impl KmsCaptureLoop {
                 Err(error) => Err(error),
             };
 
-            if !publish_latest_frame(&frames, &overflow_frames, frame) || capture_failed {
+            let published = if drop_to_latest {
+                publish_latest_frame(&frames, &overflow_frames, frame)
+            } else {
+                // Reliable recording: block until the consumer drains space.
+                frames.send(frame).is_ok()
+            };
+            if !published || capture_failed {
                 return;
             }
         }
@@ -338,13 +363,11 @@ mod tests {
 
     use flume::bounded;
 
-    use crate::{
-        infra::platform::screen_capture::kms::worker::{
-            KmsCaptureCommand, KmsCaptureLease, KmsCapturedSource, KmsCompositionFallback,
-            empty_kms_frame, publish_latest_frame,
-        },
-        kernel::geometry::PixelSize,
+    use super::{
+        KmsCaptureCommand, KmsCaptureLease, KmsCapturedSource, KmsCompositionFallback,
+        KmsFrameQueuePolicy, empty_kms_frame, publish_latest_frame,
     };
+    use crate::kernel::geometry::PixelSize;
 
     #[test]
     #[ignore = "run through scripts/test-kms"]
@@ -357,6 +380,7 @@ mod tests {
             Duration::from_secs(2),
             reaper_handle,
             Vec::new(),
+            KmsFrameQueuePolicy::Latest,
         )
         .expect("KMS capture source should start asynchronously");
 

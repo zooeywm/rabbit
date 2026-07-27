@@ -47,6 +47,8 @@ pub(crate) struct GbmFramePipelineManagerState {
 struct FramePipelineSourceKey {
     screen_id: ScreenId,
     parameters: FramePipelineParameters,
+    /// Separate keys so recording (reliable) never shares a latest-only source.
+    reliable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +69,16 @@ impl fmt::Display for SharedFramePipelineError {
 impl std::error::Error for SharedFramePipelineError {}
 
 #[derive(Debug)]
+enum FrameFanout {
+    Latest(RefCell<LatestFramePublisher<GbmFramePipelineFrame>>),
+    Reliable {
+        receiver: flume::Receiver<eros::Result<Rc<GbmFramePipelineFrame>>>,
+    },
+}
+
+#[derive(Debug)]
 struct FramePipelineSource {
-    frames: RefCell<LatestFramePublisher<GbmFramePipelineFrame>>,
+    frames: FrameFanout,
     _captured_screen: Rc<CapturedScreenSource>,
     _gpu_registration: GpuPipelineRegistration,
 }
@@ -116,10 +126,17 @@ impl Drop for GbmFramePipelineFrame {
 }
 
 #[derive(Debug)]
+enum SubscriptionFrames {
+    Latest(LatestFrameSubscription<GbmFramePipelineFrame>),
+    /// Ordered queue; never overwrites prior frames.
+    Reliable(flume::Receiver<eros::Result<Rc<GbmFramePipelineFrame>>>),
+}
+
+#[derive(Debug)]
 pub(crate) struct GbmFramePipelineSubscription {
     key: FramePipelineSourceKey,
     source: Rc<FramePipelineSource>,
-    frames: LatestFrameSubscription<GbmFramePipelineFrame>,
+    frames: SubscriptionFrames,
     sources: Weak<RefCell<HashMap<FramePipelineSourceKey, Weak<FramePipelineSource>>>>,
     captured_screens: Weak<RefCell<HashMap<ScreenId, Rc<CapturedScreenSource>>>>,
     worker: Weak<RefCell<Option<GpuWorker>>>,
@@ -154,7 +171,17 @@ impl futures_core::Stream for GbmFramePipelineSubscription {
         let this = self.as_mut().get_mut();
 
         loop {
-            match Pin::new(&mut this.frames).poll_next(context) {
+            let next = match &mut this.frames {
+                SubscriptionFrames::Latest(frames) => Pin::new(frames).poll_next(context),
+                SubscriptionFrames::Reliable(receiver) => {
+                    let mut recv = receiver.recv_async();
+                    Pin::new(&mut recv).poll(context).map(|result| match result {
+                        Ok(item) => Some(item),
+                        Err(_) => None,
+                    })
+                }
+            };
+            match next {
                 Poll::Ready(Some(Ok(frame)))
                     if !this.frame_rate_gate.should_emit(frame.frame_rate) => {}
                 result => return result,
@@ -288,20 +315,60 @@ impl CapturedScreenSource {
 }
 
 impl FramePipelineSource {
-    fn new(captured_screen: Rc<CapturedScreenSource>, gpu_source: GpuPipelineSource) -> Rc<Self> {
+    fn new(
+        captured_screen: Rc<CapturedScreenSource>,
+        gpu_source: GpuPipelineSource,
+        reliable_capacity: Option<usize>,
+    ) -> Rc<Self> {
         let GpuPipelineSource {
             registration,
-            frames,
+            frames: gpu_frames,
         } = gpu_source;
+
+        if let Some(capacity) = reliable_capacity {
+            let (app_tx, app_rx) = flume::bounded(capacity.max(1));
+            let source = Rc::new(Self {
+                frames: FrameFanout::Reliable {
+                    receiver: app_rx.clone(),
+                },
+                _captured_screen: captured_screen,
+                _gpu_registration: registration,
+            });
+            let weak_source = Rc::downgrade(&source);
+
+            compio::runtime::spawn(async move {
+                while let Ok(frame) = gpu_frames.recv_async().await {
+                    if weak_source.strong_count() == 0 {
+                        return;
+                    }
+                    let frame = match frame {
+                        Ok(frame) => wait_until_ready(frame).await,
+                        Err(error) => Err(error),
+                    };
+                    let item = match frame {
+                        Ok(frame) => Ok(Rc::new(frame)),
+                        Err(error) => Err(error.with_context(|| "GPU frame pipeline failed")),
+                    };
+                    // Backpressure: wait for the consumer instead of dropping.
+                    if app_tx.send_async(item).await.is_err() {
+                        return;
+                    }
+                }
+            })
+            .detach();
+
+            return source;
+        }
+
         let source = Rc::new(Self {
-            frames: RefCell::new(LatestFramePublisher::default()),
+            frames: FrameFanout::Latest(RefCell::new(LatestFramePublisher::default())),
             _captured_screen: captured_screen,
             _gpu_registration: registration,
         });
         let weak_source = Rc::downgrade(&source);
 
         compio::runtime::spawn(async move {
-            while let Ok(frame) = frames.recv_async().await {
+            while let Ok(frame) = gpu_frames.recv_async().await {
                 if weak_source.strong_count() == 0 {
                     return;
                 }
@@ -314,20 +381,26 @@ impl FramePipelineSource {
                     return;
                 };
 
-                match frame {
-                    Ok(frame) => source.frames.borrow_mut().publish(frame),
-                    Err(error) => {
-                        source
-                            .frames
-                            .borrow_mut()
-                            .fail(error.with_context(|| "GPU frame pipeline failed").into());
+                match (&source.frames, frame) {
+                    (FrameFanout::Latest(publisher), Ok(frame)) => {
+                        publisher.borrow_mut().publish(frame);
+                    }
+                    (FrameFanout::Latest(publisher), Err(error)) => {
+                        publisher.borrow_mut().fail(
+                            error
+                                .with_context(|| "GPU frame pipeline failed")
+                                .into(),
+                        );
                         return;
                     }
+                    (FrameFanout::Reliable { .. }, _) => return,
                 }
             }
 
-            if let Some(source) = weak_source.upgrade() {
-                source.frames.borrow_mut().close();
+            if let Some(source) = weak_source.upgrade()
+                && let FrameFanout::Latest(publisher) = &source.frames
+            {
+                publisher.borrow_mut().close();
             }
         })
         .detach();
@@ -342,10 +415,18 @@ impl FramePipelineSource {
         frame_rate_demand_id: u64,
         frame_rate: FrameRate,
     ) -> GbmFramePipelineSubscription {
+        let frames = match &self.frames {
+            FrameFanout::Latest(publisher) => {
+                SubscriptionFrames::Latest(publisher.borrow_mut().subscribe())
+            }
+            FrameFanout::Reliable { receiver } => {
+                SubscriptionFrames::Reliable(receiver.clone())
+            }
+        };
         GbmFramePipelineSubscription {
             key,
             source: Rc::clone(self),
-            frames: self.frames.borrow_mut().subscribe(),
+            frames,
             sources: Rc::downgrade(&state.sources),
             captured_screens: Rc::downgrade(&state.captured_screens),
             worker: Rc::downgrade(&state.worker),
@@ -436,6 +517,8 @@ impl GbmFramePipelineManagerState {
         &self,
         screen_id: ScreenId,
         parameters: FramePipelineParameters,
+        queue_capacity: usize,
+        drop_to_latest: bool,
     ) -> eros::Result<GpuPipelineSource> {
         self.ensure_worker()?;
         let worker = self.worker.borrow();
@@ -449,7 +532,7 @@ impl GbmFramePipelineManagerState {
                 .with_context(|| "Failed to allocate a GPU frame-pipeline ID")?;
         self.next_pipeline_id.set(next_id);
 
-        worker.register_pipeline(id, screen_id, parameters)
+        worker.register_pipeline(id, screen_id, parameters, queue_capacity, drop_to_latest)
     }
 
     #[cfg(test)]
@@ -575,7 +658,9 @@ fn handle_worker_notification(
             };
 
             for source in failed_sources {
-                source.frames.borrow_mut().fail(failure.clone());
+                if let FrameFanout::Latest(publisher) = &source.frames {
+                    publisher.borrow_mut().fail(failure.clone());
+                }
             }
 
             if let Some(captured_screen) = captured_screens.borrow_mut().remove(&screen_id) {
@@ -594,6 +679,7 @@ impl<Deps> FramePipelineManager for GbmFramePipelineManager<Deps>
 where
     Deps: AsRef<GbmFramePipelineManagerState>
         + AsMut<GbmFramePipelineManagerState>
+        + AsRef<crate::infra::platform::screen_capture::KmsScreenCaptureManagerState>
         + ScreenCaptureManager<Lease = KmsCaptureLease, Receiver = KmsFrameReceiver>,
 {
     type Frame = GbmFramePipelineFrame;
@@ -604,10 +690,19 @@ where
         screen_id: &ScreenId,
         parameters: FramePipelineParameters,
         frame_rate: FrameRate,
+        delivery: crate::kernel::frame_pipeline::FrameDelivery,
     ) -> eros::Result<Self::Subscription> {
+        use crate::infra::platform::screen_capture::KmsFrameQueuePolicy;
+        use crate::kernel::frame_pipeline::FrameDelivery;
+
+        let (reliable, capacity) = match delivery {
+            FrameDelivery::Latest => (false, 1usize),
+            FrameDelivery::Reliable { capacity } => (true, capacity.max(1)),
+        };
         let key = FramePipelineSourceKey {
             screen_id: *screen_id,
             parameters,
+            reliable,
         };
 
         if let Some(subscription) =
@@ -624,6 +719,12 @@ where
         let captured_screen = match existing_captured_screen {
             Some(captured_screen) => captured_screen,
             None => {
+                if reliable {
+                    <Deps as AsRef<
+                        crate::infra::platform::screen_capture::KmsScreenCaptureManagerState,
+                    >>::as_ref(self.prj_ref())
+                    .set_frame_queue_policy(KmsFrameQueuePolicy::Reliable { capacity });
+                }
                 let ScreenCaptureSource { lease, receiver } =
                     ScreenCaptureManager::acquire(self.prj_ref_mut(), screen_id)?;
                 let state = <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref());
@@ -636,14 +737,17 @@ where
             }
         };
         let state = <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref());
-        let gpu_source = state.register_pipeline(*screen_id, parameters)?;
+        let drop_to_latest = !reliable;
+        let gpu_source =
+            state.register_pipeline(*screen_id, parameters, capacity, drop_to_latest)?;
         let captured_screen = state
             .captured_screens
             .borrow_mut()
             .entry(*screen_id)
             .or_insert(captured_screen)
             .clone();
-        let source = FramePipelineSource::new(captured_screen, gpu_source);
+        let source =
+            FramePipelineSource::new(captured_screen, gpu_source, reliable.then_some(capacity));
 
         state.insert_source(key, source, frame_rate)
     }
@@ -729,7 +833,7 @@ mod tests {
             },
         },
         kernel::{
-            frame_pipeline::{FramePipelineManager, FramePipelineParameters},
+            frame_pipeline::{FrameDelivery, FramePipelineManager, FramePipelineParameters},
             geometry::{FrameRate, PixelSize},
             screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
             screen_manager::ScreenId,
@@ -738,6 +842,7 @@ mod tests {
 
     struct TestDeps {
         frame_pipeline: GbmFramePipelineManagerState,
+        capture: crate::infra::platform::screen_capture::KmsScreenCaptureManagerState,
         capture_acquisitions: usize,
         capture_senders: Vec<flume::Sender<eros::Result<KmsCapturedFrame>>>,
         _reaper: WorkerReaper,
@@ -752,6 +857,12 @@ mod tests {
     impl AsMut<GbmFramePipelineManagerState> for TestDeps {
         fn as_mut(&mut self) -> &mut GbmFramePipelineManagerState {
             &mut self.frame_pipeline
+        }
+    }
+
+    impl AsRef<crate::infra::platform::screen_capture::KmsScreenCaptureManagerState> for TestDeps {
+        fn as_ref(&self) -> &crate::infra::platform::screen_capture::KmsScreenCaptureManagerState {
+            &self.capture
         }
     }
 
@@ -783,13 +894,13 @@ mod tests {
             let shared_parameters = parameters(1920, 1080);
             let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
             let first = manager
-                .subscribe(&ScreenId(1), shared_parameters, frame_rate(60))
+                .subscribe(&ScreenId(1), shared_parameters, frame_rate(60), FrameDelivery::Latest)
                 .expect("First frame pipeline subscription should be created");
             let second = manager
-                .subscribe(&ScreenId(1), shared_parameters, frame_rate(120))
+                .subscribe(&ScreenId(1), shared_parameters, frame_rate(120), FrameDelivery::Latest)
                 .expect("Second frame pipeline subscription should be created");
             let different = manager
-                .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(90))
+                .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(90), FrameDelivery::Latest)
                 .expect("Different frame pipeline subscription should be created");
 
             assert!(Rc::ptr_eq(&first.source, &second.source));
@@ -858,7 +969,7 @@ mod tests {
             let first = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60))
+                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60), FrameDelivery::Latest)
                     .expect("First frame pipeline subscription should be created")
             };
             let first_worker = deps
@@ -868,7 +979,7 @@ mod tests {
             let second = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120))
+                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120), FrameDelivery::Latest)
                     .expect("Second frame pipeline subscription should be created")
             };
             let second_worker = deps
@@ -895,13 +1006,13 @@ mod tests {
             let mut first = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60))
+                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60), FrameDelivery::Latest)
                     .expect("First frame pipeline subscription should be created")
             };
             let mut second = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120))
+                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120), FrameDelivery::Latest)
                     .expect("Second frame pipeline subscription should be created")
             };
             let sender = deps
@@ -937,7 +1048,13 @@ mod tests {
     fn test_deps() -> TestDeps {
         let (reaper, reaper_handle) = WorkerReaper::new().expect("Test worker reaper should start");
         TestDeps {
-            frame_pipeline: GbmFramePipelineManagerState::new(reaper_handle),
+            frame_pipeline: GbmFramePipelineManagerState::new(reaper_handle.clone()),
+            capture: crate::infra::platform::screen_capture::KmsScreenCaptureManagerState::new(
+                false,
+                std::time::Duration::from_secs(2),
+                reaper_handle,
+                |_| Ok(Vec::new()),
+            ),
             capture_acquisitions: 0,
             capture_senders: Vec::new(),
             _reaper: reaper,

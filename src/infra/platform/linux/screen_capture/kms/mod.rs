@@ -23,7 +23,8 @@ mod worker;
 #[cfg(test)]
 pub(crate) use crate::infra::platform::screen_capture::kms::worker::empty_kms_frame;
 pub(crate) use crate::infra::platform::screen_capture::kms::worker::{
-    KmsCaptureLease, KmsCapturedFrame, KmsCapturedSource, KmsCompositionFallback, KmsFrameReceiver,
+    KmsCaptureLease, KmsCapturedFrame, KmsCapturedSource, KmsCompositionFallback, KmsFrameQueuePolicy,
+    KmsFrameReceiver,
 };
 pub(crate) use composition::KmsCompositionTransform;
 pub(crate) use egl_context::{EglContext, EglDmaBufImage};
@@ -37,6 +38,8 @@ pub(crate) struct KmsScreenCaptureManagerState {
     worker_reaper: WorkerReaperHandle,
     encoder_profile_provider: EncoderProfileProvider,
     encoder_profiles: Option<Vec<DmaBufProfile>>,
+    /// Applied to the next [`KmsCaptureLease::new`] from [`ScreenCaptureManager::acquire`].
+    queue_policy: std::cell::Cell<KmsFrameQueuePolicy>,
 }
 
 type EncoderProfileProvider = fn(drm::buffer::DrmFourcc) -> eros::Result<Vec<DmaBufProfile>>;
@@ -54,7 +57,12 @@ impl KmsScreenCaptureManagerState {
             worker_reaper,
             encoder_profile_provider,
             encoder_profiles: None,
+            queue_policy: std::cell::Cell::new(KmsFrameQueuePolicy::Latest),
         }
+    }
+
+    pub(crate) fn set_frame_queue_policy(&self, policy: KmsFrameQueuePolicy) {
+        self.queue_policy.set(policy);
     }
 
     fn encoder_profiles(&mut self) -> Vec<DmaBufProfile> {
@@ -105,12 +113,17 @@ where
         let worker_reaper = state.worker_reaper.clone();
         let encoder_profiles = state.encoder_profiles();
 
+        let queue_policy = state.queue_policy.get();
+        // One-shot: recording sets Reliable then acquire; streamers keep Latest.
+        state.queue_policy.set(KmsFrameQueuePolicy::Latest);
+
         Ok(KmsCaptureLease::new(
             screen_name,
             enable_probing,
             probe_interval,
             worker_reaper,
             encoder_profiles,
+            queue_policy,
         )
         .with_context(|| context)?)
     }

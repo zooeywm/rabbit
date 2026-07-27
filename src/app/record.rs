@@ -15,7 +15,7 @@ use crate::{
     },
     infra::{ConnectionEndpoint, WorkerReaper, unsync_queue::UnsyncQueue},
     kernel::{
-        frame_pipeline::{FramePipelineManager, FramePipelineParameters},
+        frame_pipeline::{FrameDelivery, FramePipelineManager, FramePipelineParameters},
         screen_manager::{Screen, ScreenLayoutManager},
     },
 };
@@ -76,7 +76,13 @@ where
         "Selected screen for local recording"
     );
 
-    let frames = FramePipelineManager::subscribe(&mut app, &screen_id, parameters, frame_rate)?;
+    let frames = FramePipelineManager::subscribe(
+        &mut app,
+        &screen_id,
+        parameters,
+        frame_rate,
+        FrameDelivery::recording(),
+    )?;
     let cancellation = UnsyncQueue::default();
     spawn_stop_triggers(cancellation.clone(), duration_secs, output_path.clone());
 
