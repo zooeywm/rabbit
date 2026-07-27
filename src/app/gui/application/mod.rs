@@ -23,10 +23,8 @@ use crate::app::{
         view::{GuiIntent, ViewPublisher},
     },
     model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
-    services::{
-        host_stream::{HostStreamPlan, plan_preserved_streams},
-        session_catalog,
-    },
+    runtime::host_policy::{HostStreamEvaluation, evaluate_set_screen_streams},
+    services::session_catalog,
 };
 
 use crate::{
@@ -42,10 +40,11 @@ use crate::{
         unsync_queue::UnsyncQueue,
     },
     kernel::{
+        connection_request::PeerCapabilities,
         frame_pipeline::{FramePipelineManager, FramePipelineParameters},
         geometry::FrameRate,
         protocol::{PROTOCOL_NAME, protocol_version_string},
-        screen_configuration::{ScreenStreamsConfigured, SetScreenStreams},
+        screen_configuration::SetScreenStreams,
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{SessionId, SessionRecv, SessionRole, SessionSend},
         transport::TransportRecv,
@@ -182,14 +181,31 @@ where
     pub(super) fn configure_preserved_screens(
         &self,
         request: SetScreenStreams,
-    ) -> (ScreenStreamsConfigured, Vec<HostStreamPlan>) {
-        plan_preserved_streams(request, |id| self.model.app.screen(id).cloned())
+        session_id: SessionId,
+    ) -> eros::Result<HostStreamEvaluation> {
+        let Some(session) = self
+            .model
+            .sessions
+            .iter()
+            .find(|session| session.send.id() == session_id)
+        else {
+            eros::bail!("Session {} is not registered for stream configuration", session_id.0);
+        };
+        evaluate_set_screen_streams(
+            request,
+            |id| self.model.app.screen(id).cloned(),
+            &self.model.local_capabilities,
+            &session.peer_capabilities,
+            session.admits_new_streams(),
+        )
+        .map_err(|error| error.into_union())
     }
 
     pub(super) fn start_session<R>(
         &mut self,
         peer_address: SocketAddr,
         peer_name: Option<String>,
+        peer_capabilities: PeerCapabilities,
         send: SessionSend<SessionTransportSend>,
         recv: SessionRecv<R>,
         sender: &MessageSender,
@@ -218,16 +234,25 @@ where
         let mut session = RunningSession::new(
             key,
             peer_name,
+            peer_capabilities,
             Rc::new(send),
             compio::runtime::spawn(receive_session(recv, sender.clone())),
         );
-        let activated = session.activate();
+        if let Err(error) = session.activate() {
+            warn!(
+                event = "session_activate_failed",
+                session_id = session_id.0,
+                error = %error,
+                "Session failed to activate"
+            );
+            return false;
+        }
         info!(
             event = "session_started",
             session_id = session_id.0,
             role = ?role,
             phase = ?session.phase,
-            activated,
+            peer_max_screens = session.peer_capabilities.max_screens,
             "Session started"
         );
         self.model.sessions.push(session);
@@ -365,7 +390,13 @@ where
             return Ok(false);
         };
 
-        session.begin_drain();
+        if let Err(error) = session.begin_drain() {
+            warn!(
+                session_id = session_id.0,
+                error = %error,
+                "Session drain transition rejected"
+            );
+        }
         let send = Rc::clone(&session.send);
         let tasks = session
             .screen_streams
@@ -446,9 +477,11 @@ where
         // constructed the concrete App<...> type.
         let mut app = app;
         app.run_app().await?;
+        let local_capabilities =
+            PeerCapabilities::local_host(ScreenLayoutManager::screens(&app).len());
 
         Ok(Self {
-            model: ApplicationModel::new(app, requester_name),
+            model: ApplicationModel::new(app, requester_name, local_capabilities),
             view,
             messages,
             lifecycle: LifecycleState {

@@ -12,6 +12,9 @@ pub mod kernel;
 mod app;
 mod infra;
 
+#[cfg(test)]
+mod architecture;
+
 /// Creates and runs the Rabbit GUI application.
 pub fn run() -> eros::Result<()> {
     app::run_gui()

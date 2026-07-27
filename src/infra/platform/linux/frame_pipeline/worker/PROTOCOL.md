@@ -1,3 +1,6 @@
+<!-- lang: en (default) -->
+> **Language / 语言:** **English** · [中文](./PROTOCOL.zh.md)
+
 # GPU Worker Command Protocol
 
 The async runtime never touches DRM/GBM/EGL objects directly. It talks to the

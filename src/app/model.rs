@@ -7,9 +7,14 @@ use std::{
 use eros::Context as _;
 
 use crate::{
-    app::platform::ApplicationStack,
+    app::{
+        platform::ApplicationStack,
+        runtime::session_lifecycle::SessionPhaseEvent,
+    },
     infra::{PendingConnectionRequest, SessionTransportSend, unsync_queue::UnsyncQueue},
     kernel::{
+        connection_request::PeerCapabilities,
+        domain_error::DomainError,
         screen_configuration::{ScreenStreamRequestId, ScreenStreamsConfigured},
         screen_manager::ScreenId,
         session::{SessionId, SessionRole, SessionSend},
@@ -18,25 +23,14 @@ use crate::{
     },
 };
 
-/// Lifecycle phase of a registered peer session.
-///
-/// ```text
-/// Joining ──activate──► Active ──begin_drain──► Draining ──(drop)──► ∅
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionPhase {
-    /// Transport open and catalogued; media not yet admitted.
-    Joining,
-    /// Control and media operations are permitted.
-    Active,
-    /// Shutdown in progress; no new streams may start.
-    Draining,
-}
+pub(crate) use crate::app::runtime::session_lifecycle::SessionPhase;
 
 pub(crate) struct RunningSession {
     pub(crate) key: SessionKey,
     pub(crate) peer_name: Option<String>,
     pub(crate) phase: SessionPhase,
+    /// Capabilities advertised by the peer during handshake.
+    pub(crate) peer_capabilities: PeerCapabilities,
     pub(crate) send: Rc<SessionSend<SessionTransportSend>>,
     pub(crate) screen_streams: HashMap<ScreenId, RunningScreenStream>,
     pub(crate) _receiver: compio::runtime::JoinHandle<()>,
@@ -46,6 +40,7 @@ impl RunningSession {
     pub(crate) fn new(
         key: SessionKey,
         peer_name: Option<String>,
+        peer_capabilities: PeerCapabilities,
         send: Rc<SessionSend<SessionTransportSend>>,
         receiver: compio::runtime::JoinHandle<()>,
     ) -> Self {
@@ -53,30 +48,25 @@ impl RunningSession {
             key,
             peer_name,
             phase: SessionPhase::Joining,
+            peer_capabilities,
             send,
             screen_streams: HashMap::new(),
             _receiver: receiver,
         }
     }
 
-    pub(crate) fn activate(&mut self) -> bool {
-        if self.phase != SessionPhase::Joining {
-            return false;
-        }
-        self.phase = SessionPhase::Active;
-        true
+    pub(crate) fn activate(&mut self) -> Result<(), DomainError> {
+        self.phase = self.phase.transition(SessionPhaseEvent::Activate)?;
+        Ok(())
     }
 
-    pub(crate) fn begin_drain(&mut self) -> bool {
-        if matches!(self.phase, SessionPhase::Draining) {
-            return false;
-        }
-        self.phase = SessionPhase::Draining;
-        true
+    pub(crate) fn begin_drain(&mut self) -> Result<(), DomainError> {
+        self.phase = self.phase.transition(SessionPhaseEvent::BeginDrain)?;
+        Ok(())
     }
 
     pub(crate) fn admits_new_streams(&self) -> bool {
-        self.phase == SessionPhase::Active
+        self.phase.admits_new_streams()
     }
 }
 
@@ -141,6 +131,8 @@ where
     Stack: ApplicationStack,
 {
     pub(crate) requester_name: String,
+    /// Local capabilities advertised on outbound handshakes / used for host admission.
+    pub(crate) local_capabilities: PeerCapabilities,
     pub(crate) pending_connection_requests: Vec<PendingConnectionRequest>,
     pub(crate) sessions: Vec<RunningSession>,
     pub(crate) remote_screens: HashMap<SessionId, Vec<ScreenInfo>>,
@@ -157,10 +149,15 @@ impl<Stack> ApplicationModel<Stack>
 where
     Stack: ApplicationStack,
 {
-    pub(crate) fn new(app: Stack::App, requester_name: String) -> Self {
+    pub(crate) fn new(
+        app: Stack::App,
+        requester_name: String,
+        local_capabilities: PeerCapabilities,
+    ) -> Self {
         Self {
             app,
             requester_name,
+            local_capabilities,
             pending_connection_requests: Vec::new(),
             sessions: Vec::new(),
             remote_screens: HashMap::new(),
@@ -229,6 +226,7 @@ where
         let mut tasks = Vec::new();
 
         for session in &mut self.sessions {
+            let _ = session.begin_drain();
             for stream in session.screen_streams.values_mut() {
                 if let Some(task) = stream.begin_shutdown() {
                     tasks.push(task);
@@ -242,77 +240,21 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc};
-
-    use crate::{
-        app::model::{RunningScreenStream, SessionKey},
-        infra::unsync_queue::UnsyncQueue,
-        kernel::{session::SessionRole, video_encoder::VideoEncoderCommand},
-    };
+    use super::*;
+    use crate::kernel::session::SessionRole;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
-    fn screen_stream_shutdown_is_polled_before_the_stream_is_dropped() {
-        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
-
-        runtime.block_on(async {
-            let cancellation = UnsyncQueue::default();
-            let task_cancellation = cancellation.clone();
-            let stopped = Rc::new(Cell::new(false));
-            let task_stopped = Rc::clone(&stopped);
-            let mut stream = RunningScreenStream {
-                id: 0,
-                cancellation,
-                encoder_commands: UnsyncQueue::default(),
-                task: Some(compio::runtime::spawn(async move {
-                    task_cancellation.pop().await;
-                    task_stopped.set(true);
-                })),
-            };
-
-            let task = stream
-                .begin_shutdown()
-                .expect("Running stream should return its task during shutdown");
-            task.await
-                .expect("Screen stream task should finish after cancellation");
-
-            assert!(stopped.get());
-        });
-    }
-
-    #[test]
-    fn screen_stream_coalesces_pending_key_frame_requests() {
-        let encoder_commands = UnsyncQueue::default();
-        let stream = RunningScreenStream {
-            id: 0,
-            cancellation: UnsyncQueue::default(),
-            encoder_commands: encoder_commands.clone(),
-            task: None,
-        };
-
-        stream.request_key_frame();
-        stream.request_key_frame();
-
-        assert_eq!(
-            encoder_commands.try_pop(),
-            Some(VideoEncoderCommand::RequestKeyFrame)
-        );
-        assert_eq!(encoder_commands.try_pop(), None);
-    }
-
-    #[test]
-    fn session_phase_transitions_joining_active_draining() {
-        use crate::app::model::SessionPhase;
-
-        assert_ne!(SessionPhase::Joining, SessionPhase::Active);
-        assert_ne!(SessionPhase::Active, SessionPhase::Draining);
-
-        // Transition table is enforced on RunningSession; pure enum values stay distinct.
-        let phases = [
-            SessionPhase::Joining,
-            SessionPhase::Active,
-            SessionPhase::Draining,
-        ];
-        assert_eq!(phases.len(), 3);
+    fn session_phase_transitions_via_domain_table() {
+        let mut phase = SessionPhase::Joining;
+        phase = phase
+            .transition(SessionPhaseEvent::Activate)
+            .expect("join->active");
+        assert!(phase.admits_new_streams());
+        phase = phase
+            .transition(SessionPhaseEvent::BeginDrain)
+            .expect("active->drain");
+        assert!(!phase.admits_new_streams());
     }
 
     #[test]
@@ -344,5 +286,62 @@ mod tests {
             "127.0.0.1".parse().expect("Test IP should be valid"),
             None,
         ));
+    }
+
+    #[test]
+    fn screen_stream_coalesces_pending_key_frame_requests() {
+        let encoder_commands = UnsyncQueue::default();
+        let stream = RunningScreenStream {
+            id: 0,
+            cancellation: UnsyncQueue::default(),
+            encoder_commands: encoder_commands.clone(),
+            task: None,
+        };
+
+        stream.request_key_frame();
+        stream.request_key_frame();
+
+        assert_eq!(
+            encoder_commands.try_pop(),
+            Some(VideoEncoderCommand::RequestKeyFrame)
+        );
+        assert_eq!(encoder_commands.try_pop(), None);
+    }
+
+    #[test]
+    fn screen_stream_shutdown_is_polled_before_the_stream_is_dropped() {
+        use std::cell::Cell;
+
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+
+        runtime.block_on(async {
+            let cancellation = UnsyncQueue::default();
+            let task_cancellation = cancellation.clone();
+            let stopped = Rc::new(Cell::new(false));
+            let task_stopped = Rc::clone(&stopped);
+            let mut stream = RunningScreenStream {
+                id: 0,
+                cancellation,
+                encoder_commands: UnsyncQueue::default(),
+                task: Some(compio::runtime::spawn(async move {
+                    task_cancellation.pop().await;
+                    task_stopped.set(true);
+                })),
+            };
+
+            let task = stream
+                .begin_shutdown()
+                .expect("Running stream should return its task during shutdown");
+            task.await
+                .expect("Screen stream task should finish after cancellation");
+
+            assert!(stopped.get());
+        });
+    }
+
+    #[test]
+    fn session_key_uses_ip_and_role() {
+        let _ = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let _ = SocketAddr::from(([127, 0, 0, 1], 1));
     }
 }

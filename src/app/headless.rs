@@ -15,14 +15,16 @@ use crate::{
         init_logging,
         model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
         platform::{ApplicationStack, RunnableApp},
+        runtime::host_policy::evaluate_set_screen_streams,
         screen_stream::run_host_screen_stream,
-        services::host_stream::{HostStreamPlan, plan_preserved_streams},
+        services::host_stream::HostStreamPlan,
     },
     infra::{
         ConnectionEndpoint, PendingConnectionRequest, WorkerReaper, receive_request,
         unsync_queue::UnsyncQueue,
     },
     kernel::{
+        connection_request::PeerCapabilities,
         frame_pipeline::FramePipelineManager,
         protocol::{PROTOCOL_NAME, protocol_version_string},
         screen_manager::{ScreenId, ScreenLayoutManager},
@@ -66,8 +68,9 @@ where
         worker_reaper_handle,
     )?;
     app.run_app().await?;
-
-    let mut model = ApplicationModel::new(app, requester_name);
+    let local_capabilities =
+        PeerCapabilities::local_host(ScreenLayoutManager::screens(&app).len());
+    let mut model = ApplicationModel::new(app, requester_name, local_capabilities);
     let screens = ScreenLayoutManager::screens(&model.app).to_vec();
     info!(
         event = "headless_screens_detected",
@@ -215,12 +218,13 @@ where
     Stack: ApplicationStack,
 {
     let peer_name = request.request().requester_name.clone();
+    let peer_capabilities = request.request().capabilities.clone();
     let remote = request.remote_address();
     info!(
         event = "headless_auto_accept",
         %remote,
         requester_name = %peer_name,
-        max_screens = request.request().capabilities.max_screens,
+        max_screens = peer_capabilities.max_screens,
         "Auto-accepting controller connection"
     );
 
@@ -242,10 +246,13 @@ where
     let mut running = RunningSession::new(
         key,
         Some(peer_name),
+        peer_capabilities,
         Rc::new(send),
         compio::runtime::spawn(receive_session(recv, sender.clone())),
     );
-    running.activate();
+    running
+        .activate()
+        .context("Failed to activate headless host session")?;
     model.sessions.push(running);
     Ok(())
 }
@@ -263,25 +270,37 @@ where
 {
     match message {
         SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
-            let (configured, plans) =
-                plan_preserved_streams(request, |screen_id| model.app.screen(screen_id).cloned());
-            let Some(session) = model
-                .sessions
-                .iter()
-                .find(|session| session.send.id() == id && session.admits_new_streams())
+            let Some(session) = model.sessions.iter().find(|session| session.send.id() == id)
             else {
-                warn!(session_id = id.0, "No active session for stream request");
+                warn!(session_id = id.0, "No session for stream request");
                 return Ok(());
+            };
+            let evaluation = match evaluate_set_screen_streams(
+                request,
+                |screen_id| model.app.screen(screen_id).cloned(),
+                &model.local_capabilities,
+                &session.peer_capabilities,
+                session.admits_new_streams(),
+            ) {
+                Ok(evaluation) => evaluation,
+                Err(error) => {
+                    warn!(
+                        session_id = id.0,
+                        error = %error,
+                        "Headless host rejected stream request by policy"
+                    );
+                    return Ok(());
+                }
             };
             let session_send = Rc::clone(&session.send);
             let finished = sender.clone();
             compio::runtime::spawn(async move {
                 let result = session_send
-                    .send_screen_streams_configured(configured)
+                    .send_screen_streams_configured(evaluation.configured)
                     .await;
                 finished.push(HeadlessMessage::ConfigurationFinished {
                     session_id: id,
-                    plans,
+                    plans: evaluation.plans,
                     result,
                 });
             })

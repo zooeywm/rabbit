@@ -1,3 +1,6 @@
+<!-- lang: en (default) -->
+> **Language / 语言:** **English** · [中文](./CONTRIBUTING.zh.md)
+
 # Contributing to Rabbit
 
 Thank you for contributing to Rabbit. The project values small, reviewable, and verifiable changes.

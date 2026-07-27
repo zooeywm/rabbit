@@ -8,6 +8,7 @@ use crate::app::{
         message::{MessageSender, RootMessage},
     },
     platform::ApplicationStack,
+    runtime::host_policy::HostStreamEvaluation,
 };
 use crate::kernel::{
     screen_configuration::ScreenResolutionStatus,
@@ -49,7 +50,22 @@ where
                         self.refresh_remote_screen_list();
                     }
                     SessionMessage::Control(ControlMessage::SetScreenStreams(request)) => {
-                        let (configured, streams) = self.configure_preserved_screens(request);
+                        let evaluation = match self.configure_preserved_screens(request, id) {
+                            Ok(evaluation) => evaluation,
+                            Err(error) => {
+                                warn!(
+                                    session_id = id.0,
+                                    error = %error,
+                                    "Host rejected screen stream request by policy"
+                                );
+                                self.set_connection_status(format!(
+                                    "Session {} stream request rejected: {error}",
+                                    id.0
+                                ));
+                                return Ok(true);
+                            }
+                        };
+                        let HostStreamEvaluation { configured, plans } = evaluation;
                         let Some(session) = self
                             .model
                             .sessions
@@ -65,7 +81,7 @@ where
                         let session_send = Rc::clone(&session.send);
                         self.host_stream
                             .pending_starts
-                            .extend(streams.iter().map(|plan| (id, plan.screen_id)));
+                            .extend(plans.iter().map(|plan| (id, plan.screen_id)));
                         let configuration_sender = sender.clone();
 
                         compio::runtime::spawn(async move {
@@ -75,7 +91,7 @@ where
                             configuration_sender.post(
                                 RootMessage::ScreenStreamConfigurationFinished {
                                     session_id: id,
-                                    streams,
+                                    streams: plans,
                                     result,
                                 },
                             );

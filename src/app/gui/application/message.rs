@@ -7,6 +7,7 @@ use crate::{
         SessionTransportSend, unsync_queue::UnsyncQueue,
     },
     kernel::{
+        connection_request::PeerCapabilities,
         geometry::PixelSize,
         screen_configuration::ScreenStreamRequestId,
         screen_manager::ScreenId,
@@ -17,6 +18,7 @@ use crate::{
 pub(super) struct PendingHostSession {
     pub(super) peer_address: SocketAddr,
     pub(super) peer_name: String,
+    pub(super) peer_capabilities: PeerCapabilities,
     pub(super) send: SessionSend<SessionTransportSend>,
     pub(super) recv: SessionRecv<SessionTransportRecv>,
 }
@@ -32,6 +34,7 @@ pub(super) enum RootMessage {
     RejectConnectionRequest(usize),
     ConnectionAccepted {
         peer_name: String,
+        peer_capabilities: PeerCapabilities,
         result: eros::Result<SessionTransport>,
     },
     InitialScreenListFinished {

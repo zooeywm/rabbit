@@ -13,9 +13,9 @@
 //! - Peers that share a major version must interoperate. A higher minor version
 //!   must tolerate a lower minor peer by ignoring unknown optional features.
 //!
-//! Handshake embedding of these constants is intentionally staged: constants
-//! are published first so call sites and tests can bind to them; the binary
-//! connection request will carry the pair once negotiation is implemented.
+//! Handshake carries major/minor plus capabilities (see
+//! [`crate::kernel::connection_request`]). Stream admission consults
+//! [`crate::kernel::capability`].
 
 /// Incompatible protocol generation.
 pub const PROTOCOL_MAJOR: u16 = 1;

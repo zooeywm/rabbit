@@ -1,3 +1,6 @@
+<!-- lang: en (default) -->
+> **Language / 语言:** **English** · [中文](./ARCHITECTURE.zh.md)
+
 # Rabbit Architecture
 
 Rabbit is a peer-to-peer remote-desktop system written in Rust. This document is
@@ -35,7 +38,7 @@ beyond stream control.
 ┌─────────────────────────────▼────────────────────────────────────┐
 │  app/                                                             │
 │    gui::application   message loop, grouped UI/runtime state      │
-│    services/          pure use-cases (no Slint, no RootMessage)   │
+│    services/ + runtime/  pure policies (no presentation shell)  │
 │    model              session catalog & IDs                       │
 │    platform           ApplicationStack selection & assembly       │
 └───────────────┬─────────────────────────────┬────────────────────┘
@@ -55,7 +58,7 @@ app → infra → kernel
 kernel → ∅   (no app, no infra, no GUI)
 ```
 
-Violations of this rule are architecture bugs.
+Violations of this rule are architecture bugs (see `src/architecture.rs`).
 
 ---
 
@@ -67,6 +70,7 @@ Violations of this rule are architecture bugs.
 | **Session** | `session` (`rtp`, `role`) | Role-gated send/recv, RTP assembly, session messages |
 | **Screen** | `geometry`, `screen_manager`, `screen_capture`, `screen_configuration` | Topology, capture port, stream negotiation types |
 | **Media** | `frame_pipeline`, `screen_stream`, `video_encoder`, `video_decoder`, `video_renderer` | Processing ports between capture and network/display |
+| **Policy helpers** | `capability`, `domain_error` | Admission checks and structured failure kinds |
 
 ### Protocol version & handshake
 
@@ -84,6 +88,9 @@ Violations of this rule are architecture bugs.
 Peers **must** share a major version. Hosts reply with
 `ConnectionResponse::ProtocolMismatch` and drop the request when majors differ.
 Minor is additive; unknown encoder profile tags are ignored.
+
+Stream setup consults `kernel::capability` (and `app::runtime::host_policy`) so
+advertised budgets are enforced.
 
 Transport channel mapping **must** stay aligned with protocol constants.
 
@@ -130,6 +137,8 @@ main
                └─ optional remote video decoder task
 ```
 
+Headless uses the same stack assembly and host policies without Slint.
+
 ### 4.2 State groups on `RootApplication`
 
 | Group | Owns |
@@ -139,7 +148,7 @@ main
 | `ListenerState` | local bind identity, direct-connect UI, accept loop |
 | `RemoteStreamState` | controller stream UI state + decoder |
 | `HostStreamState` | pending host start/stop acknowledgements |
-| `ApplicationModel` | sessions, remote screens, ID allocators, platform `App` |
+| `ApplicationModel` | sessions, remote screens, ID allocators, platform `App`, local capabilities |
 
 ### 4.3 Message flow
 
@@ -152,21 +161,23 @@ tasks        ──┘                      │
               lifecycle         connection           session
               remote_video      host_stream
                     │
-                    └──► services/* (policy) / model / kernel ports
+                    └──► runtime/* + services/* (policy) / model / kernel
                     └──► ViewPublisher (if view changed)
 ```
 
 Handlers in `gui/application/update/*` should stay thin: route, spawn I/O,
-call `services`, update state groups.
+call runtime/services, update state groups.
 
-### 4.4 Application services
+### 4.4 Application services & runtime policies
 
-| Service | Purpose |
+| Module | Purpose |
 | --- | --- |
-| `services::host_stream` | Plan host pipelines from `SetScreenStreams` + local screens |
-| `services::session_catalog` | Stable ordering of host sessions/streams; remote screen index rebuild |
+| `services::host_stream` | Plan host pipelines from screens + request |
+| `services::session_catalog` | Stable ordering of host sessions/streams |
+| `runtime::host_policy` | Capability + phase admission then plan |
+| `runtime::session_lifecycle` | Exhaustive Joining/Active/Draining transitions |
 
-Services must not import Slint or `RootMessage`.
+These modules must not import the presentation shell.
 
 ### 4.5 Platform stacks
 
@@ -228,8 +239,8 @@ Linux video encoder (`infra/.../video_encoder/gstreamer/`):
 | `va_surface` / `probe` | VA allocator & latency probes |
 | root `gstreamer.rs` | Encoder lifecycle + integration tests |
 
-Frame pipeline worker remains a dedicated GPU worker process-of-record; further
-splits should keep **command/event protocol** ownership in one place.
+Frame pipeline worker: `worker/{mod,composition,output}` plus
+[`PROTOCOL.md`](src/infra/platform/linux/frame_pipeline/worker/PROTOCOL.md).
 
 ---
 
@@ -252,7 +263,7 @@ splits should keep **command/event protocol** ownership in one place.
 
 ### Add a pure policy decision
 
-1. Prefer `app/services/*` with unit tests.
+1. Prefer `app/services/*` or `app/runtime/*` with unit tests.
 2. Call it from handlers; do not embed branching in Slint bindings.
 
 ---
@@ -262,12 +273,14 @@ splits should keep **command/event protocol** ownership in one place.
 | Layer | Style |
 | --- | --- |
 | `kernel` | Co-located unit tests; fake transports for session |
-| `app/services` | Deterministic pure tests |
+| `app/services` / `app/runtime` | Deterministic pure tests |
 | `app/gui/state` | UI state machine unit tests |
+| Architecture | `src/architecture.rs` layering guards |
 | Hardware media | `scripts/test-*` / ignored lib tests (GPU required) |
 
-Run focused tests first (`cargo test --lib <module>`). A compile-only check is
-not a substitute for the module's focused test (see `CONTRIBUTING.md`).
+Run focused tests first (`cargo test --lib <module>`). A compilation-only check is
+not a substitute for the module's focused test (see
+[`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 ---
 
@@ -280,6 +293,7 @@ not a substitute for the module's focused test (see `CONTRIBUTING.md`).
 5. **Kernel stays OS-free**.
 6. **One ApplicationStack** selected at process start for the process media path.
 7. **Latest-frame / coalesced keyframe commands** on host streams — do not queue unbounded frames on the async runtime.
+8. **Capability and phase checks** before host stream admission.
 
 ---
 
@@ -298,12 +312,25 @@ Completed foundation:
 - [x] GPU worker package: `composition` / `output` / loop + `worker/PROTOCOL.md`
 - [x] Capability advertisement (`max_screens`, encoder profile tags) on connect
 - [x] Headless host: `rabbit::run_headless()` / `rabbit --headless`
+- [x] Domain errors, capability negotiation, architecture guards, shared host policy
 
-Further increments:
+### Structural pillars
 
-1. Capability-based stream negotiation (reject streams the peer cannot encode).
-2. Richer session FSM events (timeouts, reconnect).
+| Pillar | Implementation |
+| --- | --- |
+| Domain errors | `kernel::domain_error::{DomainErrorKind, DomainError}` |
+| Capability negotiation | `kernel::capability` + `runtime::host_policy` on SetScreenStreams |
+| Exhaustive session phase table | `runtime::session_lifecycle` (3×2 events, unit-tested) |
+| Shared host policy | GUI + headless call the same `evaluate_set_screen_streams` |
+| Peer caps on sessions | `RunningSession.peer_capabilities` from handshake |
+| Architecture guards | `src/architecture.rs` forbids kernel→app/infra, services/runtime→GUI |
+
+Further product increments (not structural blockers):
+
+1. Handshake **response** carries host capabilities to controllers.
+2. Session FSM timeouts / reconnect events.
 3. Headless controller / record-to-file sinks.
+4. Continue splitting remaining mega-files (gstreamer encode body).
 
 ---
 
@@ -315,4 +342,4 @@ Further increments:
 | **Controller** | Peer that requests streams and presents video |
 | **Stack** | Compile-time bundle of platform managers + codecs + presenters |
 | **RootMessage** | Internal app event bus between async tasks and the GUI loop |
-| **Service** | Pure app-layer policy above kernel ports |
+| **Service / runtime policy** | Pure app-layer decisions above kernel ports, reused by all shells |

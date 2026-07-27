@@ -97,7 +97,16 @@ where
                         let session = Session::new(id, SessionRole::Controller, transport);
                         let (send, recv) = session.split();
 
-                        self.start_session(peer_address, None, send, recv, sender);
+                        // Host capabilities are not yet returned on accept; use defaults
+                        // until the handshake response carries host ads.
+                        self.start_session(
+                            peer_address,
+                            None,
+                            crate::kernel::connection_request::PeerCapabilities::default(),
+                            send,
+                            recv,
+                            sender,
+                        );
                     }
                     Ok(DirectConnectionOutcome::Rejected) => {
                         self.listener
@@ -139,6 +148,7 @@ where
                     return Ok(false);
                 };
                 let peer_name = request.request().requester_name.clone();
+                let peer_capabilities = request.request().capabilities.clone();
                 let approval_sender = sender.clone();
 
                 info!(
@@ -151,6 +161,7 @@ where
                 compio::runtime::spawn(async move {
                     approval_sender.post(RootMessage::ConnectionAccepted {
                         peer_name,
+                        peer_capabilities,
                         result: request.accept().await,
                     });
                 })
@@ -178,7 +189,11 @@ where
 
                 Ok(true)
             }
-            RootMessage::ConnectionAccepted { peer_name, result } => {
+            RootMessage::ConnectionAccepted {
+                peer_name,
+                peer_capabilities,
+                result,
+            } => {
                 match result {
                     Ok(transport) => {
                         let peer_address = transport.remote_address();
@@ -189,6 +204,7 @@ where
                         let session = PendingHostSession {
                             peer_address,
                             peer_name,
+                            peer_capabilities,
                             send,
                             recv,
                         };
@@ -213,6 +229,7 @@ where
                     Ok(()) => self.start_session(
                         session.peer_address,
                         Some(session.peer_name),
+                        session.peer_capabilities,
                         session.send,
                         session.recv,
                         sender,

@@ -6,6 +6,7 @@ pub(crate) mod headless;
 mod logging;
 mod model;
 mod platform;
+pub(crate) mod runtime;
 mod screen_stream;
 pub(crate) mod services;
 

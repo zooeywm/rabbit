@@ -12,7 +12,9 @@
 //! Kernel code must not depend on GUI, OS-specific crates, or `infra`.
 //! Platform adapters implement kernel traits; `app` orchestrates them.
 
+pub mod capability;
 pub mod connection_request;
+pub mod domain_error;
 pub mod frame_pipeline;
 pub mod geometry;
 pub mod protocol;
