@@ -44,6 +44,12 @@ pub(crate) struct GStreamerDecodedFrame {
     _owner: gstreamer::Buffer,
 }
 
+impl crate::kernel::video_decoder::DecodedVideoFrame for GStreamerDecodedFrame {
+    fn screen_id(&self) -> ScreenId {
+        self.screen_id
+    }
+}
+
 impl GStreamerVideoDecoder {
     fn create(enable_probing: bool) -> eros::Result<Self> {
         gstreamer::init().with_context(|| "Failed to initialize GStreamer")?;

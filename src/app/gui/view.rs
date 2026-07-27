@@ -51,22 +51,43 @@ pub(crate) enum GuiIntent {
     Close,
 }
 
-pub(crate) struct Gui {
+pub(crate) struct Gui<VideoView>
+where
+    VideoView: video_view::VideoViewStack,
+{
     window: RabbitWindow,
     intent_sender: flume::Sender<GuiIntent>,
+    video_stack: std::marker::PhantomData<VideoView>,
 }
 
-#[derive(Clone)]
-pub(crate) struct ViewPublisher {
+pub(crate) struct ViewPublisher<VideoView>
+where
+    VideoView: video_view::VideoViewStack,
+{
     window: slint::Weak<RabbitWindow>,
-    video: VideoViewPublisher,
+    video: VideoViewPublisher<VideoView>,
 }
 
-impl Gui {
+impl<VideoView> Clone for ViewPublisher<VideoView>
+where
+    VideoView: video_view::VideoViewStack,
+{
+    fn clone(&self) -> Self {
+        Self {
+            window: self.window.clone(),
+            video: self.video.clone(),
+        }
+    }
+}
+
+impl<VideoView> Gui<VideoView>
+where
+    VideoView: video_view::VideoViewStack,
+{
     pub(crate) fn new(
         video_display: VideoDisplayPreference,
         probe_interval: Duration,
-    ) -> eros::Result<(Self, ViewPublisher, flume::Receiver<GuiIntent>)> {
+    ) -> eros::Result<(Self, ViewPublisher<VideoView>, flume::Receiver<GuiIntent>)> {
         slint::BackendSelector::new()
             .require_opengl_es_with_version(3, 0)
             .select()
@@ -165,7 +186,12 @@ impl Gui {
             }
         });
 
-        let video = video_view::install(&window, sender.clone(), video_display, probe_interval)?;
+        let video = video_view::install::<VideoView>(
+            &window,
+            sender.clone(),
+            video_display,
+            probe_interval,
+        )?;
         let publisher = ViewPublisher {
             window: window.as_weak(),
             video,
@@ -174,6 +200,7 @@ impl Gui {
             Self {
                 window,
                 intent_sender: sender,
+                video_stack: std::marker::PhantomData,
             },
             publisher,
             intents,
@@ -194,7 +221,10 @@ impl Gui {
     }
 }
 
-impl ViewPublisher {
+impl<VideoView> ViewPublisher<VideoView>
+where
+    VideoView: video_view::VideoViewStack,
+{
     pub(crate) fn publish(&self, state: ViewState) -> eros::Result<()> {
         let window = self.window.clone();
         slint::invoke_from_event_loop(move || {
@@ -216,8 +246,11 @@ impl ViewPublisher {
         &self,
         session_id: crate::kernel::session::SessionId,
         screen_id: crate::kernel::screen_manager::ScreenId,
-        frame: crate::infra::DecodedVideoFrame,
-    ) -> eros::Result<()> {
+        frame: VideoView::Frame,
+    ) -> eros::Result<()>
+    where
+        VideoView::Frame: Send,
+    {
         self.video.present(session_id, screen_id, frame)
     }
 

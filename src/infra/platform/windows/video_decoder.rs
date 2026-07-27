@@ -15,6 +15,12 @@ pub(crate) struct WindowsDecodedFrame {
     pub(crate) payload: bytes::Bytes,
 }
 
+impl crate::kernel::video_decoder::DecodedVideoFrame for WindowsDecodedFrame {
+    fn screen_id(&self) -> ScreenId {
+        self.screen_id
+    }
+}
+
 pub(crate) struct WindowsVideoDecoder;
 
 impl VideoDecoder for WindowsVideoDecoder {

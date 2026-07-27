@@ -4,6 +4,7 @@ mod deps;
 mod gui;
 mod logging;
 mod model;
+mod platform;
 mod screen_stream;
 
 use tracing::{info, warn};
@@ -14,8 +15,8 @@ use crate::{
     kernel::screen_manager::ScreenLayoutManager,
 };
 
-pub(crate) use gui::run as run_gui;
 pub(crate) use logging::{LoggerGuard, init_logging};
+pub(crate) use platform::run as run_gui;
 
 /// Root application state and dependency container.
 pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState> {

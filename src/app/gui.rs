@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::SocketAddr, rc::Rc, time::Duration};
+use std::{collections::HashSet, marker::PhantomData, net::SocketAddr, rc::Rc, time::Duration};
 
 use eros::Context;
 use futures_util::{future::Either, pin_mut};
@@ -18,12 +18,17 @@ use crate::app::{
 };
 
 use crate::{
-    app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
+    app::{
+        LoggerGuard,
+        config::Config,
+        init_logging,
+        platform::{ApplicationStack, RemoteVideoStack, RunnableApp},
+        screen_stream::run_host_screen_stream,
+    },
     infra::{
         ConnectionEndpoint, DirectConnectionOutcome, PendingConnectionRequest, SessionTransport,
         SessionTransportRecv, SessionTransportSend, WorkerReaper, connect_transport,
-        create_frame_pipeline_manager_state, create_screen_capture_manager_state,
-        create_screen_layout_manager_state, receive_request, unsync_queue::UnsyncQueue,
+        receive_request, unsync_queue::UnsyncQueue,
     },
     kernel::{
         connection_request::ConnectionRequest,
@@ -43,23 +48,20 @@ use crate::{
     },
 };
 
-#[cfg(target_os = "linux")]
-use crate::infra::{
-    GStreamerVideoDecoder as HostVideoDecoder, GStreamerVideoEncoder as HostVideoEncoder,
-};
-#[cfg(target_os = "windows")]
-use crate::infra::{
-    WindowsVideoDecoder as HostVideoDecoder, WindowsVideoEncoder as HostVideoEncoder,
-};
-
 mod state;
 mod video_view;
 mod view;
 
-pub(crate) fn run() -> eros::Result<()> {
-    let config = Config::new()?;
+pub(crate) use video_view::VideoViewStack;
+pub(crate) use view::RabbitWindow;
+
+pub(crate) fn run<Stack>(config: Config) -> eros::Result<()>
+where
+    Stack: ApplicationStack,
+{
     let probe_interval = Duration::from_millis(config.video.probe_interval_ms);
-    let (gui, publisher, intents) = Gui::new(config.video.display_backend, probe_interval)?;
+    let (gui, publisher, intents) =
+        Gui::<Stack::RemoteVideoViewStack>::new(config.video.display_backend, probe_interval)?;
     let thread_publisher = publisher.clone();
     let application_thread = std::thread::Builder::new()
         .name("rabbit-app".to_string())
@@ -67,7 +69,7 @@ pub(crate) fn run() -> eros::Result<()> {
             let result = (|| {
                 let runtime = compio::runtime::Runtime::new()
                     .context("Failed to create the Rabbit Compio runtime")?;
-                runtime.block_on(RootApplication::run(
+                runtime.block_on(RootApplication::<Stack>::run(
                     config,
                     thread_publisher.clone(),
                     intents,
@@ -101,9 +103,12 @@ pub(crate) struct PendingHostSession {
     recv: SessionRecv<SessionTransportRecv>,
 }
 
-pub(crate) struct RootApplication {
-    model: ApplicationModel,
-    view: ViewPublisher,
+pub(crate) struct RootApplication<Stack>
+where
+    Stack: ApplicationStack,
+{
+    model: ApplicationModel<Stack>,
+    view: ViewPublisher<Stack::RemoteVideoViewStack>,
     messages: UnsyncQueue<RootMessage>,
     closing: bool,
     finished: bool,
@@ -115,7 +120,7 @@ pub(crate) struct RootApplication {
     stream_settings_error: String,
     direct_connection: DirectConnectionState,
     screen_stream: ScreenStreamState,
-    video_decoder: Option<RunningVideoDecoder>,
+    video_decoder: Option<RunningVideoDecoder<Stack::RemoteVideo>>,
     pending_screen_stream_starts: HashSet<(SessionId, ScreenId)>,
     pending_host_screen_stream_stops: HashSet<(SessionId, ScreenId)>,
     _connection_listener: compio::runtime::JoinHandle<()>,
@@ -190,11 +195,15 @@ pub(crate) enum RootMessage {
     StopCurrentScreenStream,
 }
 
-struct RunningVideoDecoder {
+struct RunningVideoDecoder<Video>
+where
+    Video: RemoteVideoStack,
+{
     session_id: SessionId,
     screen_id: ScreenId,
     input: UnsyncQueue<VideoDecoderInput>,
     task: Option<compio::runtime::JoinHandle<()>>,
+    video: PhantomData<Video>,
 }
 
 enum VideoDecoderInput {
@@ -202,7 +211,10 @@ enum VideoDecoderInput {
     Shutdown,
 }
 
-impl RunningVideoDecoder {
+impl<Video> RunningVideoDecoder<Video>
+where
+    Video: RemoteVideoStack,
+{
     fn publish(&self, frame: ReceivedVideoFrame) {
         self.input.push(VideoDecoderInput::Frame(frame));
     }
@@ -212,7 +224,10 @@ impl RunningVideoDecoder {
     }
 }
 
-impl Drop for RunningVideoDecoder {
+impl<Video> Drop for RunningVideoDecoder<Video>
+where
+    Video: RemoteVideoStack,
+{
     fn drop(&mut self) {
         while self.input.try_pop().is_some() {}
         self.input.push(VideoDecoderInput::Shutdown);
@@ -233,7 +248,10 @@ impl MessageSender {
     }
 }
 
-impl RootApplication {
+impl<Stack> RootApplication<Stack>
+where
+    Stack: ApplicationStack,
+{
     fn start_video_decoder(
         &mut self,
         session_id: SessionId,
@@ -253,7 +271,9 @@ impl RootApplication {
         let receiver = input.clone();
         let view = self.view.clone();
         let finished = sender.clone();
-        let enable_probing = self.model.app.config.video.enable_client_probing;
+        let enable_probing = <Stack::App as AsRef<Config>>::as_ref(&self.model.app)
+            .video
+            .enable_client_probing;
         let inputs = Box::pin(futures_util::stream::unfold(
             receiver,
             |receiver| async move {
@@ -264,7 +284,7 @@ impl RootApplication {
             },
         ));
         let task = compio::runtime::spawn(async move {
-            let result = HostVideoDecoder::run_with_probing(
+            let result = <Stack::RemoteVideo as RemoteVideoStack>::run_decoder(
                 inputs,
                 move |frame| std::future::ready(view.present_video(session_id, screen_id, frame)),
                 enable_probing,
@@ -279,6 +299,7 @@ impl RootApplication {
             screen_id,
             input,
             task: Some(task),
+            video: PhantomData,
         });
         Ok(())
     }
@@ -430,7 +451,7 @@ impl RootApplication {
         let task_encoder_commands = encoder_commands.clone();
         let task_sender = sender.clone();
         let task = compio::runtime::spawn(async move {
-            let result = run_host_screen_stream::<_, _, HostVideoEncoder>(
+            let result = run_host_screen_stream::<_, _, Stack::ScreenStreamEncoder>(
                 frames,
                 screen_id,
                 session_send,
@@ -597,25 +618,19 @@ impl RootApplication {
     }
 }
 
-impl RootApplication {
+impl<Stack> RootApplication<Stack>
+where
+    Stack: ApplicationStack,
+{
     async fn new(
         config: Config,
-        view: ViewPublisher,
+        view: ViewPublisher<Stack::RemoteVideoViewStack>,
         messages: UnsyncQueue<RootMessage>,
         sender: &MessageSender,
     ) -> eros::Result<Self> {
         let logger_guard = init_logging(&config)?;
         let (worker_reaper, worker_reaper_handle) =
             WorkerReaper::new().context("Failed to start the background worker reaper")?;
-        let screen_layout_manager_state = create_screen_layout_manager_state()
-            .context("Failed to create the screen layout manager state")?;
-        let screen_capture_manager_state = create_screen_capture_manager_state(
-            config.video.enable_host_probing,
-            Duration::from_millis(config.video.probe_interval_ms),
-            worker_reaper_handle.clone(),
-        );
-        let frame_pipeline_manager_state =
-            create_frame_pipeline_manager_state(worker_reaper_handle);
         let connection_endpoint = ConnectionEndpoint::new(config.network.transport)
             .await
             .context("Failed to create the configured connection endpoint")?;
@@ -630,15 +645,16 @@ impl RootApplication {
             "Connection listener started"
         );
 
-        let mut app = App::new(
+        let app = Stack::create_app(
             config,
-            screen_layout_manager_state,
-            screen_capture_manager_state,
-            frame_pipeline_manager_state,
             connection_endpoint.clone(),
             worker_reaper,
-        );
-        app.run().await?;
+            worker_reaper_handle,
+        )?;
+        // Run the generic App lifecycle after the platform stack has selected and
+        // constructed the concrete App<...> type.
+        let mut app = app;
+        app.run_app().await?;
 
         Ok(Self {
             model: ApplicationModel::new(app, requester_name),
@@ -667,7 +683,7 @@ impl RootApplication {
 
     async fn run(
         config: Config,
-        view: ViewPublisher,
+        view: ViewPublisher<Stack::RemoteVideoViewStack>,
         intents: flume::Receiver<GuiIntent>,
     ) -> eros::Result<()> {
         let messages = UnsyncQueue::default();

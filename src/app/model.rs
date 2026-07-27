@@ -7,7 +7,7 @@ use std::{
 use eros::Context as _;
 
 use crate::{
-    app::App,
+    app::platform::ApplicationStack,
     infra::{PendingConnectionRequest, SessionTransportSend, unsync_queue::UnsyncQueue},
     kernel::{
         screen_configuration::{ScreenStreamRequestId, ScreenStreamsConfigured},
@@ -17,26 +17,6 @@ use crate::{
         video_encoder::VideoEncoderCommand,
     },
 };
-
-#[cfg(target_os = "linux")]
-use crate::infra::{
-    GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
-};
-#[cfg(target_os = "windows")]
-use crate::infra::{
-    WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsScreenLayoutManagerState,
-};
-
-#[cfg(target_os = "linux")]
-pub(crate) type RabbitApp =
-    App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState, GbmFramePipelineManagerState>;
-
-#[cfg(target_os = "windows")]
-pub(crate) type RabbitApp = App<
-    WindowsScreenLayoutManagerState,
-    WgcScreenCaptureManagerState,
-    WgcFramePipelineManagerState,
->;
 
 pub(crate) struct RunningSession {
     pub(crate) key: SessionKey,
@@ -102,7 +82,10 @@ impl RunningScreenStream {
     }
 }
 
-pub(crate) struct ApplicationModel {
+pub(crate) struct ApplicationModel<Stack>
+where
+    Stack: ApplicationStack,
+{
     pub(crate) requester_name: String,
     pub(crate) pending_connection_requests: Vec<PendingConnectionRequest>,
     pub(crate) sessions: Vec<RunningSession>,
@@ -113,11 +96,14 @@ pub(crate) struct ApplicationModel {
     next_session_id: u32,
     next_screen_stream_id: u64,
     next_screen_stream_request_id: u32,
-    pub(crate) app: RabbitApp,
+    pub(crate) app: Stack::App,
 }
 
-impl ApplicationModel {
-    pub(crate) fn new(app: RabbitApp, requester_name: String) -> Self {
+impl<Stack> ApplicationModel<Stack>
+where
+    Stack: ApplicationStack,
+{
+    pub(crate) fn new(app: Stack::App, requester_name: String) -> Self {
         Self {
             app,
             requester_name,

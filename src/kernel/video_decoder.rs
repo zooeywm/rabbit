@@ -1,5 +1,11 @@
 use std::future::Future;
 
+use crate::kernel::screen_manager::ScreenId;
+
+pub trait DecodedVideoFrame {
+    fn screen_id(&self) -> ScreenId;
+}
+
 /// Runs one long-lived decoder over a stream of encoded video input.
 pub trait VideoDecoder {
     type Input;

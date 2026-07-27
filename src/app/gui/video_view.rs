@@ -19,66 +19,131 @@ use crate::{
         config::VideoDisplayPreference,
         gui::view::{GuiIntent, RabbitWindow},
     },
-    infra::{DecodedVideoFrame, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer},
     kernel::{
         screen_manager::ScreenId,
         session::SessionId,
+        video_decoder::DecodedVideoFrame as DecodedVideoFrameTrait,
         video_renderer::{VideoRenderer as _, VideoViewport},
     },
 };
 
 use crate::app::gui::video_view::backend::{VideoDisplayBackend, select_video_display_backend};
 
-enum VideoViewCommand {
+pub(crate) trait VideoViewStack: 'static {
+    type Frame: DecodedVideoFrameTrait + 'static;
+    type NativeRenderer: 'static;
+    type OpenGlRenderer: crate::kernel::video_renderer::VideoRenderer<Frame = Self::Frame> + 'static;
+    type NativeViewport;
+
+    fn create_native_renderer(
+        window: &slint::Window,
+        probe_interval: Duration,
+    ) -> eros::Result<Self::NativeRenderer>;
+
+    fn create_opengl_renderer(
+        get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+        probe_interval: Duration,
+    ) -> eros::Result<Self::OpenGlRenderer>;
+
+    fn set_native_viewport(
+        renderer: &mut Self::NativeRenderer,
+        viewport: Self::NativeViewport,
+    ) -> eros::Result<()>;
+
+    fn validate_native_frame(
+        renderer: &Self::NativeRenderer,
+        frame: &Self::Frame,
+    ) -> eros::Result<()>;
+
+    fn present_native_frame(renderer: &mut Self::NativeRenderer, frame: Self::Frame);
+    fn render_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()>;
+    fn clear_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()>;
+    fn teardown_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()>;
+    fn teardown_opengl_renderer(renderer: &mut Self::OpenGlRenderer) -> eros::Result<()>;
+    fn native_viewport(window: &RabbitWindow, visible: bool) -> eros::Result<Self::NativeViewport>;
+}
+
+enum VideoViewCommand<Stack>
+where
+    Stack: VideoViewStack,
+{
     Present {
         session_id: SessionId,
         screen_id: ScreenId,
-        frame: Box<DecodedVideoFrame>,
+        frame: Box<Stack::Frame>,
     },
     Clear,
 }
 
-enum ActiveVideoDisplay {
-    Native(Box<NativeVideoRenderer>),
-    Slint(Box<OpenGlVideoRenderer>),
+enum ActiveVideoDisplay<Stack>
+where
+    Stack: VideoViewStack,
+{
+    Native(Box<Stack::NativeRenderer>),
+    Slint(Box<Stack::OpenGlRenderer>),
 }
 
-impl ActiveVideoDisplay {
+impl<Stack> ActiveVideoDisplay<Stack>
+where
+    Stack: VideoViewStack,
+{
     fn clear(&mut self) -> eros::Result<()> {
         match self {
-            Self::Native(renderer) => renderer.clear(),
+            Self::Native(renderer) => Stack::clear_native_renderer(renderer),
             Self::Slint(renderer) => renderer.clear(),
         }
     }
 
     fn teardown(&mut self) -> eros::Result<()> {
         match self {
-            Self::Native(renderer) => renderer.teardown(),
-            Self::Slint(renderer) => renderer.teardown(),
+            Self::Native(renderer) => Stack::teardown_native_renderer(renderer),
+            Self::Slint(renderer) => Stack::teardown_opengl_renderer(renderer),
         }
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct VideoViewPublisher {
-    sender: flume::Sender<VideoViewCommand>,
-    stale: flume::Receiver<VideoViewCommand>,
+pub(crate) struct VideoViewPublisher<Stack>
+where
+    Stack: VideoViewStack,
+{
+    sender: flume::Sender<VideoViewCommand<Stack>>,
+    stale: flume::Receiver<VideoViewCommand<Stack>>,
     window: slint::Weak<RabbitWindow>,
     delivery_scheduled: Arc<AtomicBool>,
 }
 
-struct VideoViewState {
-    display: Option<ActiveVideoDisplay>,
+impl<Stack> Clone for VideoViewPublisher<Stack>
+where
+    Stack: VideoViewStack,
+{
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            stale: self.stale.clone(),
+            window: self.window.clone(),
+            delivery_scheduled: Arc::clone(&self.delivery_scheduled),
+        }
+    }
+}
+
+struct VideoViewState<Stack>
+where
+    Stack: VideoViewStack,
+{
+    display: Option<ActiveVideoDisplay<Stack>>,
     active_stream: Option<(SessionId, ScreenId)>,
     failed: bool,
 }
 
-pub(crate) fn install(
+pub(crate) fn install<Stack>(
     window: &RabbitWindow,
     errors: flume::Sender<GuiIntent>,
     preference: VideoDisplayPreference,
     probe_interval: Duration,
-) -> eros::Result<VideoViewPublisher> {
+) -> eros::Result<VideoViewPublisher<Stack>>
+where
+    Stack: VideoViewStack,
+{
     let (sender, receiver) = flume::bounded(1);
     let publisher = VideoViewPublisher {
         sender,
@@ -191,17 +256,23 @@ pub(crate) fn install(
     Ok(publisher)
 }
 
-impl VideoViewPublisher {
+impl<Stack> VideoViewPublisher<Stack>
+where
+    Stack: VideoViewStack,
+{
     pub(crate) fn present(
         &self,
         session_id: SessionId,
         screen_id: ScreenId,
-        frame: DecodedVideoFrame,
-    ) -> eros::Result<()> {
-        if frame.screen_id != screen_id {
+        frame: Stack::Frame,
+    ) -> eros::Result<()>
+    where
+        Stack::Frame: Send,
+    {
+        if frame.screen_id() != screen_id {
             eros::bail!(
                 "Decoded screen {} frame cannot be presented for screen {}",
-                frame.screen_id.0,
+                frame.screen_id().0,
                 screen_id.0
             );
         }
@@ -216,7 +287,7 @@ impl VideoViewPublisher {
         self.publish(VideoViewCommand::Clear)
     }
 
-    fn publish(&self, mut command: VideoViewCommand) -> eros::Result<()> {
+    fn publish(&self, mut command: VideoViewCommand<Stack>) -> eros::Result<()> {
         loop {
             match self.sender.try_send(command) {
                 Ok(()) => break,
@@ -255,15 +326,18 @@ impl VideoViewPublisher {
     }
 }
 
-fn render_video_frame(
-    commands: &flume::Receiver<VideoViewCommand>,
+fn render_video_frame<Stack>(
+    commands: &flume::Receiver<VideoViewCommand<Stack>>,
     weak_window: &slint::Weak<RabbitWindow>,
-    display: &mut Option<ActiveVideoDisplay>,
+    display: &mut Option<ActiveVideoDisplay<Stack>>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
     preference: VideoDisplayPreference,
     probe_interval: Duration,
     get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
-) -> eros::Result<Option<(SessionId, ScreenId)>> {
+) -> eros::Result<Option<(SessionId, ScreenId)>>
+where
+    Stack: VideoViewStack,
+{
     let mut presented = None;
     if let Ok(command) = commands.try_recv() {
         match command {
@@ -311,15 +385,15 @@ fn render_video_frame(
     };
     if !window.get_video_viewport_visible() || active_stream.is_none() {
         if let ActiveVideoDisplay::Native(renderer) = display {
-            renderer.set_viewport(native_viewport(&window, false)?)?;
-            renderer.render()?;
+            Stack::set_native_viewport(renderer, Stack::native_viewport(&window, false)?)?;
+            Stack::render_native_renderer(renderer)?;
         }
         return Ok(presented);
     }
     match display {
         ActiveVideoDisplay::Native(renderer) => {
-            renderer.set_viewport(native_viewport(&window, true)?)?;
-            renderer.render()?;
+            Stack::set_native_viewport(renderer, Stack::native_viewport(&window, true)?)?;
+            Stack::render_native_renderer(renderer)?;
         }
         ActiveVideoDisplay::Slint(renderer) => {
             let scale = window.window().scale_factor();
@@ -335,72 +409,15 @@ fn render_video_frame(
     Ok(presented)
 }
 
-#[cfg(target_os = "linux")]
-fn render_native_frame(
-    commands: &flume::Receiver<VideoViewCommand>,
+fn render_native_frame<Stack>(
+    commands: &flume::Receiver<VideoViewCommand<Stack>>,
     weak_window: &slint::Weak<RabbitWindow>,
-    display: &mut Option<ActiveVideoDisplay>,
+    display: &mut Option<ActiveVideoDisplay<Stack>>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
-) -> eros::Result<Option<(SessionId, ScreenId)>> {
-    render_wayland_frame(commands, weak_window, display, active_stream)
-}
-
-#[cfg(target_os = "windows")]
-fn render_native_frame(
-    _commands: &flume::Receiver<VideoViewCommand>,
-    _weak_window: &slint::Weak<RabbitWindow>,
-    _display: &mut Option<ActiveVideoDisplay>,
-    _active_stream: &mut Option<(SessionId, ScreenId)>,
-) -> eros::Result<Option<(SessionId, ScreenId)>> {
-    Ok(None)
-}
-
-#[cfg(target_os = "linux")]
-fn native_viewport(window: &RabbitWindow, visible: bool) -> eros::Result<NativeVideoViewport> {
-    if !visible {
-        return Ok(NativeVideoViewport {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-        });
-    }
-    Ok(NativeVideoViewport {
-        x: logical_pixels(window.get_video_viewport_x())?,
-        y: logical_pixels(window.get_video_viewport_y())?,
-        width: logical_pixels(window.get_video_viewport_width())?,
-        height: logical_pixels(window.get_video_viewport_height())?,
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn native_viewport(window: &RabbitWindow, visible: bool) -> eros::Result<NativeVideoViewport> {
-    if !visible {
-        return Ok(NativeVideoViewport {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-        });
-    }
-    let scale = window.window().scale_factor();
-    Ok(NativeVideoViewport {
-        x: physical_pixels(window.get_video_viewport_x(), scale)?.min(i32::MAX as u32) as i32,
-        y: physical_pixels(window.get_video_viewport_y(), scale)?.min(i32::MAX as u32) as i32,
-        width: physical_pixels(window.get_video_viewport_width(), scale)?.min(i32::MAX as u32)
-            as i32,
-        height: physical_pixels(window.get_video_viewport_height(), scale)?.min(i32::MAX as u32)
-            as i32,
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn render_wayland_frame(
-    commands: &flume::Receiver<VideoViewCommand>,
-    weak_window: &slint::Weak<RabbitWindow>,
-    display: &mut Option<ActiveVideoDisplay>,
-    active_stream: &mut Option<(SessionId, ScreenId)>,
-) -> eros::Result<Option<(SessionId, ScreenId)>> {
+) -> eros::Result<Option<(SessionId, ScreenId)>>
+where
+    Stack: VideoViewStack,
+{
     let Some(ActiveVideoDisplay::Native(renderer)) = display.as_mut() else {
         return Ok(None);
     };
@@ -412,48 +429,53 @@ fn render_wayland_frame(
                 screen_id,
                 frame,
             } => {
-                renderer.validate_frame(&frame)?;
-                renderer.present(*frame);
+                Stack::validate_native_frame(renderer, &frame)?;
+                Stack::present_native_frame(renderer, *frame);
                 if activate_stream(active_stream, session_id, screen_id) {
                     presented = Some((session_id, screen_id));
                 }
             }
             VideoViewCommand::Clear => {
                 *active_stream = None;
-                renderer.clear()?;
+                Stack::clear_native_renderer(renderer)?;
             }
         }
     }
-    render_wayland_viewport(weak_window, renderer, active_stream.is_some())?;
+    render_native_viewport::<Stack>(weak_window, renderer, active_stream.is_some())?;
     Ok(presented)
 }
 
-#[cfg(target_os = "linux")]
-fn render_wayland_viewport(
+fn render_native_viewport<Stack>(
     weak_window: &slint::Weak<RabbitWindow>,
-    renderer: &mut NativeVideoRenderer,
+    renderer: &mut Stack::NativeRenderer,
     stream_active: bool,
-) -> eros::Result<()> {
+) -> eros::Result<()>
+where
+    Stack: VideoViewStack,
+{
     let Some(window) = weak_window.upgrade() else {
         return Ok(());
     };
     if !window.get_video_viewport_visible() || !stream_active {
-        renderer.set_viewport(native_viewport(&window, false)?)?;
+        Stack::set_native_viewport(renderer, Stack::native_viewport(&window, false)?)?;
     } else {
-        renderer.set_viewport(native_viewport(&window, true)?)?;
+        Stack::set_native_viewport(renderer, Stack::native_viewport(&window, true)?)?;
     }
-    renderer.render()
+    Stack::render_native_renderer(renderer)
 }
 
-fn create_video_display(
+fn create_video_display<Stack>(
     preference: VideoDisplayPreference,
     window: &slint::Window,
     get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
     probe_interval: Duration,
-) -> eros::Result<ActiveVideoDisplay> {
+) -> eros::Result<ActiveVideoDisplay<Stack>>
+where
+    Stack: VideoViewStack,
+{
     if preference == VideoDisplayPreference::Slint {
         let selection = select_video_display_backend(preference, None)?;
-        let display = ActiveVideoDisplay::Slint(Box::new(OpenGlVideoRenderer::new(
+        let display = ActiveVideoDisplay::Slint(Box::new(Stack::create_opengl_renderer(
             get_proc_address,
             probe_interval,
         )?));
@@ -461,7 +483,7 @@ fn create_video_display(
         return Ok(display);
     }
 
-    match NativeVideoRenderer::new(window, probe_interval) {
+    match Stack::create_native_renderer(window, probe_interval) {
         Ok(renderer) => {
             let selection = select_video_display_backend(preference, None)?;
             log_video_display_selection(preference, selection.backend, None);
@@ -470,7 +492,7 @@ fn create_video_display(
         Err(error) => {
             let reason = format!("{error:?}");
             let selection = select_video_display_backend(preference, Some(reason.clone()))?;
-            let display = ActiveVideoDisplay::Slint(Box::new(OpenGlVideoRenderer::new(
+            let display = ActiveVideoDisplay::Slint(Box::new(Stack::create_opengl_renderer(
                 get_proc_address,
                 probe_interval,
             )?));
@@ -484,21 +506,26 @@ fn create_video_display(
     }
 }
 
-fn present_video_frame(
-    display: &mut Option<ActiveVideoDisplay>,
+fn present_video_frame<Stack>(
+    display: &mut Option<ActiveVideoDisplay<Stack>>,
     preference: VideoDisplayPreference,
     get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
     probe_interval: Duration,
-    frame: DecodedVideoFrame,
-) -> eros::Result<()> {
+    frame: Stack::Frame,
+) -> eros::Result<()>
+where
+    Stack: VideoViewStack,
+{
     let error = match display.as_mut() {
-        Some(ActiveVideoDisplay::Native(renderer)) => match renderer.validate_frame(&frame) {
-            Ok(()) => {
-                renderer.present(frame);
-                return Ok(());
+        Some(ActiveVideoDisplay::Native(renderer)) => {
+            match Stack::validate_native_frame(renderer, &frame) {
+                Ok(()) => {
+                    Stack::present_native_frame(renderer, frame);
+                    return Ok(());
+                }
+                Err(error) => error,
             }
-            Err(error) => error,
-        },
+        }
         Some(ActiveVideoDisplay::Slint(renderer)) => {
             renderer.present(frame);
             return Ok(());
@@ -515,7 +542,7 @@ fn present_video_frame(
             .teardown()
             .with_context(|| "Failed to tear down rejected native video display")?;
     }
-    let mut fallback = OpenGlVideoRenderer::new(get_proc_address, probe_interval)
+    let mut fallback = Stack::create_opengl_renderer(get_proc_address, probe_interval)
         .with_context(|| "Failed to create Slint video display fallback")?;
     fallback.present(frame);
     *display = Some(ActiveVideoDisplay::Slint(Box::new(fallback)));
@@ -551,14 +578,6 @@ fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
     Ok(physical.round() as u32)
 }
 
-#[cfg(target_os = "linux")]
-fn logical_pixels(logical: f32) -> eros::Result<i32> {
-    if !logical.is_finite() || logical < 0.0 || logical > i32::MAX as f32 {
-        eros::bail!("Invalid logical video viewport coordinate {}", logical);
-    }
-    Ok(logical.round() as i32)
-}
-
 fn activate_stream(
     active_stream: &mut Option<(SessionId, ScreenId)>,
     session_id: SessionId,
@@ -581,11 +600,13 @@ fn report_error_once(errors: &flume::Sender<GuiIntent>, failed: &mut bool, error
     }
 }
 
-fn fail_video_display(
-    state: &mut VideoViewState,
+fn fail_video_display<Stack>(
+    state: &mut VideoViewState<Stack>,
     errors: &flume::Sender<GuiIntent>,
     error: eros::ErrorUnion,
-) {
+) where
+    Stack: VideoViewStack,
+{
     let cleanup_error = state
         .display
         .as_mut()
@@ -605,26 +626,21 @@ fn fail_video_display(
 mod tests {
     use std::{cell::Cell, pin::Pin, rc::Rc, time::Duration};
 
-    use gstreamer::glib::prelude::{Cast as _, ObjectExt as _};
-    use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _};
-
-    #[cfg(target_os = "linux")]
-    use crate::infra::GStreamerVideoDecoder as HostVideoDecoder;
-    #[cfg(target_os = "windows")]
-    use crate::infra::WindowsVideoDecoder as HostVideoDecoder;
     use crate::{
         app::{
-            config::VideoDisplayPreference,
             gui::{
                 state::{ViewPage, ViewState},
                 view::{Gui, GuiIntent, ViewPublisher},
             },
+            platform::{ApplicationStack, RemoteVideoStack, TestApplicationStack},
         },
         kernel::{
             screen_manager::ScreenId,
             session::{ReceivedVideoFrame, SessionId},
         },
     };
+    use gstreamer::glib::prelude::{Cast as _, ObjectExt as _};
+    use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _};
 
     #[test]
     fn only_the_first_frame_of_an_active_stream_notifies_the_app() {
@@ -661,8 +677,11 @@ mod tests {
         assert!(seconds > 0, "Client video test duration should be positive");
 
         let (gui, publisher, intents) =
-            Gui::new(VideoDisplayPreference::Slint, Duration::from_secs(2))
-                .expect("Slint video test window should be created");
+            Gui::<<TestApplicationStack as ApplicationStack>::RemoteVideoViewStack>::new(
+                crate::app::config::VideoDisplayPreference::Slint,
+                Duration::from_secs(2),
+            )
+            .expect("Slint video test window should be created");
         publisher
             .publish(ViewState {
                 page: ViewPage::StreamRequest,
@@ -749,7 +768,10 @@ mod tests {
         );
     }
 
-    async fn run_test_stream(publisher: ViewPublisher, seconds: u32) -> usize {
+    async fn run_test_stream(
+        publisher: ViewPublisher<<TestApplicationStack as ApplicationStack>::RemoteVideoViewStack>,
+        seconds: u32,
+    ) -> usize {
         let (pipeline, output) = create_test_rtp_source(seconds);
         pipeline
             .set_state(gstreamer::State::Playing)
@@ -760,7 +782,7 @@ mod tests {
         };
         let decoded_frames = Rc::new(Cell::new(0_usize));
         let callback_frames = Rc::clone(&decoded_frames);
-        let result = HostVideoDecoder::run_with_probing(
+        let result = <TestApplicationStack as ApplicationStack>::RemoteVideo::run_decoder(
             inputs,
             move |frame| {
                 callback_frames.set(callback_frames.get() + 1);

@@ -12,7 +12,7 @@ pub(crate) use screen_capture::{WgcScreenCaptureManager, WgcScreenCaptureManager
 pub(crate) use screen_layout::{
     WindowsScreenLayoutManager, WindowsScreenLayoutManagerState, create_screen_layout_manager_state,
 };
-pub(crate) use video_decoder::{WindowsDecodedFrame as DecodedVideoFrame, WindowsVideoDecoder};
+pub(crate) use video_decoder::{WindowsDecodedFrame, WindowsVideoDecoder};
 pub(crate) use video_encoder::WindowsVideoEncoder;
 pub(crate) use video_renderer::{NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer};
 

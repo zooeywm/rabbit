@@ -1,0 +1,194 @@
+use std::{future::Future, time::Duration};
+
+use slint::ComponentHandle as _;
+use tracing::info;
+
+use crate::{
+    app::{
+        App,
+        config::Config,
+        gui::{RabbitWindow, VideoViewStack},
+        platform::{ApplicationStack, RemoteVideoStack},
+    },
+    infra::{
+        ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,
+        WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsDecodedFrame,
+        WindowsScreenLayoutManagerState, WindowsVideoDecoder, WindowsVideoEncoder, WorkerReaper,
+        WorkerReaperHandle,
+    },
+    kernel::{session::ReceivedVideoFrame, video_renderer::VideoRenderer as _},
+};
+
+enum WindowsApplicationStack {
+    WgcD3d11,
+}
+
+pub(crate) struct WgcD3d11ApplicationStack;
+
+#[cfg(test)]
+pub(crate) use WgcD3d11ApplicationStack as TestApplicationStack;
+
+pub(crate) fn run(config: Config) -> eros::Result<()> {
+    match select_application_stack(&config) {
+        WindowsApplicationStack::WgcD3d11 => {
+            crate::app::gui::run::<WgcD3d11ApplicationStack>(config)
+        }
+    }
+}
+
+fn select_application_stack(_config: &Config) -> WindowsApplicationStack {
+    info!(
+        event = "app_platform_stack_selected",
+        stack = WgcD3d11ApplicationStack::name(),
+        "Selected Windows application backend stack"
+    );
+    WindowsApplicationStack::WgcD3d11
+}
+
+impl ApplicationStack for WgcD3d11ApplicationStack {
+    type App = App<
+        WindowsScreenLayoutManagerState,
+        WgcScreenCaptureManagerState,
+        WgcFramePipelineManagerState,
+    >;
+    type RemoteVideo = RemoteVideo;
+    type RemoteVideoViewStack = RemoteVideoViewStack;
+    type ScreenStreamEncoder = WindowsVideoEncoder;
+
+    fn name() -> &'static str {
+        "windows-wgc-d3d11-mf"
+    }
+
+    fn create_app(
+        config: Config,
+        connection_endpoint: ConnectionEndpoint,
+        worker_reaper: WorkerReaper,
+        worker_reaper_handle: WorkerReaperHandle,
+    ) -> eros::Result<Self::App> {
+        let screen_layout_manager_state = crate::infra::create_screen_layout_manager_state()?;
+        let screen_capture_manager_state = crate::infra::create_screen_capture_manager_state(
+            config.video.enable_host_probing,
+            Duration::from_millis(config.video.probe_interval_ms),
+            worker_reaper_handle.clone(),
+        );
+        let frame_pipeline_manager_state =
+            crate::infra::create_frame_pipeline_manager_state(worker_reaper_handle);
+
+        Ok(App::new(
+            config,
+            screen_layout_manager_state,
+            screen_capture_manager_state,
+            frame_pipeline_manager_state,
+            connection_endpoint,
+            worker_reaper,
+        ))
+    }
+}
+
+pub(crate) struct RemoteVideoViewStack;
+
+impl VideoViewStack for RemoteVideoViewStack {
+    type Frame = WindowsDecodedFrame;
+    type NativeRenderer = NativeVideoRenderer;
+    type OpenGlRenderer = OpenGlVideoRenderer;
+    type NativeViewport = NativeVideoViewport;
+
+    fn create_native_renderer(
+        window: &slint::Window,
+        probe_interval: Duration,
+    ) -> eros::Result<Self::NativeRenderer> {
+        NativeVideoRenderer::new(window, probe_interval)
+    }
+
+    fn create_opengl_renderer(
+        get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+        probe_interval: Duration,
+    ) -> eros::Result<Self::OpenGlRenderer> {
+        OpenGlVideoRenderer::new(get_proc_address, probe_interval)
+    }
+
+    fn set_native_viewport(
+        renderer: &mut Self::NativeRenderer,
+        viewport: Self::NativeViewport,
+    ) -> eros::Result<()> {
+        renderer.set_viewport(viewport)
+    }
+
+    fn validate_native_frame(
+        renderer: &Self::NativeRenderer,
+        frame: &Self::Frame,
+    ) -> eros::Result<()> {
+        renderer.validate_frame(frame)
+    }
+
+    fn present_native_frame(renderer: &mut Self::NativeRenderer, frame: Self::Frame) {
+        renderer.present(frame);
+    }
+
+    fn render_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
+        renderer.render()
+    }
+
+    fn clear_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
+        renderer.clear()
+    }
+
+    fn teardown_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
+        renderer.teardown()
+    }
+
+    fn teardown_opengl_renderer(renderer: &mut Self::OpenGlRenderer) -> eros::Result<()> {
+        renderer.teardown()
+    }
+
+    fn native_viewport(window: &RabbitWindow, visible: bool) -> eros::Result<Self::NativeViewport> {
+        if !visible {
+            return Ok(NativeVideoViewport {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            });
+        }
+        let scale = window.window().scale_factor();
+        Ok(NativeVideoViewport {
+            x: physical_pixels(window.get_video_viewport_x(), scale)?.min(i32::MAX as u32) as i32,
+            y: physical_pixels(window.get_video_viewport_y(), scale)?.min(i32::MAX as u32) as i32,
+            width: physical_pixels(window.get_video_viewport_width(), scale)?.min(i32::MAX as u32)
+                as i32,
+            height: physical_pixels(window.get_video_viewport_height(), scale)?.min(i32::MAX as u32)
+                as i32,
+        })
+    }
+}
+
+fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
+    let physical = logical * scale;
+    if !physical.is_finite() || physical < 0.0 || physical > u32::MAX as f32 {
+        eros::bail!("Invalid physical video viewport coordinate {}", physical);
+    }
+    Ok(physical.round() as u32)
+}
+
+pub(crate) struct RemoteVideo;
+
+impl RemoteVideoStack for RemoteVideo {
+    type Decoder = WindowsVideoDecoder;
+    type Frame = WindowsDecodedFrame;
+
+    fn run_decoder<Inputs, PresentFrame, PresentFuture>(
+        inputs: Inputs,
+        present_frame: PresentFrame,
+        enable_probing: bool,
+    ) -> impl Future<Output = eros::Result<()>>
+    where
+        Inputs: futures_core::Stream<Item = eros::Result<ReceivedVideoFrame>> + Unpin,
+        PresentFrame: FnMut(Self::Frame) -> PresentFuture,
+        PresentFuture: Future<Output = eros::Result<()>>,
+    {
+        WindowsVideoDecoder::run_with_probing(inputs, present_frame, enable_probing)
+    }
+}
+
+#[path = "windows_deps.rs"]
+mod deps;
