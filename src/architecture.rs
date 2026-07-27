@@ -79,3 +79,40 @@ fn protocol_constants_are_single_sourced_in_transport_and_screen_id() {
     assert_eq!(u8::from(TransportChannel::Control), CONTROL_CHANNEL_ID);
     assert_eq!(ScreenId::MAX, MAX_VIDEO_SCREEN_ID);
 }
+
+#[test]
+fn gstreamer_linux_stack_is_modularized() {
+    let base = crate_src().join("infra/platform/linux/video_encoder/gstreamer");
+    for name in [
+        "discovery.rs",
+        "encoder.rs",
+        "frame.rs",
+        "pipeline_util.rs",
+        "rtp.rs",
+        "tests.rs",
+    ] {
+        assert!(
+            base.join(name).is_file(),
+            "expected gstreamer submodule {name}"
+        );
+    }
+    let root = crate_src().join("infra/platform/linux/video_encoder/gstreamer.rs");
+    let root_text = source_imports(&root);
+    assert!(
+        root_text.lines().count() < 120,
+        "gstreamer root should stay a thin re-export surface"
+    );
+}
+
+#[test]
+fn runtime_exposes_host_and_controller_policies() {
+    let runtime = crate_src().join("app/runtime");
+    for name in [
+        "host_policy.rs",
+        "host_control.rs",
+        "controller_policy.rs",
+        "session_lifecycle.rs",
+    ] {
+        assert!(runtime.join(name).is_file(), "missing runtime/{name}");
+    }
+}

@@ -3,6 +3,7 @@ use std::rc::Rc;
 use eros::Context as _;
 use tracing::{error, trace, warn};
 
+use crate::app::runtime::controller_policy::evaluate_controller_set_screen_streams;
 use crate::app::{
     gui::{
         application::{
@@ -13,9 +14,8 @@ use crate::app::{
     },
     platform::ApplicationStack,
 };
-use crate::kernel::{
-    capability::validate_controller_set_screen_streams,
-    screen_configuration::{RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams},
+use crate::kernel::screen_configuration::{
+    RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams,
 };
 
 impl<Stack> RootApplication<Stack>
@@ -269,7 +269,7 @@ where
                             frame_rate,
                         }],
                     };
-                    if let Err(error) = validate_controller_set_screen_streams(
+                    if let Err(error) = evaluate_controller_set_screen_streams(
                         &request,
                         &self.model.local_capabilities,
                         &peer_capabilities,

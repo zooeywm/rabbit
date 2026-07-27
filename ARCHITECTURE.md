@@ -241,7 +241,8 @@ Linux video encoder (`infra/.../video_encoder/gstreamer/`):
 | `encoder` | Long-lived H.264 encode pipeline |
 | `pipeline_util` | Bus, elements, low-latency encoder config |
 | `va_surface` / `probe` | VA allocator & latency probes |
-| root `gstreamer.rs` | Re-exports + integration tests |
+| root `gstreamer.rs` | Thin re-exports (`hardware_h264_encoder_for`) |
+| `tests` | Focused GStreamer integration tests |
 
 Frame pipeline worker: `worker/{mod,composition,output}` plus
 [`PROTOCOL.md`](src/infra/platform/linux/frame_pipeline/worker/PROTOCOL.md).

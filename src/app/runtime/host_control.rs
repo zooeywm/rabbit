@@ -57,12 +57,11 @@ mod tests {
     use super::*;
     use crate::kernel::{
         geometry::{FrameRate, PixelSize},
-        screen_configuration::RequestKeyFrame,
         screen_configuration::{
-            RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
+            RemoteDisplayMode, RequestKeyFrame, ScreenStreamRequest, ScreenStreamRequestId,
+            SetScreenStreams,
         },
         screen_manager::{ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
-        session_control::ControlMessage as _,
     };
 
     fn screen(id: u8) -> Screen {
