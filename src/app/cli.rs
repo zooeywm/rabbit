@@ -1,14 +1,9 @@
-//! Static CLI surface (clap derive).
+//! Static CLI surface (palc derive — clap-compatible, static-first).
 
-use clap::{Parser, Subcommand};
+use palc::{Parser, Subcommand};
 
-/// Rabbit command-line interface.
+/// Peer-to-peer remote desktop.
 #[derive(Debug, Parser)]
-#[command(
-    name = "rabbit",
-    about = "Peer-to-peer remote desktop",
-    disable_help_subcommand = true
-)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -17,11 +12,12 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Headless Host: auto-accept controllers (no GUI)
-    #[command(visible_alias = "H")]
     Headless,
 
-    /// Record a local screen to an MP4 file (path from config `[recording].output_path`)
-    #[command(visible_alias = "R")]
+    /// Record a local screen to an MP4 file
+    ///
+    /// Output path comes from config `[recording].output_path`
+    /// (default: standard Videos directory under `rabbit/`).
     Record {
         /// Screen name (e.g. HDMI-A-1). Default: primary screen.
         #[arg(short, long)]

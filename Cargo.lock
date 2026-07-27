@@ -794,44 +794,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clap"
-version = "4.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d91e0c145792ef73a6ad36d27c75ac09f1832222a3c209689d90f534685ee5b7"
-dependencies = [
- "clap_builder",
- "clap_derive",
-]
-
-[[package]]
-name = "clap_builder"
-version = "4.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
-dependencies = [
- "anstyle",
- "clap_lex",
-]
-
-[[package]]
-name = "clap_derive"
-version = "4.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d012d2b9d65aca7f18f4d9878a045bc17899bba951561ba5ec3c2ba1eed9a061"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 3.0.2",
-]
-
-[[package]]
-name = "clap_lex"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4009,6 +3971,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "os_str_bytes"
+version = "7.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73b489f051c9d2f4299ddf8d55e33c65c86a7b76f49359af15f79ebe541d1595"
+
+[[package]]
 name = "owned_ttf_parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4022,6 +3990,29 @@ name = "owo-colors"
 version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
+
+[[package]]
+name = "palc"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aec926238fe280c9d5ad6162851511ba1cf55baec4b24cd48a66a18d811bb4d"
+dependencies = [
+ "os_str_bytes",
+ "palc-derive",
+ "ref-cast",
+]
+
+[[package]]
+name = "palc-derive"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6ad802ed8080f568aa68b6fc6047f80264a6723efc0f11436f639b16a3c8bd0"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "parking"
@@ -4381,7 +4372,6 @@ version = "0.1.0"
 dependencies = [
  "binrw",
  "bytes",
- "clap",
  "compio",
  "directories",
  "drm 0.15.0",
@@ -4399,6 +4389,7 @@ dependencies = [
  "khronos-egl",
  "kudi",
  "niri-ipc",
+ "palc",
  "raw-window-handle",
  "rcgen",
  "serde",
@@ -4534,6 +4525,26 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ref-cast"
+version = "1.0.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "216e8f773d7923bcba9ceb86a86c93cabb3903a11872fc3f138c49630e50b96d"
+dependencies = [
+ "ref-cast-impl",
+]
+
+[[package]]
+name = "ref-cast-impl"
+version = "1.0.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9283685feec7d69af75fb0e858d5e7378f33fe4fc699383b2916ab9273e03c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.2",
 ]
 
 [[package]]

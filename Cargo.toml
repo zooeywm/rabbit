@@ -8,13 +8,8 @@ license = "MIT"
 toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 directories = "6.0"
-clap = { version = "4", default-features = false, features = [
-    "std",
-    "derive",
-    "help",
-    "usage",
-    "error-context",
-] }
+# clap-compatible derive API with opposite (static-first) design goals.
+palc = "0.0.2"
 eros = "0.7"
 compio = { version = "0.19", features = ["net", "quic", "ring", "time"] }
 bytes = "1"

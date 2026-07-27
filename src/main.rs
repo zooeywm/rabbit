@@ -1,4 +1,4 @@
-use clap::Parser as _;
+use palc::Parser as _;
 
 use rabbit::cli::{Cli, Command, RecordOptions};
 
