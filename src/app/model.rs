@@ -8,10 +8,7 @@ use eros::Context as _;
 
 use crate::{
     app::App,
-    infra::{
-        GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
-        PendingConnectionRequest, SessionTransportSend, unsync_queue::UnsyncQueue,
-    },
+    infra::{PendingConnectionRequest, SessionTransportSend, unsync_queue::UnsyncQueue},
     kernel::{
         screen_configuration::{ScreenStreamRequestId, ScreenStreamsConfigured},
         screen_manager::ScreenId,
@@ -21,8 +18,25 @@ use crate::{
     },
 };
 
+#[cfg(target_os = "linux")]
+use crate::infra::{
+    GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NiriScreenLayoutManagerState,
+};
+#[cfg(target_os = "windows")]
+use crate::infra::{
+    WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsScreenLayoutManagerState,
+};
+
+#[cfg(target_os = "linux")]
 pub(crate) type RabbitApp =
     App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState, GbmFramePipelineManagerState>;
+
+#[cfg(target_os = "windows")]
+pub(crate) type RabbitApp = App<
+    WindowsScreenLayoutManagerState,
+    WgcScreenCaptureManagerState,
+    WgcFramePipelineManagerState,
+>;
 
 pub(crate) struct RunningSession {
     pub(crate) key: SessionKey,

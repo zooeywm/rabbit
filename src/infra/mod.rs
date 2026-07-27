@@ -14,11 +14,21 @@ pub(crate) use connection_request::{
     DirectConnectionOutcome, PendingConnectionRequest, connect_transport, receive_request,
 };
 pub(crate) use platform::{
-    GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder, GbmFramePipelineManager,
+    DecodedVideoFrame, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,
+    create_frame_pipeline_manager_state, create_screen_capture_manager_state,
+    create_screen_layout_manager_state,
+};
+#[cfg(target_os = "linux")]
+pub(crate) use platform::{
+    GStreamerVideoDecoder, GStreamerVideoEncoder, GbmFramePipelineManager,
     GbmFramePipelineManagerState, KmsScreenCaptureManager, KmsScreenCaptureManagerState,
-    NiriScreenLayoutManager, NiriScreenLayoutManagerState, OpenGlVideoRenderer,
-    WaylandVideoRenderer, WaylandVideoViewport, create_frame_pipeline_manager_state,
-    create_screen_capture_manager_state, create_screen_layout_manager_state,
+    NiriScreenLayoutManager, NiriScreenLayoutManagerState,
+};
+#[cfg(target_os = "windows")]
+pub(crate) use platform::{
+    WgcFramePipelineManager, WgcFramePipelineManagerState, WgcScreenCaptureManager,
+    WgcScreenCaptureManagerState, WindowsScreenLayoutManager, WindowsScreenLayoutManagerState,
+    WindowsVideoDecoder, WindowsVideoEncoder,
 };
 pub(crate) use quic_endpoint::{QuicConnectOutcome, QuicEndpoint};
 pub(crate) use tcp_endpoint::TcpEndpoint;

@@ -17,9 +17,12 @@ pub(crate) use screen_capture::{KmsScreenCaptureManager, KmsScreenCaptureManager
 pub(crate) use screen_layout::{
     NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_screen_layout_manager_state,
 };
-pub(crate) use video_decoder::{GStreamerDecodedFrame, GStreamerVideoDecoder};
+pub(crate) use video_decoder::{GStreamerDecodedFrame as DecodedVideoFrame, GStreamerVideoDecoder};
 pub(crate) use video_encoder::GStreamerVideoEncoder;
-pub(crate) use video_renderer::{OpenGlVideoRenderer, WaylandVideoRenderer, WaylandVideoViewport};
+pub(crate) use video_renderer::{
+    OpenGlVideoRenderer, WaylandVideoRenderer as NativeVideoRenderer,
+    WaylandVideoViewport as NativeVideoViewport,
+};
 
 /// Negotiates the Linux capture output requested by the selected encoder stack.
 pub(crate) fn create_screen_capture_manager_state(

@@ -6,6 +6,7 @@ use std::{
 };
 
 use eros::Context as _;
+use tracing::{debug, trace};
 
 use crate::{
     infra::unsync_queue::UnsyncQueue,
@@ -40,6 +41,15 @@ where
         );
     };
 
+    debug!(
+        event = "host_screen_stream_started",
+        screen_id = screen_id.0,
+        frame_rate_numerator = frame_rate.numerator(),
+        frame_rate_denominator = frame_rate.denominator(),
+        max_packet_size,
+        "Host screen stream started"
+    );
+
     let commands = futures_util::stream::poll_fn(move |context| {
         let mut command = encoder_commands.pop();
         Pin::new(&mut command).poll(context).map(Some)
@@ -56,11 +66,15 @@ where
         move |packet: Encoder::Packet| {
             let session = Rc::clone(&session);
             async move {
+                let payload = packet.into();
+                trace!(
+                    event = "video_packet_send",
+                    screen_id = screen_id.0,
+                    payload_size = payload.len(),
+                    "Sending video packet"
+                );
                 session
-                    .send_video(VideoMessage {
-                        screen_id,
-                        payload: packet.into(),
-                    })
+                    .send_video(VideoMessage { screen_id, payload })
                     .await
             }
         },

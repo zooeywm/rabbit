@@ -20,11 +20,10 @@ use crate::app::{
 use crate::{
     app::{App, LoggerGuard, config::Config, init_logging, screen_stream::run_host_screen_stream},
     infra::{
-        ConnectionEndpoint, DirectConnectionOutcome, GStreamerVideoDecoder,
-        PendingConnectionRequest, SessionTransport, SessionTransportRecv, SessionTransportSend,
-        WorkerReaper, connect_transport, create_frame_pipeline_manager_state,
-        create_screen_capture_manager_state, create_screen_layout_manager_state, receive_request,
-        unsync_queue::UnsyncQueue,
+        ConnectionEndpoint, DirectConnectionOutcome, PendingConnectionRequest, SessionTransport,
+        SessionTransportRecv, SessionTransportSend, WorkerReaper, connect_transport,
+        create_frame_pipeline_manager_state, create_screen_capture_manager_state,
+        create_screen_layout_manager_state, receive_request, unsync_queue::UnsyncQueue,
     },
     kernel::{
         connection_request::ConnectionRequest,
@@ -42,6 +41,15 @@ use crate::{
         session_control::{ControlMessage, OutgoingScreenList},
         transport::TransportRecv,
     },
+};
+
+#[cfg(target_os = "linux")]
+use crate::infra::{
+    GStreamerVideoDecoder as HostVideoDecoder, GStreamerVideoEncoder as HostVideoEncoder,
+};
+#[cfg(target_os = "windows")]
+use crate::infra::{
+    WindowsVideoDecoder as HostVideoDecoder, WindowsVideoEncoder as HostVideoEncoder,
 };
 
 mod state;
@@ -256,7 +264,7 @@ impl RootApplication {
             },
         ));
         let task = compio::runtime::spawn(async move {
-            let result = GStreamerVideoDecoder::run_with_probing(
+            let result = HostVideoDecoder::run_with_probing(
                 inputs,
                 move |frame| std::future::ready(view.present_video(session_id, screen_id, frame)),
                 enable_probing,
@@ -422,7 +430,7 @@ impl RootApplication {
         let task_encoder_commands = encoder_commands.clone();
         let task_sender = sender.clone();
         let task = compio::runtime::spawn(async move {
-            let result = run_host_screen_stream::<_, _, crate::infra::GStreamerVideoEncoder>(
+            let result = run_host_screen_stream::<_, _, HostVideoEncoder>(
                 frames,
                 screen_id,
                 session_send,

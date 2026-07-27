@@ -250,8 +250,7 @@ impl QuicTransportSend {
 
         Ok(self
             .connection
-            .send_datagram_wait(datagram)
-            .await
+            .send_datagram(datagram)
             .with_context(|| "Failed to send QUIC datagram")?)
     }
 

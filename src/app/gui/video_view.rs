@@ -19,9 +19,7 @@ use crate::{
         config::VideoDisplayPreference,
         gui::view::{GuiIntent, RabbitWindow},
     },
-    infra::{
-        GStreamerDecodedFrame, OpenGlVideoRenderer, WaylandVideoRenderer, WaylandVideoViewport,
-    },
+    infra::{DecodedVideoFrame, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer},
     kernel::{
         screen_manager::ScreenId,
         session::SessionId,
@@ -35,27 +33,27 @@ enum VideoViewCommand {
     Present {
         session_id: SessionId,
         screen_id: ScreenId,
-        frame: Box<GStreamerDecodedFrame>,
+        frame: Box<DecodedVideoFrame>,
     },
     Clear,
 }
 
 enum ActiveVideoDisplay {
-    Wayland(Box<WaylandVideoRenderer>),
+    Native(Box<NativeVideoRenderer>),
     Slint(Box<OpenGlVideoRenderer>),
 }
 
 impl ActiveVideoDisplay {
     fn clear(&mut self) -> eros::Result<()> {
         match self {
-            Self::Wayland(renderer) => renderer.clear(),
+            Self::Native(renderer) => renderer.clear(),
             Self::Slint(renderer) => renderer.clear(),
         }
     }
 
     fn teardown(&mut self) -> eros::Result<()> {
         match self {
-            Self::Wayland(renderer) => renderer.teardown(),
+            Self::Native(renderer) => renderer.teardown(),
             Self::Slint(renderer) => renderer.teardown(),
         }
     }
@@ -104,7 +102,7 @@ pub(crate) fn install(
         if state.failed {
             return;
         }
-        if !matches!(state.display, Some(ActiveVideoDisplay::Wayland(_))) {
+        if !matches!(state.display, Some(ActiveVideoDisplay::Native(_))) {
             if let Some(window) = direct_window.upgrade() {
                 window.window().request_redraw();
             }
@@ -115,7 +113,7 @@ pub(crate) fn install(
             active_stream,
             ..
         } = &mut *state;
-        match render_wayland_frame(&direct_commands, &direct_window, display, active_stream) {
+        match render_native_frame(&direct_commands, &direct_window, display, active_stream) {
             Ok(Some((session_id, screen_id))) => {
                 let _ = direct_errors.send(GuiIntent::VideoFrameReady {
                     session_id,
@@ -198,7 +196,7 @@ impl VideoViewPublisher {
         &self,
         session_id: SessionId,
         screen_id: ScreenId,
-        frame: GStreamerDecodedFrame,
+        frame: DecodedVideoFrame,
     ) -> eros::Result<()> {
         if frame.screen_id != screen_id {
             eros::bail!(
@@ -312,25 +310,15 @@ fn render_video_frame(
         return Ok(None);
     };
     if !window.get_video_viewport_visible() || active_stream.is_none() {
-        if let ActiveVideoDisplay::Wayland(renderer) = display {
-            renderer.set_viewport(WaylandVideoViewport {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-            })?;
+        if let ActiveVideoDisplay::Native(renderer) = display {
+            renderer.set_viewport(native_viewport(&window, false)?)?;
             renderer.render()?;
         }
         return Ok(presented);
     }
     match display {
-        ActiveVideoDisplay::Wayland(renderer) => {
-            renderer.set_viewport(WaylandVideoViewport {
-                x: logical_pixels(window.get_video_viewport_x())?,
-                y: logical_pixels(window.get_video_viewport_y())?,
-                width: logical_pixels(window.get_video_viewport_width())?,
-                height: logical_pixels(window.get_video_viewport_height())?,
-            })?;
+        ActiveVideoDisplay::Native(renderer) => {
+            renderer.set_viewport(native_viewport(&window, true)?)?;
             renderer.render()?;
         }
         ActiveVideoDisplay::Slint(renderer) => {
@@ -347,13 +335,73 @@ fn render_video_frame(
     Ok(presented)
 }
 
+#[cfg(target_os = "linux")]
+fn render_native_frame(
+    commands: &flume::Receiver<VideoViewCommand>,
+    weak_window: &slint::Weak<RabbitWindow>,
+    display: &mut Option<ActiveVideoDisplay>,
+    active_stream: &mut Option<(SessionId, ScreenId)>,
+) -> eros::Result<Option<(SessionId, ScreenId)>> {
+    render_wayland_frame(commands, weak_window, display, active_stream)
+}
+
+#[cfg(target_os = "windows")]
+fn render_native_frame(
+    _commands: &flume::Receiver<VideoViewCommand>,
+    _weak_window: &slint::Weak<RabbitWindow>,
+    _display: &mut Option<ActiveVideoDisplay>,
+    _active_stream: &mut Option<(SessionId, ScreenId)>,
+) -> eros::Result<Option<(SessionId, ScreenId)>> {
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn native_viewport(window: &RabbitWindow, visible: bool) -> eros::Result<NativeVideoViewport> {
+    if !visible {
+        return Ok(NativeVideoViewport {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        });
+    }
+    Ok(NativeVideoViewport {
+        x: logical_pixels(window.get_video_viewport_x())?,
+        y: logical_pixels(window.get_video_viewport_y())?,
+        width: logical_pixels(window.get_video_viewport_width())?,
+        height: logical_pixels(window.get_video_viewport_height())?,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn native_viewport(window: &RabbitWindow, visible: bool) -> eros::Result<NativeVideoViewport> {
+    if !visible {
+        return Ok(NativeVideoViewport {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        });
+    }
+    let scale = window.window().scale_factor();
+    Ok(NativeVideoViewport {
+        x: physical_pixels(window.get_video_viewport_x(), scale)?.min(i32::MAX as u32) as i32,
+        y: physical_pixels(window.get_video_viewport_y(), scale)?.min(i32::MAX as u32) as i32,
+        width: physical_pixels(window.get_video_viewport_width(), scale)?.min(i32::MAX as u32)
+            as i32,
+        height: physical_pixels(window.get_video_viewport_height(), scale)?.min(i32::MAX as u32)
+            as i32,
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn render_wayland_frame(
     commands: &flume::Receiver<VideoViewCommand>,
     weak_window: &slint::Weak<RabbitWindow>,
     display: &mut Option<ActiveVideoDisplay>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
 ) -> eros::Result<Option<(SessionId, ScreenId)>> {
-    let Some(ActiveVideoDisplay::Wayland(renderer)) = display.as_mut() else {
+    let Some(ActiveVideoDisplay::Native(renderer)) = display.as_mut() else {
         return Ok(None);
     };
     let mut presented = None;
@@ -380,28 +428,19 @@ fn render_wayland_frame(
     Ok(presented)
 }
 
+#[cfg(target_os = "linux")]
 fn render_wayland_viewport(
     weak_window: &slint::Weak<RabbitWindow>,
-    renderer: &mut WaylandVideoRenderer,
+    renderer: &mut NativeVideoRenderer,
     stream_active: bool,
 ) -> eros::Result<()> {
     let Some(window) = weak_window.upgrade() else {
         return Ok(());
     };
     if !window.get_video_viewport_visible() || !stream_active {
-        renderer.set_viewport(WaylandVideoViewport {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-        })?;
+        renderer.set_viewport(native_viewport(&window, false)?)?;
     } else {
-        renderer.set_viewport(WaylandVideoViewport {
-            x: logical_pixels(window.get_video_viewport_x())?,
-            y: logical_pixels(window.get_video_viewport_y())?,
-            width: logical_pixels(window.get_video_viewport_width())?,
-            height: logical_pixels(window.get_video_viewport_height())?,
-        })?;
+        renderer.set_viewport(native_viewport(&window, true)?)?;
     }
     renderer.render()
 }
@@ -422,11 +461,11 @@ fn create_video_display(
         return Ok(display);
     }
 
-    match WaylandVideoRenderer::new(window, probe_interval) {
+    match NativeVideoRenderer::new(window, probe_interval) {
         Ok(renderer) => {
             let selection = select_video_display_backend(preference, None)?;
             log_video_display_selection(preference, selection.backend, None);
-            Ok(ActiveVideoDisplay::Wayland(Box::new(renderer)))
+            Ok(ActiveVideoDisplay::Native(Box::new(renderer)))
         }
         Err(error) => {
             let reason = format!("{error:?}");
@@ -450,10 +489,10 @@ fn present_video_frame(
     preference: VideoDisplayPreference,
     get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
     probe_interval: Duration,
-    frame: GStreamerDecodedFrame,
+    frame: DecodedVideoFrame,
 ) -> eros::Result<()> {
     let error = match display.as_mut() {
-        Some(ActiveVideoDisplay::Wayland(renderer)) => match renderer.validate_frame(&frame) {
+        Some(ActiveVideoDisplay::Native(renderer)) => match renderer.validate_frame(&frame) {
             Ok(()) => {
                 renderer.present(frame);
                 return Ok(());
@@ -474,7 +513,7 @@ fn present_video_frame(
     if let Some(mut previous) = display.take() {
         previous
             .teardown()
-            .with_context(|| "Failed to tear down rejected Wayland video display")?;
+            .with_context(|| "Failed to tear down rejected native video display")?;
     }
     let mut fallback = OpenGlVideoRenderer::new(get_proc_address, probe_interval)
         .with_context(|| "Failed to create Slint video display fallback")?;
@@ -512,6 +551,7 @@ fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
     Ok(physical.round() as u32)
 }
 
+#[cfg(target_os = "linux")]
 fn logical_pixels(logical: f32) -> eros::Result<i32> {
     if !logical.is_finite() || logical < 0.0 || logical > i32::MAX as f32 {
         eros::bail!("Invalid logical video viewport coordinate {}", logical);
@@ -568,6 +608,10 @@ mod tests {
     use gstreamer::glib::prelude::{Cast as _, ObjectExt as _};
     use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _};
 
+    #[cfg(target_os = "linux")]
+    use crate::infra::GStreamerVideoDecoder as HostVideoDecoder;
+    #[cfg(target_os = "windows")]
+    use crate::infra::WindowsVideoDecoder as HostVideoDecoder;
     use crate::{
         app::{
             config::VideoDisplayPreference,
@@ -576,7 +620,6 @@ mod tests {
                 view::{Gui, GuiIntent, ViewPublisher},
             },
         },
-        infra::GStreamerVideoDecoder,
         kernel::{
             screen_manager::ScreenId,
             session::{ReceivedVideoFrame, SessionId},
@@ -717,7 +760,7 @@ mod tests {
         };
         let decoded_frames = Rc::new(Cell::new(0_usize));
         let callback_frames = Rc::clone(&decoded_frames);
-        let result = GStreamerVideoDecoder::run_with_probing(
+        let result = HostVideoDecoder::run_with_probing(
             inputs,
             move |frame| {
                 callback_frames.set(callback_frames.get() + 1);

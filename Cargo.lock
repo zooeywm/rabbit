@@ -4374,6 +4374,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "windows",
 ]
 
 [[package]]

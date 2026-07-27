@@ -1228,12 +1228,15 @@ mod tests {
         infra::{
             WorkerReaper,
             platform::{
-                GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
-                KmsScreenCaptureManagerState,
                 dma_buf::{DmaBufFrame, DmaBufLease, DmaBufObject, DmaBufPlane},
-                frame_pipeline::GbmFramePipelineFrame,
+                frame_pipeline::{
+                    GbmFramePipelineFrame, GbmFramePipelineManager, GbmFramePipelineManagerState,
+                },
                 gpu::{GpuContext, GpuDevice},
-                screen_capture::{KmsCaptureLease, KmsFrameReceiver},
+                screen_capture::{
+                    KmsCaptureLease, KmsFrameReceiver, KmsScreenCaptureManager,
+                    KmsScreenCaptureManagerState,
+                },
                 video_encoder::gstreamer::{
                     GStreamerRtpPacket, GStreamerVideoEncoder, GStreamerVideoFrame,
                     H264_KEY_INT_MAX, configure_low_latency_encoder, create_required_element,

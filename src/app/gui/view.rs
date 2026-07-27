@@ -216,7 +216,7 @@ impl ViewPublisher {
         &self,
         session_id: crate::kernel::session::SessionId,
         screen_id: crate::kernel::screen_manager::ScreenId,
-        frame: crate::infra::GStreamerDecodedFrame,
+        frame: crate::infra::DecodedVideoFrame,
     ) -> eros::Result<()> {
         self.video.present(session_id, screen_id, frame)
     }
