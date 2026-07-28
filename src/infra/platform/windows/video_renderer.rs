@@ -5,7 +5,7 @@ use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 use tracing::info;
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HINSTANCE, HWND, POINT, RECT},
+        Foundation::{CloseHandle, HINSTANCE, HWND, RECT},
         Graphics::{
             Direct3D11::{
                 D3D11_BIND_DECODER, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ,
@@ -23,14 +23,13 @@ use windows::{
                 DXGI_MULTIPLANE_OVERLAY_YCbCr_FLAG_NOMINAL_RANGE, DXGI_PRESENT,
                 IDXGIDecodeSwapChain, IDXGIDevice, IDXGIFactoryMedia, IDXGIResource,
             },
-            Gdi::{BLACK_BRUSH, ClientToScreen, GetStockObject, HBRUSH},
+            Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH},
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_BOTTOM, IsIconic, IsWindowVisible,
-            RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_SHOWWINDOW,
-            SetWindowPos, ShowWindow, WNDCLASSEXW, WS_CHILD, WS_EX_NOACTIVATE,
-            WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_BOTTOM, HWND_TOP, IsIconic,
+            IsWindowVisible, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+            SetWindowPos, ShowWindow, WNDCLASSEXW, WS_CHILD, WS_EX_NOREDIRECTIONBITMAP, WS_VISIBLE,
         },
     },
     core::{Interface as _, w},
@@ -83,10 +82,10 @@ impl NativeVideoRenderer {
             eros::bail!("Slint window is not backed by a Win32 HWND");
         };
         let main_window = HWND(handle.hwnd.get() as *mut _);
-        let (video_window, background_window) = create_video_windows()?;
+        let (video_window, background_window) = create_video_windows(main_window)?;
         info!(
             event = "windows_video_hwnd_created",
-            "Created lower native video HWND"
+            "Created native child video HWND"
         );
         Ok(Self {
             main_window,
@@ -158,7 +157,7 @@ impl NativeVideoRenderer {
             .with_context(|| "Failed to destroy Windows video window")?)
     }
 
-    fn sync_video_window(&self) -> eros::Result<bool> {
+    fn sync_video_window(&mut self) -> eros::Result<bool> {
         let visible = self.viewport.width > 0
             && self.viewport.height > 0
             && unsafe { IsWindowVisible(self.main_window).as_bool() }
@@ -167,28 +166,18 @@ impl NativeVideoRenderer {
             let _ = unsafe { ShowWindow(self.video_window, SW_HIDE) };
             return Ok(false);
         }
-        let mut origin = POINT {
-            x: self.viewport.x,
-            y: self.viewport.y,
-        };
-        if !unsafe { ClientToScreen(self.main_window, &mut origin).as_bool() } {
-            eros::bail!(
-                "Failed to translate Slint video viewport to Windows screen coordinates: {}",
-                windows::core::Error::from_thread()
-            );
-        }
         unsafe {
             SetWindowPos(
                 self.video_window,
-                Some(self.main_window),
-                origin.x,
-                origin.y,
+                Some(HWND_TOP),
+                self.viewport.x,
+                self.viewport.y,
                 self.viewport.width,
                 self.viewport.height,
-                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
         }
-        .with_context(|| "Failed to position Windows video window below Slint")?;
+        .with_context(|| "Failed to position Windows child video window")?;
         unsafe {
             SetWindowPos(
                 self.background_window,
@@ -575,20 +564,20 @@ fn fitted_target(
     })
 }
 
-fn create_video_windows() -> eros::Result<(HWND, HWND)> {
+fn create_video_windows(main_window: HWND) -> eros::Result<(HWND, HWND)> {
     register_video_window_class()?;
     let module = unsafe { GetModuleHandleW(None) }?;
     let video_window = unsafe {
         CreateWindowExW(
-            WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW,
+            WS_EX_NOREDIRECTIONBITMAP,
             w!("RabbitVideoWindow"),
             w!("Rabbit Video"),
-            WS_POPUP,
+            WS_CHILD,
             0,
             0,
             1,
             1,
-            None,
+            Some(main_window),
             None,
             Some(HINSTANCE(module.0)),
             None,

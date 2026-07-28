@@ -201,12 +201,11 @@ where
             let result = match state {
                 RenderingState::RenderingSetup => Ok(()),
                 RenderingState::AfterRendering => {
-                    let GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
-                        return report_error_once(
-                            &errors,
-                            &mut video.failed,
-                            "Slint did not provide the required native OpenGL renderer".to_string(),
-                        );
+                    let get_proc_address = match graphics_api {
+                        GraphicsAPI::NativeOpenGL { get_proc_address } => Some(
+                            get_proc_address as &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+                        ),
+                        _ => None,
                     };
                     let VideoViewState {
                         display,
@@ -333,7 +332,7 @@ fn render_video_frame<Stack>(
     active_stream: &mut Option<(SessionId, ScreenId)>,
     preference: VideoDisplayPreference,
     probe_interval: Duration,
-    get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+    get_proc_address: Option<&dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
 ) -> eros::Result<Option<(SessionId, ScreenId)>>
 where
     Stack: VideoViewStack,
@@ -474,13 +473,15 @@ where
 fn create_video_display<Stack>(
     preference: VideoDisplayPreference,
     window: &slint::Window,
-    get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+    get_proc_address: Option<&dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
     probe_interval: Duration,
 ) -> eros::Result<ActiveVideoDisplay<Stack>>
 where
     Stack: VideoViewStack,
 {
     if preference == VideoDisplayPreference::Slint {
+        let get_proc_address = get_proc_address
+            .with_context(|| "Slint video display requires a native OpenGL renderer")?;
         let selection = select_video_display_backend(preference, None)?;
         let display = ActiveVideoDisplay::Slint(Box::new(Stack::create_opengl_renderer(
             get_proc_address,
@@ -499,6 +500,11 @@ where
         Err(error) => {
             let reason = format!("{error:?}");
             let selection = select_video_display_backend(preference, Some(reason.clone()))?;
+            let get_proc_address = get_proc_address.with_context(|| {
+                format!(
+                    "Native video display failed ({reason}); Slint fallback requires native OpenGL"
+                )
+            })?;
             let display = ActiveVideoDisplay::Slint(Box::new(Stack::create_opengl_renderer(
                 get_proc_address,
                 probe_interval,
@@ -516,7 +522,7 @@ where
 fn present_video_frame<Stack>(
     display: &mut Option<ActiveVideoDisplay<Stack>>,
     preference: VideoDisplayPreference,
-    get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+    get_proc_address: Option<&dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
     probe_interval: Duration,
     frame: Stack::Frame,
 ) -> eros::Result<()>
@@ -549,6 +555,9 @@ where
             .teardown()
             .with_context(|| "Failed to tear down rejected native video display")?;
     }
+    let get_proc_address = get_proc_address.with_context(
+        || "Native video frame was rejected; Slint fallback requires native OpenGL",
+    )?;
     let mut fallback = Stack::create_opengl_renderer(get_proc_address, probe_interval)
         .with_context(|| "Failed to create Slint video display fallback")?;
     fallback.present(frame);

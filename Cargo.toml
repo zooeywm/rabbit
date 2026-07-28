@@ -49,6 +49,7 @@ wayland-protocols = { version = "0.32", features = ["client"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
+slint = { version = "1.17.1", default-features = false, features = ["renderer-femtovg-wgpu", "unstable-wgpu-29"] }
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Foundation_Collections",

@@ -88,11 +88,24 @@ where
         video_display: VideoDisplayPreference,
         probe_interval: Duration,
     ) -> eros::Result<(Self, ViewPublisher<VideoView>, flume::Receiver<GuiIntent>)> {
-        slint::BackendSelector::new()
-            .require_opengl_es_with_version(3, 0)
-            .with_winit_window_attributes_hook(|attributes| attributes.with_transparent(true))
+        let backend =
+            slint::BackendSelector::new().with_winit_window_attributes_hook(|attributes| {
+                // Wayland needs per-pixel alpha for the native subsurface below
+                // Slint. Windows uses a real HWND region hole instead, so making
+                // the whole window transparent would also affect its outer frame.
+                attributes.with_transparent(!cfg!(target_os = "windows"))
+            });
+        #[cfg(target_os = "windows")]
+        let backend = {
+            let mut settings = slint::wgpu_29::WGPUSettings::default();
+            settings.backends = slint::wgpu_29::wgpu::Backends::DX12;
+            backend.require_wgpu_29(slint::wgpu_29::WGPUConfiguration::Automatic(settings))
+        };
+        #[cfg(not(target_os = "windows"))]
+        let backend = backend.require_opengl_es_with_version(3, 0);
+        backend
             .select()
-            .context("Failed to select the Slint OpenGL ES 3 renderer")?;
+            .context("Failed to select the Slint renderer")?;
         let window = RabbitWindow::new().context("Failed to create the Slint Rabbit window")?;
         slint::set_xdg_app_id(APP_ID).context("Failed to set the Rabbit XDG application ID")?;
         let (sender, intents) = flume::unbounded();

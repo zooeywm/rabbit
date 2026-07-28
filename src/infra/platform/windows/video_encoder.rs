@@ -3,7 +3,7 @@ use std::{future::Future, rc::Rc, time::Duration};
 use bytes::Bytes;
 use eros::Context as _;
 use futures_util::{FutureExt as _, StreamExt as _};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use windows::{
     Win32::{
         Graphics::{
@@ -29,13 +29,13 @@ use windows::{
             CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer,
             IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
             METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-            MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_LOW_LATENCY,
-            MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES,
-            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-            MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE,
-            MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES,
-            MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
-            MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
+            MF_E_NO_EVENTS_AVAILABLE, MF_E_NO_MORE_TYPES, MF_E_TRANSFORM_NEED_MORE_INPUT,
+            MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
+            MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+            MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
+            MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
+            MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK,
+            MF_VERSION, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
             MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFNominalRange_16_235,
             MFSTARTUP_FULL, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
             MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
@@ -152,10 +152,12 @@ struct MfH264Encoder {
     video_context: ID3D11VideoContext,
     d3d: ID3D11Device,
     output_stream_info_flags: u32,
+    output_stream_buffer_size: u32,
     input_stream_id: u32,
     output_stream_id: u32,
     converter: Option<BgraToNv12Converter>,
     frame_size: PixelSize,
+    frame_rate: FrameRate,
     frame_duration_hns: i64,
     next_sample_time_hns: i64,
     sequence: u16,
@@ -217,10 +219,12 @@ impl MfH264Encoder {
             video_context,
             d3d,
             output_stream_info_flags: output_stream_info.dwFlags,
+            output_stream_buffer_size: output_stream_info.cbSize,
             input_stream_id: 0,
             output_stream_id: 0,
             converter: None,
             frame_size,
+            frame_rate,
             frame_duration_hns: frame_duration_hns(frame_rate),
             next_sample_time_hns: 0,
             sequence: 0,
@@ -447,38 +451,147 @@ impl MfH264Encoder {
     }
 
     fn process_output(&mut self) -> eros::Result<Option<IMFSample>> {
-        let mut owned_sample = None;
-        if self.output_stream_info_flags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
-            let sample = unsafe { MFCreateSample() }
-                .with_context(|| "Failed to create an encoder output sample")?;
-            let buffer = unsafe { MFCreateMemoryBuffer(MAX_ENCODER_OUTPUT_SAMPLE_SIZE) }
-                .with_context(|| "Failed to create an encoder output buffer")?;
-            unsafe { sample.AddBuffer(&buffer) }
-                .with_context(|| "Failed to attach an output buffer to the encoder sample")?;
-            owned_sample = Some(sample);
-        }
+        for stream_change_count in 0..MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT {
+            let mut owned_sample = None;
+            if self.output_stream_info_flags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
+                let sample = unsafe { MFCreateSample() }
+                    .with_context(|| "Failed to create an encoder output sample")?;
+                let buffer_size = self
+                    .output_stream_buffer_size
+                    .max(MAX_ENCODER_OUTPUT_SAMPLE_SIZE);
+                let buffer = unsafe { MFCreateMemoryBuffer(buffer_size) }
+                    .with_context(|| "Failed to create an encoder output buffer")?;
+                unsafe { sample.AddBuffer(&buffer) }
+                    .with_context(|| "Failed to attach an output buffer to the encoder sample")?;
+                owned_sample = Some(sample);
+            }
 
-        let mut output = MFT_OUTPUT_DATA_BUFFER {
-            dwStreamID: self.output_stream_id,
-            pSample: std::mem::ManuallyDrop::new(owned_sample),
-            dwStatus: 0,
-            pEvents: std::mem::ManuallyDrop::new(None),
-        };
-        let mut status = 0;
-        let result = unsafe {
-            self.transform
-                .ProcessOutput(0, std::slice::from_mut(&mut output), &mut status)
-        };
-        let sample = unsafe { std::mem::ManuallyDrop::take(&mut output.pSample) };
-        let _events = unsafe { std::mem::ManuallyDrop::take(&mut output.pEvents) };
-        match result {
-            Ok(()) => Ok(sample),
-            Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(None),
-            Err(error) => {
-                Err(error).with_context(|| "Failed to receive H.264 encoder output")?;
-                unreachable!()
+            let mut output = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: self.output_stream_id,
+                pSample: std::mem::ManuallyDrop::new(owned_sample),
+                dwStatus: 0,
+                pEvents: std::mem::ManuallyDrop::new(None),
+            };
+            let mut status = 0;
+            let result = unsafe {
+                self.transform
+                    .ProcessOutput(0, std::slice::from_mut(&mut output), &mut status)
+            };
+            let sample = unsafe { std::mem::ManuallyDrop::take(&mut output.pSample) };
+            let _events = unsafe { std::mem::ManuallyDrop::take(&mut output.pEvents) };
+            match result {
+                Ok(()) => return Ok(sample),
+                Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    warn!(
+                        event = "windows_h264_encoder_stream_change",
+                        output_status = output.dwStatus,
+                        process_status = status,
+                        attempt = stream_change_count + 1,
+                        "Windows H.264 encoder requested output type renegotiation"
+                    );
+                    self.renegotiate_output_type()?;
+                    if self.transform_event_generator.is_some() {
+                        // An asynchronous MFT permits exactly one ProcessOutput
+                        // call per METransformHaveOutput event. The stream-change
+                        // result consumed this event, so wait for the next event
+                        // instead of retrying immediately (which returns
+                        // E_UNEXPECTED on Intel hardware encoders).
+                        return Ok(None);
+                    }
+                }
+                Err(error) => {
+                    Err(error).with_context(|| "Failed to receive H.264 encoder output")?;
+                    unreachable!()
+                }
             }
         }
+
+        eros::bail!(
+            "Windows H.264 encoder repeatedly requested output type renegotiation without producing output"
+        )
+    }
+
+    fn renegotiate_output_type(&mut self) -> eros::Result<()> {
+        let mut h264_type_count = 0u32;
+        for index in 0..64 {
+            let media_type = match unsafe {
+                self.transform
+                    .GetOutputAvailableType(self.output_stream_id, index)
+            } {
+                Ok(media_type) => media_type,
+                Err(error) if error.code() == MF_E_NO_MORE_TYPES => break,
+                Err(error) => {
+                    Err(error).with_context(
+                        || "Failed to enumerate H.264 encoder output types after stream change",
+                    )?;
+                    unreachable!()
+                }
+            };
+            if unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }.ok() != Some(MFVideoFormat_H264) {
+                continue;
+            }
+            h264_type_count += 1;
+            match unsafe {
+                self.transform
+                    .SetOutputType(self.output_stream_id, &media_type, 0)
+            } {
+                Ok(()) => {
+                    self.refresh_output_stream_info()?;
+                    info!(
+                        event = "windows_h264_encoder_output_type_renegotiated",
+                        available_type_index = index,
+                        output_buffer_size = self.output_stream_buffer_size,
+                        output_provides_samples = self.output_stream_info_flags
+                            & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
+                            != 0,
+                        "Renegotiated Windows H.264 encoder output type"
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    debug!(
+                        event = "windows_h264_encoder_output_type_rejected",
+                        available_type_index = index,
+                        error = ?error,
+                        "Windows H.264 encoder rejected an advertised output type"
+                    );
+                }
+            }
+        }
+
+        // Some hardware encoders do not expose a complete available-type list
+        // after invalidating their output type. Reapplying the requested type is
+        // a useful compatibility fallback and still performs SetOutputType as
+        // required to resume ProcessOutput.
+        let requested_type = create_h264_output_type(self.frame_size, self.frame_rate)?;
+        unsafe {
+            self.transform
+                .SetOutputType(self.output_stream_id, &requested_type, 0)
+        }
+        .with_context(|| {
+            format!(
+                "Failed to renegotiate H.264 encoder output type ({h264_type_count} H.264 types advertised)"
+            )
+        })?;
+        self.refresh_output_stream_info()?;
+        info!(
+            event = "windows_h264_encoder_output_type_renegotiated",
+            available_type_index = -1,
+            output_buffer_size = self.output_stream_buffer_size,
+            output_provides_samples =
+                self.output_stream_info_flags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0,
+            "Renegotiated Windows H.264 encoder with the requested output type"
+        );
+        Ok(())
+    }
+
+    fn refresh_output_stream_info(&mut self) -> eros::Result<()> {
+        let info = unsafe { self.transform.GetOutputStreamInfo(self.output_stream_id) }
+            .with_context(|| "Failed to refresh H.264 encoder output stream info")?;
+        self.output_stream_info_flags = info.dwFlags;
+        self.output_stream_buffer_size = info.cbSize;
+        Ok(())
     }
 
     fn force_key_frame(&self) -> eros::Result<()> {
@@ -1087,3 +1200,4 @@ const RTP_FIXED_HEADER_SIZE: usize = 12;
 const H264_RTP_PAYLOAD_TYPE: u8 = 96;
 const RTP_SSRC: u32 = 0x5242_4954;
 const MAX_ENCODER_OUTPUT_SAMPLE_SIZE: u32 = 4 * 1024 * 1024;
+const MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT: usize = 8;
