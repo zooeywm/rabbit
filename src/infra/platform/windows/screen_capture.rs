@@ -1,4 +1,11 @@
-use std::{cell::RefCell, time::Duration};
+use std::{
+    cell::RefCell,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use eros::Context as _;
 use tracing::{debug, trace};
@@ -35,7 +42,10 @@ use crate::kernel::{
     screen_manager::{ScreenId, ScreenLayoutManager},
 };
 
-use super::screen_layout::{WindowsMonitorHandle, screen_monitor};
+use super::{
+    host_video_probe::HostVideoFrameProbe,
+    screen_layout::{WindowsMonitorHandle, screen_monitor},
+};
 
 #[derive(Debug, kudi::DepInj)]
 #[target(WgcScreenCaptureManager)]
@@ -115,6 +125,7 @@ pub(crate) struct WgcCapturedFrame {
     pub(crate) texture: ID3D11Texture2D,
     pub(crate) content_size: crate::kernel::geometry::PixelSize,
     pub(crate) frame_rate: crate::kernel::geometry::FrameRate,
+    pub(crate) probe: Option<HostVideoFrameProbe>,
 }
 
 pub(crate) struct WgcCaptureLease {
@@ -151,7 +162,8 @@ where
             .with_context(|| format!("Windows screen {} is not available", screen_id.get()))?;
         let monitor = screen_monitor(*screen_id)?;
         let state = <Deps as AsRef<WgcScreenCaptureManagerState>>::as_ref(self.prj_ref());
-        let _ = (state.probing_enabled(), state.probe_interval());
+        let probe_interval = state.probe_interval();
+        let probe_frame_id = state.probing_enabled().then(|| Arc::new(AtomicU64::new(0)));
         let d3d = state.d3d()?;
         let item = create_capture_item_for_monitor(monitor)
             .with_context(|| format!("Failed to create WGC item for screen {}", screen_id.get()))?;
@@ -184,11 +196,18 @@ where
         let id = *screen_id;
         let token = frame_pool
             .FrameArrived(&TypedEventHandler::new({
+                let probe_frame_id = probe_frame_id.clone();
                 move |pool: Ref<Direct3D11CaptureFramePool>, _| {
                     if let Some(pool) = pool.as_ref() {
+                        let probe = probe_frame_id.as_ref().map(|next_frame_id| {
+                            HostVideoFrameProbe::new(
+                                next_frame_id.fetch_add(1, Ordering::Relaxed),
+                                probe_interval,
+                            )
+                        });
                         match pool
                             .TryGetNextFrame()
-                            .and_then(|frame| capture_frame_texture(id, frame_rate, frame))
+                            .and_then(|frame| capture_frame_texture(id, frame_rate, frame, probe))
                         {
                             Ok(frame) => replace_latest(&sender, &stale, Ok(frame)),
                             Err(error) => replace_latest(&sender, &stale, Err(error.into())),
@@ -235,6 +254,7 @@ fn capture_frame_texture(
     screen_id: ScreenId,
     frame_rate: crate::kernel::geometry::FrameRate,
     frame: Direct3D11CaptureFrame,
+    probe: Option<HostVideoFrameProbe>,
 ) -> windows::core::Result<WgcCapturedFrame> {
     let content = frame.ContentSize()?;
     let surface = frame.Surface()?;
@@ -256,6 +276,7 @@ fn capture_frame_texture(
             height: content.Height.max(0) as u32,
         },
         frame_rate,
+        probe,
     })
 }
 

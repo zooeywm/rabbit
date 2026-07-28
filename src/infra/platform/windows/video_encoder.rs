@@ -1,4 +1,4 @@
-use std::{future::Future, rc::Rc, time::Duration};
+use std::{collections::VecDeque, future::Future, rc::Rc, time::Duration};
 
 use bytes::Bytes;
 use eros::Context as _;
@@ -56,7 +56,10 @@ use windows::{
 };
 
 use crate::{
-    infra::platform::frame_pipeline::WgcFramePipelineFrame,
+    infra::platform::{
+        frame_pipeline::WgcFramePipelineFrame,
+        host_video_probe::{HostVideoFrameProbe, HostVideoProbeReporter},
+    },
     kernel::{
         geometry::{FrameRate, PixelSize},
         video_encoder::{VideoEncoder, VideoEncoderCommand},
@@ -167,6 +170,13 @@ struct MfH264Encoder {
     force_key_frame: bool,
     logged_output_format: bool,
     async_accepts_input: bool,
+    pending_probes: VecDeque<Option<HostVideoFrameProbe>>,
+    probe_reporter: Option<HostVideoProbeReporter>,
+}
+
+struct EncodedOutput {
+    sample: IMFSample,
+    probe: Option<HostVideoFrameProbe>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +220,10 @@ impl MfH264Encoder {
             .with_context(|| "Failed to query H.264 encoder output stream info")?;
         let transform_event_generator = transform.cast::<IMFMediaEventGenerator>().ok();
         let async_accepts_input = transform_event_generator.is_none();
+        let probe_reporter = first_frame
+            .probe
+            .as_ref()
+            .map(|probe| HostVideoProbeReporter::new(probe.report_interval()));
 
         Ok(Self {
             transform,
@@ -234,6 +248,8 @@ impl MfH264Encoder {
             force_key_frame: false,
             logged_output_format: false,
             async_accepts_input,
+            pending_probes: VecDeque::new(),
+            probe_reporter,
         })
     }
 
@@ -260,13 +276,27 @@ impl MfH264Encoder {
             );
         }
 
+        let mut probe = frame
+            .probe
+            .clone()
+            .filter(|_| self.probe_reporter.is_some());
+        if let Some(probe) = &mut probe {
+            probe.mark_encoder_received();
+        }
+
         if self.transform_event_generator.is_some() {
             while !self.async_accepts_input {
                 self.handle_async_encoder_event().await?;
             }
         }
 
+        if let Some(probe) = &mut probe {
+            probe.mark_vpp_started();
+        }
         let sample = self.create_input_sample(frame)?;
+        if let Some(probe) = &mut probe {
+            probe.mark_vpp_completed();
+        }
         unsafe {
             sample.SetSampleTime(self.next_sample_time_hns)?;
             sample.SetSampleDuration(self.frame_duration_hns)?;
@@ -287,6 +317,12 @@ impl MfH264Encoder {
                 .ProcessInput(self.input_stream_id, &sample, 0)
         }
         .with_context(|| "Failed to submit a D3D11 sample to the H.264 encoder")?;
+        if let Some(probe) = &mut probe {
+            probe.mark_encoder_submitted();
+        }
+        if self.probe_reporter.is_some() {
+            self.pending_probes.push_back(probe);
+        }
         let mut produced_output = false;
         if self.transform_event_generator.is_some() {
             self.async_accepts_input = false;
@@ -350,10 +386,10 @@ impl MfH264Encoder {
         SendFuture: Future<Output = eros::Result<()>>,
     {
         loop {
-            let Some(sample) = self.process_output()? else {
+            let Some(mut output) = self.process_output()? else {
                 return Ok(());
             };
-            let access_units = sample_to_bytes(sample)?;
+            let access_units = sample_to_bytes(output.sample)?;
             if !self.logged_output_format {
                 let first_bytes = &access_units[..access_units.len().min(16)];
                 debug!(
@@ -365,6 +401,8 @@ impl MfH264Encoder {
                 );
                 self.logged_output_format = true;
             }
+            let mut rtp_packets = 0u64;
+            let mut rtp_bytes = 0u64;
             for access_unit in split_annex_b_access_units(&access_units) {
                 let nals = split_h264_nals(access_unit);
                 for (index, nal) in nals.iter().enumerate() {
@@ -377,10 +415,16 @@ impl MfH264Encoder {
                         marker,
                     )?;
                     for packet in packets {
+                        rtp_packets = rtp_packets.saturating_add(1);
+                        rtp_bytes = rtp_bytes
+                            .saturating_add(u64::try_from(packet.len()).unwrap_or(u64::MAX));
                         send_packet(WindowsVideoPacket(packet)).await?;
                     }
                 }
                 self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
+            }
+            if let (Some(reporter), Some(probe)) = (&mut self.probe_reporter, output.probe.take()) {
+                reporter.record_frame(probe, rtp_packets, rtp_bytes);
             }
             if self.transform_event_generator.is_some() {
                 return Ok(());
@@ -450,7 +494,7 @@ impl MfH264Encoder {
         Ok(AsyncEncoderEvent::NeedInput)
     }
 
-    fn process_output(&mut self) -> eros::Result<Option<IMFSample>> {
+    fn process_output(&mut self) -> eros::Result<Option<EncodedOutput>> {
         for stream_change_count in 0..MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT {
             let mut owned_sample = None;
             if self.output_stream_info_flags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
@@ -480,7 +524,16 @@ impl MfH264Encoder {
             let sample = unsafe { std::mem::ManuallyDrop::take(&mut output.pSample) };
             let _events = unsafe { std::mem::ManuallyDrop::take(&mut output.pEvents) };
             match result {
-                Ok(()) => return Ok(sample),
+                Ok(()) => {
+                    let Some(sample) = sample else {
+                        return Ok(None);
+                    };
+                    let mut probe = self.pending_probes.pop_front().flatten();
+                    if let Some(probe) = &mut probe {
+                        probe.mark_encoder_completed();
+                    }
+                    return Ok(Some(EncodedOutput { sample, probe }));
+                }
                 Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
                 Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
                     warn!(
@@ -648,6 +701,9 @@ impl MfH264Encoder {
 
 impl Drop for MfH264Encoder {
     fn drop(&mut self) {
+        if let Some(reporter) = &mut self.probe_reporter {
+            reporter.finish();
+        }
         let _ = unsafe {
             self.transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0)

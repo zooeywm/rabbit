@@ -33,6 +33,7 @@ pub(crate) struct WgcFramePipelineFrame {
     pub(crate) size: PixelSize,
     pub(crate) source_frame_rate: FrameRate,
     pub(crate) frame_rate: FrameRate,
+    pub(crate) probe: Option<super::host_video_probe::HostVideoFrameProbe>,
 }
 
 pub(crate) struct WgcFramePipelineSubscription {
@@ -68,6 +69,10 @@ impl futures_core::Stream for WgcFramePipelineSubscription {
                     {
                         continue;
                     }
+                    let mut probe = frame.probe;
+                    if let Some(probe) = &mut probe {
+                        probe.mark_pipeline_ready();
+                    }
                     let emitted = WgcFramePipelineFrame {
                         screen_id: frame.screen_id,
                         texture: frame.texture,
@@ -78,6 +83,7 @@ impl futures_core::Stream for WgcFramePipelineSubscription {
                         },
                         source_frame_rate: frame.frame_rate,
                         frame_rate: this.frame_rate,
+                        probe,
                     };
                     return Poll::Ready(Some(Ok(Rc::new(emitted))));
                 }

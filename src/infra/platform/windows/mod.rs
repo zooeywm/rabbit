@@ -1,5 +1,6 @@
 mod client_video_probe;
 mod frame_pipeline;
+mod host_video_probe;
 mod screen_capture;
 mod screen_layout;
 mod video_decoder;
