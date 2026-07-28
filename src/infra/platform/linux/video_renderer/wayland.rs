@@ -1,6 +1,8 @@
 use std::{
     collections::{HashSet, VecDeque},
-    os::fd::AsFd as _,
+    fs::File,
+    io::Write as _,
+    os::fd::{AsFd as _, FromRawFd as _},
     time::Duration,
 };
 
@@ -18,8 +20,8 @@ use wayland_client::{
     delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer, wl_compositor, wl_region, wl_registry, wl_subcompositor, wl_subsurface,
-        wl_surface,
+        wl_buffer, wl_compositor, wl_region, wl_registry, wl_shm, wl_shm_pool, wl_subcompositor,
+        wl_subsurface, wl_surface,
     },
 };
 use wayland_protocols::wp::{
@@ -77,6 +79,9 @@ struct WaylandEventState {
     released_buffers: Vec<ObjectId>,
 }
 
+#[derive(Debug)]
+struct BackgroundBufferData;
+
 impl DmabufHandler for WaylandEventState {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
         &mut self.dmabuf
@@ -127,8 +132,22 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandEventState
     }
 }
 
+impl Dispatch<wl_buffer::WlBuffer, BackgroundBufferData> for WaylandEventState {
+    fn event(
+        _: &mut Self,
+        _: &wl_buffer::WlBuffer,
+        _: wl_buffer::Event,
+        _: &BackgroundBufferData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 delegate_noop!(WaylandEventState: ignore wl_compositor::WlCompositor);
 delegate_noop!(WaylandEventState: ignore wl_region::WlRegion);
+delegate_noop!(WaylandEventState: ignore wl_shm::WlShm);
+delegate_noop!(WaylandEventState: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(WaylandEventState: ignore wl_subcompositor::WlSubcompositor);
 delegate_noop!(WaylandEventState: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(WaylandEventState: ignore wl_surface::WlSurface);
@@ -145,7 +164,12 @@ pub(crate) struct WaylandVideoRenderer {
     surface: wl_surface::WlSurface,
     subsurface: wl_subsurface::WlSubsurface,
     viewport: wp_viewport::WpViewport,
+    background_surface: wl_surface::WlSurface,
+    background_subsurface: wl_subsurface::WlSubsurface,
+    background_viewport: wp_viewport::WpViewport,
+    background_buffer: wl_buffer::WlBuffer,
     layout: Option<WaylandVideoViewport>,
+    applied_background_layout: Option<WaylandVideoViewport>,
     applied_viewport: Option<WaylandVideoViewport>,
     current_frame_size: Option<PixelSize>,
     pending_frame: Option<GStreamerDecodedFrame>,
@@ -189,6 +213,9 @@ impl WaylandVideoRenderer {
         let subcompositor = globals
             .bind::<wl_subcompositor::WlSubcompositor, _, _>(&queue_handle, 1..=1, ())
             .with_context(|| "Wayland subcompositor global is unavailable")?;
+        let shm = globals
+            .bind::<wl_shm::WlShm, _, _>(&queue_handle, 1..=1, ())
+            .with_context(|| "Wayland shared-memory global is unavailable")?;
         let viewporter = globals
             .bind::<wp_viewporter::WpViewporter, _, _>(&queue_handle, 1..=1, ())
             .with_context(|| "Wayland viewporter protocol is unavailable")?;
@@ -210,6 +237,17 @@ impl WaylandVideoRenderer {
         let input_region = compositor.create_region(&queue_handle, ());
         surface.set_input_region(Some(&input_region));
         input_region.destroy();
+
+        let background_surface = compositor.create_surface(&queue_handle, ());
+        let background_subsurface =
+            subcompositor.get_subsurface(&background_surface, &parent, &queue_handle, ());
+        background_subsurface.place_below(&surface);
+        background_subsurface.set_desync();
+        let background_viewport = viewporter.get_viewport(&background_surface, &queue_handle, ());
+        let background_input_region = compositor.create_region(&queue_handle, ());
+        background_surface.set_input_region(Some(&background_input_region));
+        background_input_region.destroy();
+        let background_buffer = create_black_buffer(&shm, &queue_handle)?;
 
         if dmabuf_version >= 4 {
             let feedback = state
@@ -245,7 +283,12 @@ impl WaylandVideoRenderer {
             surface,
             subsurface,
             viewport,
+            background_surface,
+            background_subsurface,
+            background_viewport,
+            background_buffer,
             layout: None,
+            applied_background_layout: None,
             applied_viewport: None,
             current_frame_size: None,
             pending_frame: None,
@@ -301,6 +344,7 @@ impl WaylandVideoRenderer {
             self.hide_surface()?;
             return Ok(());
         }
+        self.apply_background_layout(layout);
         let frame_size = self
             .pending_frame
             .as_ref()
@@ -388,7 +432,11 @@ impl WaylandVideoRenderer {
     pub(crate) fn clear(&mut self) -> eros::Result<()> {
         self.pending_frame = None;
         self.current_frame_size = None;
+        self.applied_background_layout = None;
         self.applied_viewport = None;
+        self.background_surface.set_opaque_region(None);
+        self.background_surface.attach(None, 0, 0);
+        self.background_surface.commit();
         self.surface.set_opaque_region(None);
         self.surface.attach(None, 0, 0);
         self.surface.commit();
@@ -415,10 +463,33 @@ impl WaylandVideoRenderer {
         true
     }
 
+    fn apply_background_layout(&mut self, layout: WaylandVideoViewport) {
+        if self.applied_background_layout == Some(layout) {
+            return;
+        }
+        self.background_subsurface.set_position(layout.x, layout.y);
+        self.background_viewport
+            .set_destination(layout.width, layout.height);
+        let region = self.compositor.create_region(&self.queue_handle, ());
+        region.add(0, 0, layout.width, layout.height);
+        self.background_surface.set_opaque_region(Some(&region));
+        region.destroy();
+        self.background_surface
+            .attach(Some(&self.background_buffer), 0, 0);
+        self.background_surface.damage(0, 0, i32::MAX, i32::MAX);
+        self.background_surface.commit();
+        self.applied_background_layout = Some(layout);
+    }
+
     fn hide_surface(&mut self) -> eros::Result<()> {
-        if self.applied_viewport.take().is_none() {
+        let video_visible = self.applied_viewport.take().is_some();
+        let background_visible = self.applied_background_layout.take().is_some();
+        if !video_visible && !background_visible {
             return Ok(());
         }
+        self.background_surface.set_opaque_region(None);
+        self.background_surface.attach(None, 0, 0);
+        self.background_surface.commit();
         self.surface.set_opaque_region(None);
         self.surface.attach(None, 0, 0);
         self.surface.commit();
@@ -430,6 +501,10 @@ impl WaylandVideoRenderer {
 
     pub(crate) fn teardown(&mut self) -> eros::Result<()> {
         self.clear()?;
+        self.background_viewport.destroy();
+        self.background_subsurface.destroy();
+        self.background_surface.destroy();
+        self.background_buffer.destroy();
         self.viewport.destroy();
         self.subsurface.destroy();
         self.surface.destroy();
@@ -461,6 +536,37 @@ impl WaylandVideoRenderer {
         });
         Ok(())
     }
+}
+
+fn create_black_buffer(
+    shm: &wl_shm::WlShm,
+    queue_handle: &QueueHandle<WaylandEventState>,
+) -> eros::Result<wl_buffer::WlBuffer> {
+    let fd = unsafe { libc::memfd_create(c"rabbit-video-background".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        eros::bail!(
+            "Failed to create Wayland video background memory: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.set_len(4)
+        .with_context(|| "Failed to size Wayland video background memory")?;
+    file.write_all(&[0; 4])
+        .with_context(|| "Failed to initialize Wayland video background pixel")?;
+
+    let pool = shm.create_pool(file.as_fd(), 4, queue_handle, ());
+    let buffer = pool.create_buffer(
+        0,
+        1,
+        1,
+        4,
+        wl_shm::Format::Xrgb8888,
+        queue_handle,
+        BackgroundBufferData,
+    );
+    pool.destroy();
+    Ok(buffer)
 }
 
 fn fit_wayland_viewport(
