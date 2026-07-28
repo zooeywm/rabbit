@@ -16,12 +16,9 @@ use crate::{
         model::{ApplicationModel, RunningSession, SessionKey},
         platform::{ApplicationStack, RunnableApp},
         runtime::{
-            host_control::{HostControlDecision, classify_host_session_message},
+            host_control::{HostControlEffect, apply_host_session_message},
             host_stream_launch::launch_host_stream,
-            host_stream_lifecycle::{
-                ScreenStreamFinishEffect, apply_host_stop_screen_stream,
-                apply_screen_stream_finished,
-            },
+            host_stream_lifecycle::{ScreenStreamFinishEffect, apply_screen_stream_finished},
             session_lifecycle::{ReconnectEligibility, SessionTimeoutPolicy, evaluate_reconnect},
         },
         services::host_stream::HostStreamPlan,
@@ -34,7 +31,6 @@ use crate::{
     kernel::{
         connection_request::PeerCapabilities,
         frame_pipeline::FramePipelineManager,
-        input::RemoteInputInjector as _,
         protocol::{PROTOCOL_NAME, protocol_version_string},
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole},
@@ -169,8 +165,7 @@ where
                     id,
                     message,
                     &sender,
-                )
-                .await?;
+                )?;
             }
             HeadlessMessage::SessionClosed(id) => {
                 info!(session_id = id.0, "Headless session closed");
@@ -361,7 +356,7 @@ fn apply_headless_timeouts<Stack>(
     }
 }
 
-async fn handle_session_message<Stack>(
+fn handle_session_message<Stack>(
     model: &mut ApplicationModel<Stack>,
     remote_input_injector: &mut Stack::RemoteInputInjector,
     id: SessionId,
@@ -373,101 +368,23 @@ where
     <Stack::App as FramePipelineManager>::Subscription: Unpin,
     <Stack::ScreenStreamEncoder as VideoEncoder>::Packet: Into<bytes::Bytes>,
 {
-    let Some(session) = model
-        .sessions
-        .iter()
-        .find(|session| session.send.id() == id)
-    else {
-        warn!(session_id = id.0, "No session for host control message");
-        return Ok(());
-    };
-    let decision = classify_host_session_message(
-        message,
-        &model.local_capabilities,
-        &session.peer_capabilities,
-        session.admits_new_streams(),
-        |screen_id| model.app.screen(screen_id).cloned(),
-    );
-    match decision {
-        HostControlDecision::SetScreenStreams(Ok(evaluation)) => {
-            let session_send = Rc::clone(&session.send);
+    let effect = apply_host_session_message(model, remote_input_injector, id, message);
+    match effect {
+        HostControlEffect::ConfigureStreams(configuration) => {
             let finished = sender.clone();
             compio::runtime::spawn(async move {
-                let result = session_send
-                    .send_screen_streams_configured(evaluation.configured)
-                    .await;
+                let completion = configuration.send().await;
                 finished.push(HeadlessMessage::ConfigurationFinished {
-                    session_id: id,
-                    plans: evaluation.plans,
-                    result,
+                    session_id: completion.session_id,
+                    plans: completion.plans,
+                    result: completion.result,
                 });
             })
             .detach();
         }
-        HostControlDecision::SetScreenStreams(Err(error)) => {
-            warn!(
-                session_id = id.0,
-                error = %error,
-                "Headless host rejected stream request by policy"
-            );
-        }
-        HostControlDecision::RequestKeyFrame(screen_id) => {
-            if let Some(session) = model
-                .sessions
-                .iter_mut()
-                .find(|session| session.send.id() == id)
-                && let Some(stream) = session.screen_streams.get(&screen_id)
-            {
-                stream.request_key_frame();
-            }
-        }
-        HostControlDecision::StopScreenStream(screen_id) => {
-            if let Some(session) = model
-                .sessions
-                .iter_mut()
-                .find(|session| session.send.id() == id)
-            {
-                apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
-            }
-        }
-        HostControlDecision::RemoteInput(input) => {
-            let screen_id = input.screen_id();
-            let has_active_stream = model
-                .sessions
-                .iter()
-                .find(|session| session.send.id() == id)
-                .is_some_and(|session| session.screen_streams.contains_key(&screen_id));
-            if !has_active_stream {
-                warn!(
-                    event = "remote_input_stream_missing",
-                    session_id = id.0,
-                    screen_id = screen_id.get(),
-                    "Ignored remote input without an active screen stream"
-                );
-                return Ok(());
-            }
-            let Some(screen) = model.app.screen(&screen_id).cloned() else {
-                warn!(
-                    event = "remote_input_screen_missing",
-                    session_id = id.0,
-                    screen_id = screen_id.get(),
-                    "Ignored remote input for an unavailable screen"
-                );
-                return Ok(());
-            };
-            if let Err(error) = remote_input_injector.inject(input, &screen, model.app.screens()) {
-                warn!(
-                    event = "remote_input_injection_failed",
-                    session_id = id.0,
-                    screen_id = screen_id.get(),
-                    error = ?error,
-                    "Failed to inject remote input"
-                );
-            }
-        }
-        HostControlDecision::Ignore => {
-            warn!(session_id = id.0, "Headless host ignored session message");
-        }
+        HostControlEffect::StreamRequestRejected(_)
+        | HostControlEffect::StreamStopped(_)
+        | HostControlEffect::NoShellAction => {}
     }
     Ok(())
 }

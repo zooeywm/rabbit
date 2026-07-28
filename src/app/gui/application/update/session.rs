@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, warn};
 
 use crate::app::{
     gui::application::{
@@ -8,16 +8,10 @@ use crate::app::{
         message::{MessageSender, RootMessage},
     },
     platform::ApplicationStack,
-    runtime::{
-        host_control::{HostControlDecision, classify_host_session_message},
-        host_policy::HostStreamEvaluation,
-        host_stream_lifecycle::apply_host_stop_screen_stream,
-    },
+    runtime::host_control::{HostControlEffect, apply_host_session_message},
 };
 use crate::kernel::{
-    input::RemoteInputInjector as _,
     screen_configuration::ScreenResolutionStatus,
-    screen_manager::ScreenLayoutManager,
     session::{SessionMessage, SessionRole},
     session_control::ControlMessage,
 };
@@ -181,159 +175,53 @@ where
         }
     }
 
-    /// Host-role control path — shared classifier with headless.
+    /// Adapts shared Host control effects to the GUI message queue.
     fn handle_host_control_message(
         &mut self,
         id: crate::kernel::session::SessionId,
         message: SessionMessage,
         sender: &MessageSender,
     ) -> eros::Result<bool> {
-        let Some(session) = self
-            .model
-            .sessions
-            .iter()
-            .find(|session| session.send.id() == id)
-        else {
-            return Ok(false);
-        };
-        let decision = classify_host_session_message(
+        let effect = apply_host_session_message(
+            &mut self.model,
+            &mut self.remote_input_injector,
+            id,
             message,
-            &self.model.local_capabilities,
-            &session.peer_capabilities,
-            session.admits_new_streams(),
-            |screen_id| self.model.app.screen(screen_id).cloned(),
         );
 
-        match decision {
-            HostControlDecision::SetScreenStreams(Ok(evaluation)) => {
-                let HostStreamEvaluation { configured, plans } = evaluation;
-                let session_send = Rc::clone(&session.send);
-                self.host_stream
-                    .pending_starts
-                    .extend(plans.iter().map(|plan| (id, plan.screen_id)));
+        match effect {
+            HostControlEffect::ConfigureStreams(configuration) => {
+                self.host_stream.pending_starts.extend(
+                    configuration
+                        .plans()
+                        .iter()
+                        .map(|plan| (id, plan.screen_id)),
+                );
                 let configuration_sender = sender.clone();
 
                 compio::runtime::spawn(async move {
-                    let result = session_send
-                        .send_screen_streams_configured(configured)
-                        .await;
+                    let completion = configuration.send().await;
                     configuration_sender.post(RootMessage::ScreenStreamConfigurationFinished {
-                        session_id: id,
-                        streams: plans,
-                        result,
+                        session_id: completion.session_id,
+                        streams: completion.plans,
+                        result: completion.result,
                     });
                 })
                 .detach();
                 Ok(true)
             }
-            HostControlDecision::SetScreenStreams(Err(error)) => {
-                warn!(
-                    session_id = id.0,
-                    error = %error,
-                    "Host rejected screen stream request by policy"
-                );
+            HostControlEffect::StreamRequestRejected(error) => {
                 self.set_connection_status(format!(
                     "Session {} stream request rejected: {error}",
                     id.0
                 ));
                 Ok(true)
             }
-            HostControlDecision::RequestKeyFrame(screen_id) => {
-                let Some(session) = self
-                    .model
-                    .sessions
-                    .iter_mut()
-                    .find(|session| session.send.id() == id)
-                else {
-                    warn!(
-                        event = "key_frame_request_session_missing",
-                        session_id = id.0,
-                        screen_id = screen_id.0,
-                        "Key-frame request arrived after its Session closed"
-                    );
-                    return Ok(false);
-                };
-                let Some(stream) = session.screen_streams.get(&screen_id) else {
-                    warn!(
-                        event = "key_frame_request_stream_missing",
-                        session_id = id.0,
-                        screen_id = screen_id.0,
-                        "Key-frame request has no running Host screen stream"
-                    );
-                    return Ok(false);
-                };
-
-                stream.request_key_frame();
-                trace!(
-                    event = "key_frame_requested",
-                    session_id = id.0,
-                    screen_id = screen_id.0,
-                    "Queued key-frame request for Host encoder"
-                );
-                Ok(true)
-            }
-            HostControlDecision::StopScreenStream(screen_id) => {
+            HostControlEffect::StreamStopped(screen_id) => {
                 self.host_stream.pending_starts.remove(&(id, screen_id));
-                if let Some(session) = self
-                    .model
-                    .sessions
-                    .iter_mut()
-                    .find(|session| session.send.id() == id)
-                {
-                    apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
-                }
-                info!(
-                    event = "screen_stream_stop_received",
-                    session_id = id.0,
-                    screen_id = screen_id.0,
-                    "Screen stream stop received"
-                );
                 Ok(true)
             }
-            HostControlDecision::RemoteInput(input) => {
-                let screen_id = input.screen_id();
-                let has_active_stream = self
-                    .model
-                    .sessions
-                    .iter()
-                    .find(|session| session.send.id() == id)
-                    .is_some_and(|session| session.screen_streams.contains_key(&screen_id));
-                if !has_active_stream {
-                    warn!(
-                        event = "remote_input_stream_missing",
-                        session_id = id.0,
-                        screen_id = screen_id.get(),
-                        "Ignored remote input without an active screen stream"
-                    );
-                    return Ok(true);
-                }
-                let Some(screen) = self.model.app.screen(&screen_id).cloned() else {
-                    warn!(
-                        event = "remote_input_screen_missing",
-                        session_id = id.0,
-                        screen_id = screen_id.get(),
-                        "Ignored remote input for an unavailable screen"
-                    );
-                    return Ok(true);
-                };
-                if let Err(error) =
-                    self.remote_input_injector
-                        .inject(input, &screen, self.model.app.screens())
-                {
-                    warn!(
-                        event = "remote_input_injection_failed",
-                        session_id = id.0,
-                        screen_id = screen_id.get(),
-                        error = ?error,
-                        "Failed to inject remote input"
-                    );
-                }
-                Ok(true)
-            }
-            HostControlDecision::Ignore => {
-                warn!(session_id = id.0, "Host ignored session message");
-                Ok(true)
-            }
+            HostControlEffect::NoShellAction => Ok(true),
         }
     }
 }

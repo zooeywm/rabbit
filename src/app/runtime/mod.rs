@@ -1,7 +1,7 @@
-//! Shared application runtime policies — GUI and headless adapters only.
+//! Shared application runtime orchestration for GUI and headless shells.
 //!
-//! Nothing in this module depends on the presentation shell or view publishers.
-//! Entry points call these policies, then perform I/O.
+//! Nothing in this module depends on presentation components or shell message types.
+//! Shells only adapt runtime effects to their own queues and visible state.
 
 pub mod controller_policy;
 pub mod host_control;
