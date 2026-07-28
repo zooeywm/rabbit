@@ -32,6 +32,7 @@ use crate::{
         unsync_queue::UnsyncQueue,
     },
     kernel::{
+        absolute_pointer::AbsolutePointerInjector as _,
         connection_request::PeerCapabilities,
         frame_pipeline::FramePipelineManager,
         protocol::{PROTOCOL_NAME, protocol_version_string},
@@ -78,6 +79,7 @@ where
     app.run_app().await?;
     let local_capabilities = PeerCapabilities::local_host(ScreenLayoutManager::screens(&app).len());
     let mut model = ApplicationModel::new(app, requester_name, local_capabilities);
+    let mut absolute_pointer_injector = Stack::create_absolute_pointer_injector();
     let screens = ScreenLayoutManager::screens(&model.app).to_vec();
     info!(
         event = "headless_screens_detected",
@@ -161,7 +163,14 @@ where
                 accept_request::<Stack>(&mut model, request, &sender).await?;
             }
             HeadlessMessage::SessionMessage(id, message) => {
-                handle_session_message::<Stack>(&mut model, id, message, &sender).await?;
+                handle_session_message::<Stack>(
+                    &mut model,
+                    &mut absolute_pointer_injector,
+                    id,
+                    message,
+                    &sender,
+                )
+                .await?;
             }
             HeadlessMessage::SessionClosed(id) => {
                 info!(session_id = id.0, "Headless session closed");
@@ -301,20 +310,19 @@ where
         send.close().await;
         return Ok(());
     }
-    if let Some(crate::app::model::SessionPhase::Draining) = existing_phase {
-        if let Some(old_id) = model
+    if let Some(crate::app::model::SessionPhase::Draining) = existing_phase
+        && let Some(old_id) = model
             .sessions
             .iter()
             .find(|session| session.key == key)
             .map(|session| session.send.id())
-        {
-            info!(
-                event = "headless_session_reconnect_supersede",
-                session_id = old_id.0,
-                "Superseding draining headless session for reconnect"
-            );
-            model.remove_session(old_id);
-        }
+    {
+        info!(
+            event = "headless_session_reconnect_supersede",
+            session_id = old_id.0,
+            "Superseding draining headless session for reconnect"
+        );
+        model.remove_session(old_id);
     }
 
     let mut running = RunningSession::new(
@@ -355,6 +363,7 @@ fn apply_headless_timeouts<Stack>(
 
 async fn handle_session_message<Stack>(
     model: &mut ApplicationModel<Stack>,
+    absolute_pointer_injector: &mut Stack::AbsolutePointerInjector,
     id: SessionId,
     message: SessionMessage,
     sender: &UnsyncQueue<HeadlessMessage>,
@@ -419,6 +428,42 @@ where
                 .find(|session| session.send.id() == id)
             {
                 apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
+            }
+        }
+        HostControlDecision::AbsolutePointerMove(movement) => {
+            let has_active_stream = model
+                .sessions
+                .iter()
+                .find(|session| session.send.id() == id)
+                .is_some_and(|session| session.screen_streams.contains_key(&movement.screen_id));
+            if !has_active_stream {
+                warn!(
+                    event = "absolute_pointer_stream_missing",
+                    session_id = id.0,
+                    screen_id = movement.screen_id.get(),
+                    "Ignored absolute pointer movement without an active screen stream"
+                );
+                return Ok(());
+            }
+            let Some(screen) = model.app.screen(&movement.screen_id).cloned() else {
+                warn!(
+                    event = "absolute_pointer_screen_missing",
+                    session_id = id.0,
+                    screen_id = movement.screen_id.get(),
+                    "Ignored absolute pointer movement for an unavailable screen"
+                );
+                return Ok(());
+            };
+            if let Err(error) =
+                absolute_pointer_injector.move_absolute(movement, &screen, model.app.screens())
+            {
+                warn!(
+                    event = "absolute_pointer_injection_failed",
+                    session_id = id.0,
+                    screen_id = movement.screen_id.get(),
+                    error = ?error,
+                    "Failed to inject absolute pointer movement"
+                );
             }
         }
         HostControlDecision::Ignore => {

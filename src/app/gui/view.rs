@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use eros::Context as _;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
@@ -48,7 +51,73 @@ pub(crate) enum GuiIntent {
         screen_id: crate::kernel::screen_manager::ScreenId,
     },
     VideoRendererFailed(String),
+    AbsolutePointerMoved(AbsolutePointerMailbox),
     Close,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AbsolutePointerViewportEvent {
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) viewport_width: f32,
+    pub(crate) viewport_height: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AbsolutePointerMailbox {
+    state: Arc<Mutex<AbsolutePointerMailboxState>>,
+}
+
+impl PartialEq for AbsolutePointerMailbox {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
+impl Eq for AbsolutePointerMailbox {}
+
+#[derive(Debug, Default)]
+struct AbsolutePointerMailboxState {
+    latest: Option<AbsolutePointerViewportEvent>,
+    notification_pending: bool,
+}
+
+impl AbsolutePointerMailbox {
+    fn submit(&self, event: AbsolutePointerViewportEvent, sender: &flume::Sender<GuiIntent>) {
+        let notify = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("absolute pointer mailbox poisoned");
+            state.latest = Some(event);
+            if state.notification_pending {
+                false
+            } else {
+                state.notification_pending = true;
+                true
+            }
+        };
+        if notify
+            && sender
+                .send(GuiIntent::AbsolutePointerMoved(self.clone()))
+                .is_err()
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("absolute pointer mailbox poisoned");
+            state.notification_pending = false;
+        }
+    }
+
+    pub(crate) fn take(&self) -> Option<AbsolutePointerViewportEvent> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("absolute pointer mailbox poisoned");
+        state.notification_pending = false;
+        state.latest.take()
+    }
 }
 
 pub(crate) struct Gui<VideoView>
@@ -88,24 +157,7 @@ where
         video_display: VideoDisplayPreference,
         probe_interval: Duration,
     ) -> eros::Result<(Self, ViewPublisher<VideoView>, flume::Receiver<GuiIntent>)> {
-        let backend =
-            slint::BackendSelector::new().with_winit_window_attributes_hook(|attributes| {
-                // Wayland needs per-pixel alpha for the native subsurface below
-                // Slint. Windows uses a real HWND region hole instead, so making
-                // the whole window transparent would also affect its outer frame.
-                attributes.with_transparent(!cfg!(target_os = "windows"))
-            });
-        #[cfg(target_os = "windows")]
-        let backend = {
-            let mut settings = slint::wgpu_29::WGPUSettings::default();
-            settings.backends = slint::wgpu_29::wgpu::Backends::DX12;
-            backend.require_wgpu_29(slint::wgpu_29::WGPUConfiguration::Automatic(settings))
-        };
-        #[cfg(not(target_os = "windows"))]
-        let backend = backend.require_opengl_es_with_version(3, 0);
-        backend
-            .select()
-            .context("Failed to select the Slint renderer")?;
+        VideoView::select_slint_backend()?;
         let window = RabbitWindow::new().context("Failed to create the Slint Rabbit window")?;
         slint::set_xdg_app_id(APP_ID).context("Failed to set the Rabbit XDG application ID")?;
         let (sender, intents) = flume::unbounded();
@@ -189,6 +241,21 @@ where
             let sender = sender.clone();
             window.on_stop_stream(move || {
                 send_intent(&sender, GuiIntent::StopScreenStream);
+            });
+        }
+        {
+            let sender = sender.clone();
+            let mailbox = AbsolutePointerMailbox::default();
+            window.on_absolute_pointer_moved(move |x, y, viewport_width, viewport_height| {
+                mailbox.submit(
+                    AbsolutePointerViewportEvent {
+                        x,
+                        y,
+                        viewport_width,
+                        viewport_height,
+                    },
+                    &sender,
+                );
             });
         }
         let close_sender = sender.clone();

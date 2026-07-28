@@ -1,7 +1,10 @@
 use std::net::SocketAddr;
 
 use crate::{
-    app::{gui::state::WorkspaceSection, services::host_stream::HostStreamPlan},
+    app::{
+        gui::{state::WorkspaceSection, view::AbsolutePointerViewportEvent},
+        services::host_stream::HostStreamPlan,
+    },
     infra::{
         DirectConnectionOutcome, PendingConnectionRequest, SessionTransport, SessionTransportRecv,
         SessionTransportSend, unsync_queue::UnsyncQueue,
@@ -90,6 +93,7 @@ pub(super) enum RootMessage {
     DisconnectDevice(usize),
     ResetDirectConnection,
     StopCurrentScreenStream,
+    AbsolutePointerMoved(AbsolutePointerViewportEvent),
 }
 
 #[derive(Clone)]

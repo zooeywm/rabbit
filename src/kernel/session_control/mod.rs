@@ -9,6 +9,7 @@
 mod wire;
 
 use crate::kernel::{
+    absolute_pointer::AbsolutePointerMove,
     geometry::{FrameRate, PixelSize},
     screen_configuration::{
         RequestKeyFrame, ScreenStreamsConfigured, SetScreenStreams, StopScreenStream,
@@ -29,6 +30,9 @@ pub struct ScreenInfo {
 #[derive(Debug)]
 pub struct OutgoingScreenList(pub(crate) TransportMessage);
 
+#[derive(Debug)]
+pub struct OutgoingAbsolutePointerMove(pub(crate) TransportMessage);
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlMessage {
     ScreenList(Vec<ScreenInfo>),
@@ -36,25 +40,50 @@ pub enum ControlMessage {
     ScreenStreamsConfigured(ScreenStreamsConfigured),
     StopScreenStream(StopScreenStream),
     RequestKeyFrame(RequestKeyFrame),
+    AbsolutePointerMove(AbsolutePointerMove),
 }
 
 #[cfg(test)]
 mod tests {
     use crate::kernel::{
+        absolute_pointer::{AbsolutePointerMove, NormalizedPosition},
         geometry::{FrameRate, PixelSize},
         screen_configuration::{
             RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
         },
         screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
         session_control::{
-            ControlMessage, OutgoingScreenList, ScreenInfo,
+            ControlMessage, OutgoingAbsolutePointerMove, OutgoingScreenList, ScreenInfo,
             wire::{
                 WireFrameRate, WirePixelSize, WireScreenInfo, WireScreenLayout, WireScreenRect,
                 WireScreenTransform,
             },
         },
-        transport::TransportMessage,
+        transport::{Delivery, TransportMessage},
     };
+
+    #[test]
+    fn absolute_pointer_move_round_trips_as_unreliable_control() {
+        let expected = AbsolutePointerMove {
+            screen_id: ScreenId(2),
+            position: NormalizedPosition {
+                x: 12_345,
+                y: 54_321,
+            },
+        };
+        let message = TransportMessage::from(
+            OutgoingAbsolutePointerMove::try_from(expected)
+                .expect("absolute pointer movement should encode"),
+        );
+        assert_eq!(message.delivery, Delivery::Unreliable);
+
+        let ControlMessage::AbsolutePointerMove(decoded) =
+            ControlMessage::try_from(message).expect("absolute pointer movement should decode")
+        else {
+            panic!("decoded control message should be an absolute pointer movement");
+        };
+        assert_eq!(decoded, expected);
+    }
 
     #[test]
     fn screen_list_round_trip_preserves_frame_rate() {

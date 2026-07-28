@@ -853,7 +853,7 @@ impl BgraToNv12Converter {
         }
         .with_context(|| "Failed to create BGRA video processor input view")?;
         let input_view = input_view.with_context(|| "D3D11 returned no processor input view")?;
-        let mut streams = [D3D11_VIDEO_PROCESSOR_STREAM {
+        let streams = [D3D11_VIDEO_PROCESSOR_STREAM {
             Enable: true.into(),
             OutputIndex: 0,
             InputFrameOrField: 0,
@@ -867,12 +867,8 @@ impl BgraToNv12Converter {
             ppFutureSurfacesRight: std::ptr::null_mut(),
         }];
         unsafe {
-            self.video_context.VideoProcessorBlt(
-                &self.processor,
-                &self.output_view,
-                0,
-                &mut streams,
-            )
+            self.video_context
+                .VideoProcessorBlt(&self.processor, &self.output_view, 0, &streams)
         }
         .with_context(|| "Failed to convert BGRA WGC texture to NV12")?;
         Ok(self.output.clone())

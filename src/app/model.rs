@@ -241,11 +241,6 @@ where
         self.screen_stream_results.remove(&id);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn has_session(&self, key: &SessionKey) -> bool {
-        self.sessions.iter().any(|session| session.key == *key)
-    }
-
     pub(crate) fn session_phase_for_key(&self, key: &SessionKey) -> Option<SessionPhase> {
         self.sessions
             .iter()

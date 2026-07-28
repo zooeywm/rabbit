@@ -33,11 +33,12 @@ pub enum SessionPhaseEvent {
     JoinTimedOut,
     /// Active session idle (no streams) deadline exceeded.
     IdleTimedOut,
-    /// Draining deadline exceeded — shells should force-remove the session.
+    /// Draining deadline exceeded — shells should remove the session.
     DrainTimedOut,
 }
 
 impl SessionPhase {
+    #[cfg(test)]
     pub const ALL: [Self; 3] = [Self::Joining, Self::Active, Self::Draining];
 
     pub const fn admits_new_streams(self) -> bool {
@@ -112,8 +113,6 @@ impl Default for SessionTimeoutPolicy {
 pub enum SessionTimeoutAction {
     /// Transition with this event (may move Joining/Active → Draining).
     Transition(SessionPhaseEvent),
-    /// Already Draining and drain budget exceeded — shell should drop the session.
-    ForceRemove,
 }
 
 /// Pure timeout classifier: given phase, elapsed time in that phase, stream count,
@@ -137,9 +136,9 @@ pub fn evaluate_session_timeout(
                 SessionPhaseEvent::IdleTimedOut,
             ))
         }
-        SessionPhase::Draining if phase_elapsed >= policy.drain && !policy.drain.is_zero() => {
-            Some(SessionTimeoutAction::ForceRemove)
-        }
+        SessionPhase::Draining if phase_elapsed >= policy.drain && !policy.drain.is_zero() => Some(
+            SessionTimeoutAction::Transition(SessionPhaseEvent::DrainTimedOut),
+        ),
         _ => None,
     }
 }
@@ -276,7 +275,9 @@ mod tests {
         );
         assert_eq!(
             evaluate_session_timeout(SessionPhase::Draining, Duration::from_secs(3), 0, &policy),
-            Some(SessionTimeoutAction::ForceRemove)
+            Some(SessionTimeoutAction::Transition(
+                SessionPhaseEvent::DrainTimedOut
+            ))
         );
     }
 

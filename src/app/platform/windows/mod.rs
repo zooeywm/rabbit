@@ -1,6 +1,9 @@
 use std::{future::Future, time::Duration};
 
+use slint::ComponentHandle as _;
 use tracing::info;
+
+mod record;
 
 use crate::{
     app::{
@@ -10,37 +13,37 @@ use crate::{
         platform::{ApplicationStack, RemoteVideoStack},
     },
     infra::{
-        ConnectionEndpoint, GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder,
-        GbmFramePipelineManagerState, KmsScreenCaptureManagerState, NativeVideoRenderer,
-        NativeVideoViewport, NiriScreenLayoutManagerState, OpenGlVideoRenderer, WorkerReaper,
-        WorkerReaperHandle,
+        ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,
+        WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsAbsolutePointerInjector,
+        WindowsDecodedFrame, WindowsScreenLayoutManagerState, WindowsVideoDecoder,
+        WindowsVideoEncoder, WorkerReaper, WorkerReaperHandle,
     },
-    kernel::session::ReceivedVideoFrame,
+    kernel::{session::ReceivedVideoFrame, video_renderer::VideoRenderer as _},
 };
 
-enum LinuxApplicationStack {
-    NiriKmsGbm,
+enum WindowsApplicationStack {
+    WgcD3d11,
 }
 
-pub(crate) struct NiriKmsGbmApplicationStack;
+pub(crate) struct WgcD3d11ApplicationStack;
 
 #[cfg(test)]
-pub(crate) use NiriKmsGbmApplicationStack as TestApplicationStack;
+pub(crate) use WgcD3d11ApplicationStack as TestApplicationStack;
 
 pub(crate) fn run(config: Config) -> eros::Result<()> {
     match select_application_stack(&config) {
-        LinuxApplicationStack::NiriKmsGbm => {
-            crate::app::gui::run::<NiriKmsGbmApplicationStack>(config)
+        WindowsApplicationStack::WgcD3d11 => {
+            crate::app::gui::run::<WgcD3d11ApplicationStack>(config)
         }
     }
 }
 
 pub(crate) fn run_headless(config: Config) -> eros::Result<()> {
     match select_application_stack(&config) {
-        LinuxApplicationStack::NiriKmsGbm => {
+        WindowsApplicationStack::WgcD3d11 => {
             let runtime =
                 compio::runtime::Runtime::new().expect("Headless Compio runtime should start");
-            runtime.block_on(crate::app::headless::run::<NiriKmsGbmApplicationStack>(
+            runtime.block_on(crate::app::headless::run::<WgcD3d11ApplicationStack>(
                 config,
             ))
         }
@@ -51,45 +54,39 @@ pub(crate) fn run_record(
     config: Config,
     options: crate::app::cli::RecordOptions,
 ) -> eros::Result<()> {
-    match select_application_stack(&config) {
-        LinuxApplicationStack::NiriKmsGbm => {
-            let runtime =
-                compio::runtime::Runtime::new().expect("Record Compio runtime should start");
-            runtime.block_on(crate::app::record::run::<NiriKmsGbmApplicationStack>(
-                config, options,
-            ))
-        }
-    }
+    let _ = select_application_stack(&config);
+    record::run(config, options)
 }
 
-/// Selects the Linux media backend.
+pub(crate) fn install_shutdown_handlers() {}
+
+/// Selects the Windows media backend.
 ///
-/// Today only the niri + KMS + GBM + GStreamer stack is wired. Additional
-/// stacks should become new `LinuxApplicationStack` variants rather than
-/// inlining platform choice into session or GUI code.
-fn select_application_stack(_config: &Config) -> LinuxApplicationStack {
-    let niri_socket_present = std::env::var_os("NIRI_SOCKET").is_some();
+/// The WGC + D3D11 + Media Foundation stack is the only wired option and trails
+/// the Linux product path in feature completeness. Keep parity work behind this
+/// stack boundary.
+fn select_application_stack(_config: &Config) -> WindowsApplicationStack {
     info!(
         event = "app_platform_stack_selected",
-        stack = NiriKmsGbmApplicationStack::name(),
-        niri_socket_present,
-        "Selected Linux application backend stack"
+        stack = WgcD3d11ApplicationStack::name(),
+        "Selected Windows application backend stack"
     );
-    LinuxApplicationStack::NiriKmsGbm
+    WindowsApplicationStack::WgcD3d11
 }
 
-impl ApplicationStack for NiriKmsGbmApplicationStack {
+impl ApplicationStack for WgcD3d11ApplicationStack {
     type App = App<
-        NiriScreenLayoutManagerState,
-        KmsScreenCaptureManagerState,
-        GbmFramePipelineManagerState,
+        WindowsScreenLayoutManagerState,
+        WgcScreenCaptureManagerState,
+        WgcFramePipelineManagerState,
     >;
     type RemoteVideo = RemoteVideo;
     type RemoteVideoViewStack = RemoteVideoViewStack;
-    type ScreenStreamEncoder = GStreamerVideoEncoder;
+    type ScreenStreamEncoder = WindowsVideoEncoder;
+    type AbsolutePointerInjector = WindowsAbsolutePointerInjector;
 
     fn name() -> &'static str {
-        "linux/niri-kms-gbm-gstreamer-wayland"
+        "windows-wgc-d3d11-mf"
     }
 
     fn create_app(
@@ -116,15 +113,29 @@ impl ApplicationStack for NiriKmsGbmApplicationStack {
             worker_reaper,
         ))
     }
+
+    fn create_absolute_pointer_injector() -> Self::AbsolutePointerInjector {
+        WindowsAbsolutePointerInjector::new()
+    }
 }
 
 pub(crate) struct RemoteVideoViewStack;
 
 impl VideoViewStack for RemoteVideoViewStack {
-    type Frame = GStreamerDecodedFrame;
+    type Frame = WindowsDecodedFrame;
     type NativeRenderer = NativeVideoRenderer;
     type OpenGlRenderer = OpenGlVideoRenderer;
     type NativeViewport = NativeVideoViewport;
+
+    fn select_slint_backend() -> eros::Result<()> {
+        let mut settings = slint::wgpu_29::WGPUSettings::default();
+        settings.backends = slint::wgpu_29::wgpu::Backends::DX12;
+        slint::BackendSelector::new()
+            .with_winit_window_attributes_hook(|attributes| attributes.with_transparent(false))
+            .require_wgpu_29(slint::wgpu_29::WGPUConfiguration::Automatic(settings))
+            .select()
+            .map_err(Into::into)
+    }
 
     fn create_native_renderer(
         window: &slint::Window,
@@ -183,27 +194,31 @@ impl VideoViewStack for RemoteVideoViewStack {
                 height: 0,
             });
         }
+        let scale = window.window().scale_factor();
         Ok(NativeVideoViewport {
-            x: logical_pixels(window.get_video_viewport_x())?,
-            y: logical_pixels(window.get_video_viewport_y())?,
-            width: logical_pixels(window.get_video_viewport_width())?,
-            height: logical_pixels(window.get_video_viewport_height())?,
+            x: physical_pixels(window.get_video_viewport_x(), scale)?.min(i32::MAX as u32) as i32,
+            y: physical_pixels(window.get_video_viewport_y(), scale)?.min(i32::MAX as u32) as i32,
+            width: physical_pixels(window.get_video_viewport_width(), scale)?.min(i32::MAX as u32)
+                as i32,
+            height: physical_pixels(window.get_video_viewport_height(), scale)?.min(i32::MAX as u32)
+                as i32,
         })
     }
 }
 
-fn logical_pixels(logical: f32) -> eros::Result<i32> {
-    if !logical.is_finite() || logical < 0.0 || logical > i32::MAX as f32 {
-        eros::bail!("Invalid logical video viewport coordinate {}", logical);
+fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
+    let physical = logical * scale;
+    if !physical.is_finite() || physical < 0.0 || physical > u32::MAX as f32 {
+        eros::bail!("Invalid physical video viewport coordinate {}", physical);
     }
-    Ok(logical.round() as i32)
+    Ok(physical.round() as u32)
 }
 
 pub(crate) struct RemoteVideo;
 
 impl RemoteVideoStack for RemoteVideo {
-    type Decoder = GStreamerVideoDecoder;
-    type Frame = GStreamerDecodedFrame;
+    type Decoder = WindowsVideoDecoder;
+    type Frame = WindowsDecodedFrame;
 
     fn run_decoder<Inputs, PresentFrame, PresentFuture>(
         inputs: Inputs,
@@ -215,9 +230,8 @@ impl RemoteVideoStack for RemoteVideo {
         PresentFrame: FnMut(Self::Frame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        GStreamerVideoDecoder::run_with_probing(inputs, present_frame, enable_probing)
+        WindowsVideoDecoder::run_with_probing(inputs, present_frame, enable_probing)
     }
 }
 
-#[path = "linux_deps.rs"]
 mod deps;

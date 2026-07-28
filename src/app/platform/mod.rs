@@ -4,6 +4,7 @@ use crate::{
     app::{App, cli::RecordOptions, config::Config, gui::VideoViewStack},
     infra::{ConnectionEndpoint, WorkerReaper, WorkerReaperHandle},
     kernel::{
+        absolute_pointer::AbsolutePointerInjector,
         frame_pipeline::FramePipelineManager,
         screen_capture::ScreenCaptureManager,
         screen_manager::ScreenLayoutManager,
@@ -58,6 +59,7 @@ where
         Frame = <Self::RemoteVideo as RemoteVideoStack>::Frame,
     >;
     type ScreenStreamEncoder: VideoEncoder<Input = <Self::App as FramePipelineManager>::Frame>;
+    type AbsolutePointerInjector: AbsolutePointerInjector;
 
     fn name() -> &'static str;
 
@@ -67,28 +69,34 @@ where
         worker_reaper: WorkerReaper,
         worker_reaper_handle: WorkerReaperHandle,
     ) -> eros::Result<Self::App>;
+
+    fn create_absolute_pointer_injector() -> Self::AbsolutePointerInjector;
 }
 
-#[cfg_attr(target_os = "linux", path = "platform/linux.rs")]
-#[cfg_attr(target_os = "windows", path = "platform/windows.rs")]
-mod platform;
+#[cfg_attr(target_os = "linux", path = "linux/mod.rs")]
+#[cfg_attr(target_os = "windows", path = "windows/mod.rs")]
+mod selected;
 
 #[cfg(test)]
-pub(crate) use platform::TestApplicationStack;
+pub(crate) use selected::TestApplicationStack;
 
 pub(crate) fn run() -> eros::Result<()> {
     let config = Config::new()?;
-    platform::run(config)
+    selected::run(config)
 }
 
 pub(crate) fn run_headless() -> eros::Result<()> {
     let config = Config::new()?;
-    platform::run_headless(config)
+    selected::run_headless(config)
 }
 
 pub(crate) fn run_record(options: RecordOptions) -> eros::Result<()> {
     let config = Config::new()?;
-    platform::run_record(config, options)
+    selected::run_record(config, options)
+}
+
+pub(crate) fn install_shutdown_handlers() {
+    selected::install_shutdown_handlers();
 }
 
 #[cfg(test)]
@@ -99,6 +107,6 @@ mod tests {
     fn selected_stack_can_run_the_application() {
         fn assert_stack<Stack: ApplicationStack>() {}
 
-        assert_stack::<super::platform::TestApplicationStack>();
+        assert_stack::<super::selected::TestApplicationStack>();
     }
 }

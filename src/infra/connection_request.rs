@@ -27,11 +27,12 @@ use crate::{
 const REQUESTER_NAME_LENGTH_SIZE: usize = size_of::<u16>();
 const PROTOCOL_VERSION_SIZE: usize = size_of::<u16>() * 2;
 const CAPABILITY_HEADER_SIZE: usize = size_of::<u8>() * 2;
+const CAPABILITY_TAG_ABSOLUTE_POINTER: u8 = 0x80;
 const RESPONSE_SIZE: usize = size_of::<u8>();
 /// TCP handshake preface for protocol-aware connection requests.
 const TCP_REQUEST_MAGIC: &[u8; 5] = b"RBTC\x02";
 const TCP_ENDPOINT_IDENTITY_SIZE: usize = 16;
-const MAX_ENCODER_PROFILES: usize = 16;
+const MAX_CAPABILITY_TAGS: usize = 16;
 const MAX_REQUESTER_NAME_BYTES: usize = 512;
 
 pub(crate) enum DirectConnectionOutcome {
@@ -489,20 +490,24 @@ fn warn_protocol_mismatch(remote_address: SocketAddr, request: &ConnectionReques
 }
 
 fn encode_peer_capabilities(capabilities: &PeerCapabilities) -> eros::Result<BytesMut> {
-    if capabilities.encoder_profiles.len() > MAX_ENCODER_PROFILES {
+    let tag_count =
+        capabilities.encoder_profiles.len() + usize::from(capabilities.absolute_pointer);
+    if tag_count > MAX_CAPABILITY_TAGS {
         eros::bail!(
-            "Connection advertises more than {} encoder profiles",
-            MAX_ENCODER_PROFILES
+            "Connection advertises more than {} capability tags",
+            MAX_CAPABILITY_TAGS
         );
     }
-    let profile_count = u8::try_from(capabilities.encoder_profiles.len())
-        .with_context(|| "Failed to encode encoder profile count")?;
-    let mut body =
-        BytesMut::with_capacity(CAPABILITY_HEADER_SIZE + capabilities.encoder_profiles.len());
+    let profile_count =
+        u8::try_from(tag_count).with_context(|| "Failed to encode capability tag count")?;
+    let mut body = BytesMut::with_capacity(CAPABILITY_HEADER_SIZE + tag_count);
     body.put_u8(capabilities.max_screens);
     body.put_u8(profile_count);
     for profile in &capabilities.encoder_profiles {
         body.put_u8(profile.as_u8());
+    }
+    if capabilities.absolute_pointer {
+        body.put_u8(CAPABILITY_TAG_ABSOLUTE_POINTER);
     }
     Ok(body)
 }
@@ -514,15 +519,18 @@ fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, 
     let max_screens = body[0];
     let profile_count = usize::from(body[1]);
     body = body.split_off(CAPABILITY_HEADER_SIZE);
-    if profile_count > MAX_ENCODER_PROFILES {
-        eros::bail!("Advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})");
+    if profile_count > MAX_CAPABILITY_TAGS {
+        eros::bail!("Advertises {profile_count} capability tags (max {MAX_CAPABILITY_TAGS})");
     }
     if body.len() < profile_count {
-        eros::bail!("Truncated while reading encoder profiles");
+        eros::bail!("Truncated while reading capability tags");
     }
     let mut encoder_profiles = Vec::with_capacity(profile_count);
+    let mut absolute_pointer = false;
     for tag in body.split_to(profile_count) {
-        if let Ok(profile) = EncoderProfileTag::try_from(tag) {
+        if tag == CAPABILITY_TAG_ABSOLUTE_POINTER {
+            absolute_pointer = true;
+        } else if let Ok(profile) = EncoderProfileTag::try_from(tag) {
             encoder_profiles.push(profile);
         }
     }
@@ -530,6 +538,7 @@ fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, 
         PeerCapabilities {
             max_screens,
             encoder_profiles,
+            absolute_pointer,
         },
         body,
     ))
@@ -712,28 +721,6 @@ async fn recv_quic_response(
         .with_context(|| "Failed to decode QUIC connection response")
 }
 
-async fn read_quic_exact(
-    stream: &mut compio::quic::RecvStream,
-    length: usize,
-) -> eros::Result<BytesMut> {
-    let mut buffer = BytesMut::with_capacity(length);
-
-    while buffer.len() < length {
-        let remaining = length - buffer.len();
-        let Some(chunk) = stream
-            .read_chunk(remaining, true)
-            .await
-            .with_context(|| "Failed to read QUIC connection request stream")?
-        else {
-            eros::bail!("QUIC connection request stream ended before the message was complete");
-        };
-
-        buffer.extend_from_slice(&chunk.bytes);
-    }
-
-    Ok(buffer)
-}
-
 async fn send_tcp_request(
     stream: &mut compio::net::TcpStream,
     endpoint_identity: [u8; TCP_ENDPOINT_IDENTITY_SIZE],
@@ -774,9 +761,9 @@ async fn recv_tcp_request_message(
     )
     .await?;
     let profile_count = usize::from(fixed[5]);
-    if profile_count > MAX_ENCODER_PROFILES {
+    if profile_count > MAX_CAPABILITY_TAGS {
         eros::bail!(
-            "TCP connection request advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})"
+            "TCP connection request advertises {profile_count} capability tags (max {MAX_CAPABILITY_TAGS})"
         );
     }
     let profiles_and_name_len = read_tcp_exact(
@@ -835,13 +822,13 @@ async fn recv_tcp_response(
                 read_tcp_exact(stream, CAPABILITY_HEADER_SIZE, "TCP host capability header")
                     .await?;
             let profile_count = usize::from(header[1]);
-            if profile_count > MAX_ENCODER_PROFILES {
+            if profile_count > MAX_CAPABILITY_TAGS {
                 eros::bail!(
-                    "Accepted TCP response advertises {profile_count} encoder profiles (max {MAX_ENCODER_PROFILES})"
+                    "Accepted TCP response advertises {profile_count} capability tags (max {MAX_CAPABILITY_TAGS})"
                 );
             }
             let profiles =
-                read_tcp_exact(stream, profile_count, "TCP host encoder profiles").await?;
+                read_tcp_exact(stream, profile_count, "TCP host capability tags").await?;
             let mut body = BytesMut::with_capacity(1 + header.len() + profiles.len());
             body.put_u8(ConnectionResponse::Accepted.into());
             body.extend_from_slice(&header);
@@ -930,6 +917,7 @@ mod tests {
                 panic!("TCP connection request should establish a transport");
             };
             assert_eq!(host_capabilities.max_screens, 2);
+            assert!(host_capabilities.absolute_pointer);
             incoming_task
                 .await
                 .expect("Incoming TCP approval task should finish");

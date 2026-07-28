@@ -35,6 +35,8 @@ pub(crate) trait VideoViewStack: 'static {
     type OpenGlRenderer: crate::kernel::video_renderer::VideoRenderer<Frame = Self::Frame> + 'static;
     type NativeViewport;
 
+    fn select_slint_backend() -> eros::Result<()>;
+
     fn create_native_renderer(
         window: &slint::Window,
         probe_interval: Duration,

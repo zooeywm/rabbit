@@ -137,8 +137,10 @@ fn monitor_screen(id: ScreenId, monitor: HMONITOR) -> eros::Result<Option<Screen
     }
 
     let device = widestring_from_nul(&info.szDevice);
-    let mut mode = DEVMODEW::default();
-    mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
     let mode_ok = unsafe {
         EnumDisplaySettingsW(
             windows::core::PCWSTR(info.szDevice.as_ptr()),

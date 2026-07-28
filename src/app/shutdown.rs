@@ -5,22 +5,18 @@
 //! subscribe and run their own cleanup.
 
 use std::{
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static REQUESTED: AtomicBool = AtomicBool::new(false);
-static SIGNAL_COUNT: AtomicU32 = AtomicU32::new(0);
 
 /// Install OS signal handlers once. Idempotent and safe from any thread.
 pub fn install() {
-    if INSTALLED.swap(true, Ordering::SeqCst) {
-        return;
+    if !INSTALLED.swap(true, Ordering::SeqCst) {
+        super::platform::install_shutdown_handlers();
     }
-
-    #[cfg(unix)]
-    install_unix_handlers();
 }
 
 /// Mark shutdown requested (e.g. Enter to stop recording, or UI close path).
@@ -56,25 +52,6 @@ pub fn subscribe() -> flume::Receiver<()> {
         })
         .expect("Failed to spawn rabbit-shutdown watcher");
     rx
-}
-
-#[cfg(unix)]
-fn install_unix_handlers() {
-    // SAFETY: handler only touches atomics and may call `_exit` (async-signal-safe).
-    unsafe extern "C" fn on_stop_signal(_: libc::c_int) {
-        let n = SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst);
-        if n >= 1 {
-            unsafe { libc::_exit(130) };
-        }
-        REQUESTED.store(true, Ordering::SeqCst);
-    }
-
-    unsafe {
-        // On Linux glibc, `sighandler_t` is a raw address-sized integer.
-        let handler = on_stop_signal as *const () as libc::sighandler_t;
-        libc::signal(libc::SIGINT, handler);
-        libc::signal(libc::SIGTERM, handler);
-    }
 }
 
 #[cfg(test)]

@@ -4,8 +4,9 @@ use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binread, binrw, io::C
 use bytes::Bytes;
 use eros::Context;
 
-use super::{ControlMessage, OutgoingScreenList, ScreenInfo};
+use super::{ControlMessage, OutgoingAbsolutePointerMove, OutgoingScreenList, ScreenInfo};
 use crate::kernel::{
+    absolute_pointer::{AbsolutePointerMove, NormalizedPosition},
     geometry::{FrameRate, PixelSize},
     screen_configuration::{
         RemoteDisplayMode, RequestKeyFrame, ResolutionResult, ScreenResolutionOutcome,
@@ -24,6 +25,7 @@ pub(super) enum WireControlMessageTag {
     ScreenStreamsConfigured = 2,
     StopScreenStream = 3,
     RequestKeyFrame = 4,
+    AbsolutePointerMove = 5,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -118,6 +120,13 @@ pub(super) struct WireStopScreenStream {
 #[derive(BinRead, BinWrite)]
 pub(super) struct WireRequestKeyFrame {
     screen_id: u8,
+}
+
+#[derive(BinRead, BinWrite)]
+pub(super) struct WireAbsolutePointerMove {
+    screen_id: u8,
+    x: u16,
+    y: u16,
 }
 
 #[binrw]
@@ -580,6 +589,35 @@ impl TryFrom<RequestKeyFrame> for TransportMessage {
     }
 }
 
+impl TryFrom<AbsolutePointerMove> for OutgoingAbsolutePointerMove {
+    type Error = eros::ErrorUnion;
+
+    fn try_from(movement: AbsolutePointerMove) -> eros::Result<Self> {
+        let mut writer = begin_control_message(WireControlMessageTag::AbsolutePointerMove)?;
+        writer
+            .write_be(&WireAbsolutePointerMove {
+                screen_id: movement.screen_id.0,
+                x: movement.position.x,
+                y: movement.position.y,
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to encode absolute pointer movement for screen {}",
+                    movement.screen_id.0
+                )
+            })?;
+        let mut message = finish_control_message(writer);
+        message.delivery = Delivery::Unreliable;
+        Ok(Self(message))
+    }
+}
+
+impl From<OutgoingAbsolutePointerMove> for TransportMessage {
+    fn from(movement: OutgoingAbsolutePointerMove) -> Self {
+        movement.0
+    }
+}
+
 impl TryFrom<TransportMessage> for ControlMessage {
     type Error = eros::ErrorUnion;
 
@@ -591,13 +629,7 @@ impl TryFrom<TransportMessage> for ControlMessage {
             );
         }
 
-        if message.delivery != Delivery::ReliableOrdered {
-            eros::bail!(
-                "Cannot decode Control message with delivery {:?}",
-                message.delivery
-            );
-        }
-
+        let delivery = message.delivery;
         let mut reader = Cursor::new(message.payload);
         let tag = reader
             .read_be::<WireControlMessageTag>()
@@ -666,7 +698,36 @@ impl TryFrom<TransportMessage> for ControlMessage {
                     })?,
                 })
             }
+            WireControlMessageTag::AbsolutePointerMove => {
+                let wire = reader
+                    .read_be::<WireAbsolutePointerMove>()
+                    .with_context(|| "Failed to decode absolute pointer movement")?;
+                Self::AbsolutePointerMove(AbsolutePointerMove {
+                    screen_id: ScreenId::try_from(wire.screen_id).with_context(|| {
+                        format!(
+                            "Failed to decode absolute pointer movement screen ID {}",
+                            wire.screen_id
+                        )
+                    })?,
+                    position: NormalizedPosition {
+                        x: wire.x,
+                        y: wire.y,
+                    },
+                })
+            }
         };
+        let expected_delivery = if matches!(message, Self::AbsolutePointerMove(_)) {
+            Delivery::Unreliable
+        } else {
+            Delivery::ReliableOrdered
+        };
+        if delivery != expected_delivery {
+            eros::bail!(
+                "Control message has delivery {:?}, expected {:?}",
+                delivery,
+                expected_delivery
+            );
+        }
         let payload_length = u64::try_from(reader.get_ref().len())
             .with_context(|| "Failed to validate decoded Control payload length")?;
 

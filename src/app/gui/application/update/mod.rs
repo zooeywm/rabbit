@@ -56,6 +56,7 @@ where
                 self.handle_host_stream(message, sender).await
             }
             message @ (RootMessage::StopCurrentScreenStream
+            | RootMessage::AbsolutePointerMoved(..)
             | RootMessage::VideoFrameReceived(..)
             | RootMessage::VideoFrameReady(..)
             | RootMessage::VideoDecoderFinished(..)

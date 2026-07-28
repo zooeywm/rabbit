@@ -14,7 +14,10 @@ use crate::{
         platform::{ApplicationStack, RunnableApp},
         shutdown,
     },
-    infra::{ConnectionEndpoint, WorkerReaper, unsync_queue::UnsyncQueue},
+    infra::{
+        ConnectionEndpoint, GbmFramePipelineFrame, WorkerReaper, record_frames_to_mp4,
+        unsync_queue::UnsyncQueue,
+    },
     kernel::{
         frame_pipeline::{FrameDelivery, FramePipelineManager, FramePipelineParameters},
         screen_manager::{Screen, ScreenLayoutManager},
@@ -25,17 +28,14 @@ use crate::{
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Headless local recording for a concrete platform stack.
-#[cfg(target_os = "linux")]
 pub(crate) async fn run<Stack>(config: Config, options: RecordOptions) -> eros::Result<()>
 where
     Stack: ApplicationStack,
-    Stack::App: FramePipelineManager<Frame = crate::infra::GbmFramePipelineFrame>,
+    Stack::App: FramePipelineManager<Frame = GbmFramePipelineFrame>,
     <Stack::App as FramePipelineManager>::Subscription: Unpin,
 {
-    use crate::infra::record_frames_to_mp4;
-
     let _logger = init_logging(&config)?;
-    let output_path = config.resolve_recording_output_path()?;
+    let output_path = resolve_recording_output_path(&config)?;
     let duration_secs = options.duration_secs.unwrap_or(0);
     let screen_filter = options.screen.unwrap_or_default();
 
@@ -135,24 +135,12 @@ where
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 fn capture_permission_hint(prefix: &str) -> String {
     format!(
         "{prefix}. KMS capture usually needs CAP_SYS_ADMIN on the rabbit binary \
 (e.g. `make record` / `make setcap-release`, or \
 `sudo setcap cap_sys_admin+ep target/release/rabbit`)."
     )
-}
-
-/// Headless local recording for a concrete platform stack.
-#[cfg(not(target_os = "linux"))]
-pub(crate) async fn run<Stack>(config: Config, _options: RecordOptions) -> eros::Result<()>
-where
-    Stack: ApplicationStack,
-    <Stack::App as FramePipelineManager>::Subscription: Unpin,
-{
-    let _ = init_logging(&config)?;
-    eros::bail!("Local screen recording (`rabbit record`) is currently supported on Linux only")
 }
 
 fn select_screen<App>(app: &App, configured_name: &str) -> eros::Result<Screen>
@@ -237,4 +225,121 @@ fn spawn_stop_triggers(cancellation: UnsyncQueue<()>, duration_secs: u64, output
         cancellation.push(());
     })
     .detach();
+}
+
+fn resolve_recording_output_path(config: &Config) -> eros::Result<PathBuf> {
+    let configured = config.recording.output_path.trim();
+    if configured.is_empty() {
+        let base = default_videos_rabbit_dir()?;
+        std::fs::create_dir_all(&base)
+            .with_context(|| format!("Failed to create recording directory {}", base.display()))?;
+        return Ok(base.join(default_recording_file_name()));
+    }
+
+    let path = PathBuf::from(expand_user_path(configured));
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "m4v" | "mov"
+            )
+        })
+    {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create recording parent directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+        return Ok(path);
+    }
+
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("Failed to create recording directory {}", path.display()))?;
+    Ok(path.join(default_recording_file_name()))
+}
+
+fn default_videos_rabbit_dir() -> eros::Result<PathBuf> {
+    if let Some(user_dirs) = directories::UserDirs::new()
+        && let Some(videos) = user_dirs.video_dir()
+    {
+        return Ok(videos.join(crate::app::config::APP_NAME));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok(PathBuf::from(home)
+            .join("Videos")
+            .join(crate::app::config::APP_NAME));
+    }
+    Ok(PathBuf::from("Videos").join(crate::app::config::APP_NAME))
+}
+
+fn default_recording_file_name() -> String {
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    let format = time::macros::format_description!("[year][month][day]-[hour][minute][second]");
+    let stamp = now.format(&format).unwrap_or_else(|_| "recording".into());
+    format!("rabbit-{stamp}.mp4")
+}
+
+fn expand_user_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}{}{rest}", std::path::MAIN_SEPARATOR);
+    }
+    if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return home;
+    }
+    path.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_videos_rabbit_dir, resolve_recording_output_path};
+    use crate::app::config::Config;
+
+    #[test]
+    fn resolves_recording_output_file_or_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("rabbit-record-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("temp directory");
+
+        let file = directory.join("clip.mp4");
+        let mut config = Config::default();
+        config.recording.output_path = file.to_string_lossy().into_owned();
+        assert_eq!(
+            resolve_recording_output_path(&config).expect("file path"),
+            file
+        );
+
+        config.recording.output_path = directory.to_string_lossy().into_owned();
+        let resolved = resolve_recording_output_path(&config).expect("directory path");
+        assert_eq!(resolved.parent(), Some(directory.as_path()));
+        assert!(
+            resolved
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rabbit-") && name.ends_with(".mp4"))
+        );
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn default_recording_directory_is_under_rabbit() {
+        let directory = default_videos_rabbit_dir().expect("videos directory");
+        assert_eq!(
+            directory.file_name().and_then(|name| name.to_str()),
+            Some("rabbit")
+        );
+    }
 }

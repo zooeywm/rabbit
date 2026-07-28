@@ -10,6 +10,9 @@ Thank you for contributing to Rabbit. The project values small, reviewable, and 
 - Keep each change focused on one clearly defined problem.
 - Do not mix unrelated refactoring or formatting with a functional change.
 - Keep platform implementations in `infra`, business capabilities and core data types in `kernel`, and workflow orchestration in `app`.
+- Do not suppress Rust's `dead_code` lint; remove unused code, exercise it in production, or place it behind a real module boundary.
+- Keep platform conditionals such as `cfg(target_os = ...)` and `cfg(unix)` inside platform modules. Generic modules must use a uniform platform interface.
+- Modules with child modules must use the `name/mod.rs` layout; do not combine `name.rs` with a sibling `name/` directory.
 
 ## Architecture
 
@@ -75,6 +78,22 @@ cargo xwin clippy --target x86_64-pc-windows-msvc
 ```
 
 If a verification step cannot be run, explain why in the handoff.
+
+## Linux Absolute Input Permission
+
+Remote absolute pointer injection uses `/dev/uinput`. Grant the user running
+Rabbit read/write access with a udev rule instead of running Rabbit as root:
+
+```shell
+sudo groupadd -f uinput
+sudo usermod -aG uinput "$USER"
+echo 'KERNEL=="uinput", GROUP="uinput", MODE:="0660"' \
+  | sudo tee /etc/udev/rules.d/99-rabbit-uinput.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --name-match=uinput
+```
+
+Log out and back in after changing group membership.
 
 ## Commit Convention
 

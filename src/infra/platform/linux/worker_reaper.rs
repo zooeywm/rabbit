@@ -73,21 +73,21 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use crate::infra::WorkerReaper;
+    use super::WorkerReaper;
 
     #[test]
     fn drains_queued_workers_before_shutdown() {
         let (reaper, handle) = WorkerReaper::new().expect("Test worker reaper should start");
-        let completed = Arc::new(AtomicBool::new(false));
-        let worker_completed = Arc::clone(&completed);
+        let joined = Arc::new(AtomicBool::new(false));
+        let worker_joined = joined.clone();
         let worker = std::thread::spawn(move || {
-            worker_completed.store(true, Ordering::Release);
+            worker_joined.store(true, Ordering::SeqCst);
         });
 
         handle.reap(worker);
         drop(handle);
         drop(reaper);
 
-        assert!(completed.load(Ordering::Acquire));
+        assert!(joined.load(Ordering::SeqCst));
     }
 }

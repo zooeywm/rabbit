@@ -15,6 +15,7 @@ use crate::app::{
     },
 };
 use crate::kernel::{
+    absolute_pointer::AbsolutePointerInjector as _,
     screen_configuration::ScreenResolutionStatus,
     screen_manager::ScreenLayoutManager,
     session::{SessionMessage, SessionRole},
@@ -111,7 +112,8 @@ where
                         );
                     }
                     SessionMessage::Control(ControlMessage::SetScreenStreams(_))
-                    | SessionMessage::Control(ControlMessage::RequestKeyFrame(_)) => {
+                    | SessionMessage::Control(ControlMessage::RequestKeyFrame(_))
+                    | SessionMessage::Control(ControlMessage::AbsolutePointerMove(_)) => {
                         warn!(
                             session_id = id.0,
                             "Controller role received host-only control message"
@@ -286,6 +288,48 @@ where
                     screen_id = screen_id.0,
                     "Screen stream stop received"
                 );
+                Ok(true)
+            }
+            HostControlDecision::AbsolutePointerMove(movement) => {
+                let has_active_stream = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == id)
+                    .is_some_and(|session| {
+                        session.screen_streams.contains_key(&movement.screen_id)
+                    });
+                if !has_active_stream {
+                    warn!(
+                        event = "absolute_pointer_stream_missing",
+                        session_id = id.0,
+                        screen_id = movement.screen_id.get(),
+                        "Ignored absolute pointer movement without an active screen stream"
+                    );
+                    return Ok(true);
+                }
+                let Some(screen) = self.model.app.screen(&movement.screen_id).cloned() else {
+                    warn!(
+                        event = "absolute_pointer_screen_missing",
+                        session_id = id.0,
+                        screen_id = movement.screen_id.get(),
+                        "Ignored absolute pointer movement for an unavailable screen"
+                    );
+                    return Ok(true);
+                };
+                if let Err(error) = self.absolute_pointer_injector.move_absolute(
+                    movement,
+                    &screen,
+                    self.model.app.screens(),
+                ) {
+                    warn!(
+                        event = "absolute_pointer_injection_failed",
+                        session_id = id.0,
+                        screen_id = movement.screen_id.get(),
+                        error = ?error,
+                        "Failed to inject absolute pointer movement"
+                    );
+                }
                 Ok(true)
             }
             HostControlDecision::Ignore => {

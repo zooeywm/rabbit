@@ -117,6 +117,13 @@ impl ScreenStreamState {
         }
     }
 
+    pub(crate) fn streaming_target(&self) -> Option<&ScreenStreamTarget> {
+        match self {
+            Self::Streaming(target) => Some(target),
+            _ => None,
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
         *self = Self::Idle;
     }

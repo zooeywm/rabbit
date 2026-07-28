@@ -1,7 +1,12 @@
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
+};
 
-use slint::ComponentHandle as _;
 use tracing::info;
+
+mod record;
 
 use crate::{
     app::{
@@ -11,37 +16,37 @@ use crate::{
         platform::{ApplicationStack, RemoteVideoStack},
     },
     infra::{
-        ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,
-        WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsDecodedFrame,
-        WindowsScreenLayoutManagerState, WindowsVideoDecoder, WindowsVideoEncoder, WorkerReaper,
-        WorkerReaperHandle,
+        ConnectionEndpoint, GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder,
+        GbmFramePipelineManagerState, KmsScreenCaptureManagerState, LinuxAbsolutePointerInjector,
+        NativeVideoRenderer, NativeVideoViewport, NiriScreenLayoutManagerState,
+        OpenGlVideoRenderer, WorkerReaper, WorkerReaperHandle,
     },
-    kernel::{session::ReceivedVideoFrame, video_renderer::VideoRenderer as _},
+    kernel::session::ReceivedVideoFrame,
 };
 
-enum WindowsApplicationStack {
-    WgcD3d11,
+enum LinuxApplicationStack {
+    NiriKmsGbm,
 }
 
-pub(crate) struct WgcD3d11ApplicationStack;
+pub(crate) struct NiriKmsGbmApplicationStack;
 
 #[cfg(test)]
-pub(crate) use WgcD3d11ApplicationStack as TestApplicationStack;
+pub(crate) use NiriKmsGbmApplicationStack as TestApplicationStack;
 
 pub(crate) fn run(config: Config) -> eros::Result<()> {
     match select_application_stack(&config) {
-        WindowsApplicationStack::WgcD3d11 => {
-            crate::app::gui::run::<WgcD3d11ApplicationStack>(config)
+        LinuxApplicationStack::NiriKmsGbm => {
+            crate::app::gui::run::<NiriKmsGbmApplicationStack>(config)
         }
     }
 }
 
 pub(crate) fn run_headless(config: Config) -> eros::Result<()> {
     match select_application_stack(&config) {
-        WindowsApplicationStack::WgcD3d11 => {
+        LinuxApplicationStack::NiriKmsGbm => {
             let runtime =
                 compio::runtime::Runtime::new().expect("Headless Compio runtime should start");
-            runtime.block_on(crate::app::headless::run::<WgcD3d11ApplicationStack>(
+            runtime.block_on(crate::app::headless::run::<NiriKmsGbmApplicationStack>(
                 config,
             ))
         }
@@ -53,42 +58,62 @@ pub(crate) fn run_record(
     options: crate::app::cli::RecordOptions,
 ) -> eros::Result<()> {
     match select_application_stack(&config) {
-        WindowsApplicationStack::WgcD3d11 => {
+        LinuxApplicationStack::NiriKmsGbm => {
             let runtime =
                 compio::runtime::Runtime::new().expect("Record Compio runtime should start");
-            runtime.block_on(crate::app::record::run::<WgcD3d11ApplicationStack>(
-                config, options,
-            ))
+            runtime.block_on(record::run::<NiriKmsGbmApplicationStack>(config, options))
         }
     }
 }
 
-/// Selects the Windows media backend.
-///
-/// The WGC + D3D11 + Media Foundation stack is the only wired option and trails
-/// the Linux product path in feature completeness. Keep parity work behind this
-/// stack boundary.
-fn select_application_stack(_config: &Config) -> WindowsApplicationStack {
-    info!(
-        event = "app_platform_stack_selected",
-        stack = WgcD3d11ApplicationStack::name(),
-        "Selected Windows application backend stack"
-    );
-    WindowsApplicationStack::WgcD3d11
+pub(crate) fn install_shutdown_handlers() {
+    static SIGNAL_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    // SAFETY: handler only touches atomics and may call `_exit` (async-signal-safe).
+    unsafe extern "C" fn on_stop_signal(_: libc::c_int) {
+        let count = SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst);
+        if count >= 1 {
+            unsafe { libc::_exit(130) };
+        }
+        crate::app::shutdown::request();
+    }
+
+    unsafe {
+        let handler = on_stop_signal as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+    }
 }
 
-impl ApplicationStack for WgcD3d11ApplicationStack {
+/// Selects the Linux media backend.
+///
+/// Today only the niri + KMS + GBM + GStreamer stack is wired. Additional
+/// stacks should become new `LinuxApplicationStack` variants rather than
+/// inlining platform choice into session or GUI code.
+fn select_application_stack(_config: &Config) -> LinuxApplicationStack {
+    let niri_socket_present = std::env::var_os("NIRI_SOCKET").is_some();
+    info!(
+        event = "app_platform_stack_selected",
+        stack = NiriKmsGbmApplicationStack::name(),
+        niri_socket_present,
+        "Selected Linux application backend stack"
+    );
+    LinuxApplicationStack::NiriKmsGbm
+}
+
+impl ApplicationStack for NiriKmsGbmApplicationStack {
     type App = App<
-        WindowsScreenLayoutManagerState,
-        WgcScreenCaptureManagerState,
-        WgcFramePipelineManagerState,
+        NiriScreenLayoutManagerState,
+        KmsScreenCaptureManagerState,
+        GbmFramePipelineManagerState,
     >;
     type RemoteVideo = RemoteVideo;
     type RemoteVideoViewStack = RemoteVideoViewStack;
-    type ScreenStreamEncoder = WindowsVideoEncoder;
+    type ScreenStreamEncoder = GStreamerVideoEncoder;
+    type AbsolutePointerInjector = LinuxAbsolutePointerInjector;
 
     fn name() -> &'static str {
-        "windows-wgc-d3d11-mf"
+        "linux/niri-kms-gbm-gstreamer-wayland"
     }
 
     fn create_app(
@@ -115,15 +140,27 @@ impl ApplicationStack for WgcD3d11ApplicationStack {
             worker_reaper,
         ))
     }
+
+    fn create_absolute_pointer_injector() -> Self::AbsolutePointerInjector {
+        LinuxAbsolutePointerInjector::new()
+    }
 }
 
 pub(crate) struct RemoteVideoViewStack;
 
 impl VideoViewStack for RemoteVideoViewStack {
-    type Frame = WindowsDecodedFrame;
+    type Frame = GStreamerDecodedFrame;
     type NativeRenderer = NativeVideoRenderer;
     type OpenGlRenderer = OpenGlVideoRenderer;
     type NativeViewport = NativeVideoViewport;
+
+    fn select_slint_backend() -> eros::Result<()> {
+        slint::BackendSelector::new()
+            .with_winit_window_attributes_hook(|attributes| attributes.with_transparent(true))
+            .require_opengl_es_with_version(3, 0)
+            .select()
+            .map_err(Into::into)
+    }
 
     fn create_native_renderer(
         window: &slint::Window,
@@ -182,31 +219,27 @@ impl VideoViewStack for RemoteVideoViewStack {
                 height: 0,
             });
         }
-        let scale = window.window().scale_factor();
         Ok(NativeVideoViewport {
-            x: physical_pixels(window.get_video_viewport_x(), scale)?.min(i32::MAX as u32) as i32,
-            y: physical_pixels(window.get_video_viewport_y(), scale)?.min(i32::MAX as u32) as i32,
-            width: physical_pixels(window.get_video_viewport_width(), scale)?.min(i32::MAX as u32)
-                as i32,
-            height: physical_pixels(window.get_video_viewport_height(), scale)?.min(i32::MAX as u32)
-                as i32,
+            x: logical_pixels(window.get_video_viewport_x())?,
+            y: logical_pixels(window.get_video_viewport_y())?,
+            width: logical_pixels(window.get_video_viewport_width())?,
+            height: logical_pixels(window.get_video_viewport_height())?,
         })
     }
 }
 
-fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
-    let physical = logical * scale;
-    if !physical.is_finite() || physical < 0.0 || physical > u32::MAX as f32 {
-        eros::bail!("Invalid physical video viewport coordinate {}", physical);
+fn logical_pixels(logical: f32) -> eros::Result<i32> {
+    if !logical.is_finite() || logical < 0.0 || logical > i32::MAX as f32 {
+        eros::bail!("Invalid logical video viewport coordinate {}", logical);
     }
-    Ok(physical.round() as u32)
+    Ok(logical.round() as i32)
 }
 
 pub(crate) struct RemoteVideo;
 
 impl RemoteVideoStack for RemoteVideo {
-    type Decoder = WindowsVideoDecoder;
-    type Frame = WindowsDecodedFrame;
+    type Decoder = GStreamerVideoDecoder;
+    type Frame = GStreamerDecodedFrame;
 
     fn run_decoder<Inputs, PresentFrame, PresentFuture>(
         inputs: Inputs,
@@ -218,9 +251,8 @@ impl RemoteVideoStack for RemoteVideo {
         PresentFrame: FnMut(Self::Frame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        WindowsVideoDecoder::run_with_probing(inputs, present_frame, enable_probing)
+        GStreamerVideoDecoder::run_with_probing(inputs, present_frame, enable_probing)
     }
 }
 
-#[path = "windows_deps.rs"]
 mod deps;

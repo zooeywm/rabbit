@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 
 use crate::{
-    app::model::{ApplicationModel, SessionKey},
+    app::model::ApplicationModel,
     app::platform::ApplicationStack,
     kernel::{
         screen_manager::ScreenId,
@@ -74,15 +74,6 @@ where
         .map(|session| session.send.id())
 }
 
-/// Whether the model already tracks a session with this identity key.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn has_session_key<Stack>(model: &ApplicationModel<Stack>, key: &SessionKey) -> bool
-where
-    Stack: ApplicationStack,
-{
-    model.has_session(key)
-}
-
 /// Rebuilds the flat remote-screen index used by the remote-devices UI.
 pub fn rebuild_remote_screen_entries<Stack>(model: &mut ApplicationModel<Stack>)
 where
@@ -102,8 +93,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::kernel::session::SessionRole;
+    use crate::{app::model::SessionKey, kernel::session::SessionRole};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]

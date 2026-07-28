@@ -24,6 +24,8 @@ pub struct PeerCapabilities {
     pub max_screens: u8,
     /// Encoder profiles the peer can host (empty for pure controllers is OK).
     pub encoder_profiles: Vec<EncoderProfileTag>,
+    /// Host accepts absolute pointer movements from a controller.
+    pub absolute_pointer: bool,
 }
 
 impl Default for PeerCapabilities {
@@ -31,6 +33,7 @@ impl Default for PeerCapabilities {
         Self {
             max_screens: ScreenId::MAX.saturating_add(1),
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+            absolute_pointer: true,
         }
     }
 }
@@ -44,6 +47,7 @@ impl PeerCapabilities {
         Self {
             max_screens,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+            absolute_pointer: true,
         }
     }
 }

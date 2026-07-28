@@ -3,6 +3,7 @@
 use crate::{
     app::runtime::host_policy::{HostStreamEvaluation, evaluate_set_screen_streams},
     kernel::{
+        absolute_pointer::AbsolutePointerMove,
         connection_request::PeerCapabilities,
         domain_error::DomainError,
         screen_manager::{Screen, ScreenId},
@@ -18,6 +19,7 @@ pub enum HostControlDecision {
     SetScreenStreams(Result<HostStreamEvaluation, DomainError>),
     RequestKeyFrame(ScreenId),
     StopScreenStream(ScreenId),
+    AbsolutePointerMove(AbsolutePointerMove),
     /// Message is not meaningful for the local host role.
     Ignore,
 }
@@ -45,6 +47,9 @@ pub fn classify_host_session_message(
         }
         SessionMessage::Control(ControlMessage::StopScreenStream(stop)) => {
             HostControlDecision::StopScreenStream(stop.screen_id)
+        }
+        SessionMessage::Control(ControlMessage::AbsolutePointerMove(movement)) => {
+            HostControlDecision::AbsolutePointerMove(movement)
         }
         SessionMessage::Control(_)
         | SessionMessage::Video(_)

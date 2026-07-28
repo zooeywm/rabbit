@@ -177,12 +177,7 @@ impl futures_core::Stream for GbmFramePipelineSubscription {
                 SubscriptionFrames::Latest(frames) => Pin::new(frames).poll_next(context),
                 SubscriptionFrames::Reliable(receiver) => {
                     let mut recv = receiver.recv_async();
-                    Pin::new(&mut recv)
-                        .poll(context)
-                        .map(|result| match result {
-                            Ok(item) => Some(item),
-                            Err(_) => None,
-                        })
+                    Pin::new(&mut recv).poll(context).map(Result::ok)
                 }
             };
             match next {

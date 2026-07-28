@@ -10,6 +10,9 @@
 - 每次改动聚焦一个定义清晰的问题。
 - 不要把无关重构或格式化混进功能变更。
 - 平台实现放在 `infra`，业务能力与核心数据类型放在 `kernel`，工作流编排放在 `app`。
+- 禁止抑制 Rust 的 `dead_code` lint；应删除未使用代码、在生产路径中实际使用，或放入真实的模块边界。
+- `cfg(target_os = ...)`、`cfg(unix)` 等平台条件编译只能写在 platform 模块内；通用模块必须通过统一的平台接口调用。
+- 含子模块的模块必须使用 `name/mod.rs` 布局；禁止同时使用 `name.rs` 与同级 `name/` 目录。
 
 ## 架构
 
@@ -74,6 +77,21 @@ cargo xwin clippy --target x86_64-pc-windows-msvc
 ```
 
 某步无法运行时，在交接中说明原因。
+
+## Linux 绝对输入权限
+
+远程绝对鼠标注入使用 `/dev/uinput`。请通过 udev 规则为运行 Rabbit 的用户授予读写权限，不要以 root 身份运行 Rabbit：
+
+```shell
+sudo groupadd -f uinput
+sudo usermod -aG uinput "$USER"
+echo 'KERNEL=="uinput", GROUP="uinput", MODE:="0660"' \
+  | sudo tee /etc/udev/rules.d/99-rabbit-uinput.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --name-match=uinput
+```
+
+修改用户组后需注销并重新登录。
 
 ## 提交约定
 

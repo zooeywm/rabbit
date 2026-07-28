@@ -14,8 +14,9 @@ use crate::app::{
     },
     platform::ApplicationStack,
 };
-use crate::kernel::screen_configuration::{
-    RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams,
+use crate::kernel::{
+    absolute_pointer::{AbsolutePointerMove, map_viewport_position},
+    screen_configuration::{RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams},
 };
 
 impl<Stack> RootApplication<Stack>
@@ -28,6 +29,40 @@ where
         sender: &MessageSender,
     ) -> eros::Result<bool> {
         match message {
+            RootMessage::AbsolutePointerMoved(event) => {
+                let Some(target) = self.remote_stream.screen_stream.streaming_target() else {
+                    return Ok(false);
+                };
+                let Some(position) = map_viewport_position(
+                    event.x,
+                    event.y,
+                    event.viewport_width,
+                    event.viewport_height,
+                    target.frame_size,
+                ) else {
+                    return Ok(false);
+                };
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == target.session_id)
+                else {
+                    return Ok(false);
+                };
+                if !session.peer_capabilities.absolute_pointer {
+                    return Ok(false);
+                }
+                session
+                    .send
+                    .send_absolute_pointer_move(AbsolutePointerMove {
+                        screen_id: target.screen_id,
+                        position,
+                    })
+                    .await
+                    .with_context(|| "Failed to send absolute pointer movement")?;
+                Ok(false)
+            }
             RootMessage::StopCurrentScreenStream => {
                 let Some((session_id, screen_id)) =
                     self.remote_stream.screen_stream.active_screen()

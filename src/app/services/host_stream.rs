@@ -82,15 +82,6 @@ fn resolve_desired_stream(
     }
 }
 
-/// Convenience when the caller already has a slice of local screens.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn plan_preserved_streams_from_screens(
-    request: SetScreenStreams,
-    screens: &[Screen],
-) -> (ScreenStreamsConfigured, Vec<HostStreamPlan>) {
-    plan_preserved_streams(request, |id| screens.iter().find(|s| s.id == *id).cloned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +137,9 @@ mod tests {
             ],
         };
 
-        let (configured, plans) = plan_preserved_streams_from_screens(request, &screens);
+        let (configured, plans) = plan_preserved_streams(request, |id| {
+            screens.iter().find(|screen| screen.id == *id).cloned()
+        });
 
         assert_eq!(configured.request_id, ScreenStreamRequestId(3));
         assert_eq!(configured.outcomes.len(), 2);

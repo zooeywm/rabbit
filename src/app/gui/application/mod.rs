@@ -106,6 +106,7 @@ where
     listener: ListenerState,
     remote_stream: RemoteStreamState<Stack::RemoteVideo>,
     host_stream: HostStreamState,
+    absolute_pointer_injector: Stack::AbsolutePointerInjector,
     _logger_guard: LoggerGuard,
 }
 
@@ -213,23 +214,22 @@ where
             return false;
         }
         // Supersede a draining registration for the same peer key.
-        if let Some(SessionPhase::Draining) = existing_phase {
-            if let Some(old_id) = self
+        if let Some(SessionPhase::Draining) = existing_phase
+            && let Some(old_id) = self
                 .model
                 .sessions
                 .iter()
                 .find(|session| session.key == key)
                 .map(|session| session.send.id())
-            {
-                info!(
-                    event = "session_reconnect_supersede",
-                    session_id = old_id.0,
-                    %peer_address,
-                    role = ?send.role(),
-                    "Superseding draining session for reconnect"
-                );
-                self.model.remove_session(old_id);
-            }
+        {
+            info!(
+                event = "session_reconnect_supersede",
+                session_id = old_id.0,
+                %peer_address,
+                role = ?send.role(),
+                "Superseding draining session for reconnect"
+            );
+            self.model.remove_session(old_id);
         }
 
         let session_id = send.id();
@@ -472,6 +472,7 @@ where
                 pending_stops: HashSet::new(),
                 timeout_policy: SessionTimeoutPolicy::default(),
             },
+            absolute_pointer_injector: Stack::create_absolute_pointer_injector(),
             _logger_guard: logger_guard,
         })
     }
@@ -577,6 +578,11 @@ where
                     screen_id,
                 } => RootMessage::VideoFrameReady(session_id, screen_id),
                 GuiIntent::VideoRendererFailed(error) => RootMessage::VideoRendererFailed(error),
+                GuiIntent::AbsolutePointerMoved(mailbox) => RootMessage::AbsolutePointerMoved(
+                    mailbox
+                        .take()
+                        .expect("absolute pointer notification must carry its latest position"),
+                ),
                 GuiIntent::Close => RootMessage::Close,
             },
             Either::Right((Err(_), _)) => RootMessage::Close,

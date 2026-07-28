@@ -11,11 +11,12 @@ use std::collections::HashMap;
 use eros::Context as _;
 
 use crate::kernel::{
+    absolute_pointer::AbsolutePointerMove,
     screen_configuration::{
         RequestKeyFrame, ScreenStreamsConfigured, SetScreenStreams, StopScreenStream,
     },
     screen_manager::ScreenId,
-    session_control::{ControlMessage, OutgoingScreenList},
+    session_control::{ControlMessage, OutgoingAbsolutePointerMove, OutgoingScreenList},
     transport::{
         Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
     },
@@ -183,6 +184,28 @@ where
         self.send_control(RequestKeyFrame { screen_id })
             .await
             .with_context(|| format!("Failed to request a key frame for screen {}", screen_id.0))
+    }
+
+    pub async fn send_absolute_pointer_move(
+        &self,
+        movement: AbsolutePointerMove,
+    ) -> eros::Result<()> {
+        require_role(
+            self.role,
+            SessionRole::Controller,
+            "send absolute pointer movement",
+        )?;
+        let outgoing = OutgoingAbsolutePointerMove::try_from(movement)?;
+        let message = TransportMessage::from(outgoing);
+        self.send
+            .send_unreliable(message.channel, message.payload)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to send absolute pointer movement for screen {}",
+                    movement.screen_id.0
+                )
+            })
     }
 
     pub async fn send_screen_streams_configured(
