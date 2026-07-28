@@ -68,6 +68,12 @@ cargo test
 cargo clippy --all-targets
 ```
 
+For Windows-specific changes, cross-check the Windows target with `cargo-xwin`:
+
+```shell
+cargo xwin clippy --target x86_64-pc-windows-msvc
+```
+
 If a verification step cannot be run, explain why in the handoff.
 
 ## Commit Convention

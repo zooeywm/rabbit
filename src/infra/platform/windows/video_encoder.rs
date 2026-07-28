@@ -464,12 +464,15 @@ impl MfH264Encoder {
             dwStatus: 0,
             pEvents: std::mem::ManuallyDrop::new(None),
         };
+        let mut status = 0;
         let result = unsafe {
             self.transform
-                .ProcessOutput(0, std::slice::from_mut(&mut output), std::ptr::null_mut())
+                .ProcessOutput(0, std::slice::from_mut(&mut output), &mut status)
         };
+        let sample = unsafe { std::mem::ManuallyDrop::take(&mut output.pSample) };
+        let _events = unsafe { std::mem::ManuallyDrop::take(&mut output.pEvents) };
         match result {
-            Ok(()) => Ok(std::mem::ManuallyDrop::into_inner(output.pSample)),
+            Ok(()) => Ok(sample),
             Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => Ok(None),
             Err(error) => {
                 Err(error).with_context(|| "Failed to receive H.264 encoder output")?;

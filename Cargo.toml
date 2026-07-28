@@ -48,6 +48,7 @@ wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
 windows = { version = "0.62.2", features = [
     "Foundation",
     "Foundation_Collections",
@@ -57,16 +58,21 @@ windows = { version = "0.62.2", features = [
     "Graphics_DirectX_Direct3D11",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D10",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Media",
     "Win32_Media_MediaFoundation",
+    "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
 ] }

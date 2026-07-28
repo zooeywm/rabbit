@@ -67,6 +67,12 @@ cargo test
 cargo clippy --all-targets
 ```
 
+Windows 专属改动使用 `cargo-xwin` 交叉检查 Windows 目标：
+
+```shell
+cargo xwin clippy --target x86_64-pc-windows-msvc
+```
+
 某步无法运行时，在交接中说明原因。
 
 ## 提交约定

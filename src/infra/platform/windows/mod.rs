@@ -1,3 +1,4 @@
+mod client_video_probe;
 mod frame_pipeline;
 mod screen_capture;
 mod screen_layout;
