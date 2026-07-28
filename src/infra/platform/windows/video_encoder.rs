@@ -6,6 +6,7 @@ use futures_util::{FutureExt as _, StreamExt as _};
 use tracing::{debug, info, warn};
 use windows::{
     Win32::{
+        Foundation::RECT,
         Graphics::{
             Direct3D11::{
                 D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER,
@@ -673,21 +674,28 @@ impl MfH264Encoder {
     fn convert_to_nv12(&mut self, texture: &ID3D11Texture2D) -> eros::Result<ID3D11Texture2D> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
-        if desc.Format == DXGI_FORMAT_NV12 {
+        if desc.Format == DXGI_FORMAT_NV12
+            && desc.Width == self.frame_size.width
+            && desc.Height == self.frame_size.height
+        {
             return Ok(texture.clone());
         }
         if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
             eros::bail!("WGC frame has unsupported D3D11 format {:?}", desc.Format);
         }
+        let source_size = PixelSize {
+            width: desc.Width,
+            height: desc.Height,
+        };
         let converter = match &mut self.converter {
-            Some(converter) if converter.matches(desc.Width, desc.Height) => converter,
+            Some(converter) if converter.matches(source_size, self.frame_size) => converter,
             _ => {
                 self.converter = Some(BgraToNv12Converter::new(
                     &self.d3d,
                     &self.video,
                     &self.video_context,
-                    desc.Width,
-                    desc.Height,
+                    source_size,
+                    self.frame_size,
                     self.frame_duration_hns,
                 )?);
                 self.converter
@@ -712,8 +720,8 @@ impl Drop for MfH264Encoder {
 }
 
 struct BgraToNv12Converter {
-    width: u32,
-    height: u32,
+    source_size: PixelSize,
+    output_size: PixelSize,
     output: ID3D11Texture2D,
     enumerator: ID3D11VideoProcessorEnumerator,
     output_view: windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorOutputView,
@@ -727,28 +735,40 @@ impl BgraToNv12Converter {
         d3d: &ID3D11Device,
         video: &ID3D11VideoDevice,
         video_context: &ID3D11VideoContext,
-        width: u32,
-        height: u32,
+        source_size: PixelSize,
+        output_size: PixelSize,
         frame_duration_hns: i64,
     ) -> eros::Result<Self> {
         let rate = frame_rate_rational_from_duration(frame_duration_hns);
         let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputFrameRate: rate,
-            InputWidth: width,
-            InputHeight: height,
+            InputWidth: source_size.width,
+            InputHeight: source_size.height,
             OutputFrameRate: rate,
-            OutputWidth: width,
-            OutputHeight: height,
+            OutputWidth: output_size.width,
+            OutputHeight: output_size.height,
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
         };
         let enumerator = unsafe { video.CreateVideoProcessorEnumerator(&content_desc) }
             .with_context(|| "Failed to create D3D11 video processor enumerator")?;
         let processor = unsafe { video.CreateVideoProcessor(&enumerator, 0) }
             .with_context(|| "Failed to create D3D11 video processor")?;
+        let source_rect = video_processor_rect(source_size.width, source_size.height)?;
+        let output_rect = video_processor_rect(output_size.width, output_size.height)?;
+        unsafe {
+            video_context.VideoProcessorSetStreamSourceRect(
+                &processor,
+                0,
+                true,
+                Some(&source_rect),
+            );
+            video_context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&output_rect));
+            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&output_rect));
+        }
         let output_desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
+            Width: output_size.width,
+            Height: output_size.height,
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_NV12,
@@ -786,10 +806,18 @@ impl BgraToNv12Converter {
         .with_context(|| "Failed to create NV12 video processor output view")?;
         let output_view = output_view.with_context(|| "D3D11 returned no processor output view")?;
         set_video_processor_color_space(video_context, &processor);
+        debug!(
+            event = "windows_video_processor_scaler_configured",
+            source_width = source_size.width,
+            source_height = source_size.height,
+            output_width = output_size.width,
+            output_height = output_size.height,
+            "Configured full-frame D3D11 video processor scaling"
+        );
 
         Ok(Self {
-            width,
-            height,
+            source_size,
+            output_size,
             output,
             enumerator,
             output_view,
@@ -799,8 +827,8 @@ impl BgraToNv12Converter {
         })
     }
 
-    fn matches(&self, width: u32, height: u32) -> bool {
-        self.width == width && self.height == height
+    fn matches(&self, source_size: PixelSize, output_size: PixelSize) -> bool {
+        self.source_size == source_size && self.output_size == output_size
     }
 
     fn convert(&mut self, texture: &ID3D11Texture2D) -> eros::Result<ID3D11Texture2D> {
@@ -849,6 +877,16 @@ impl BgraToNv12Converter {
         .with_context(|| "Failed to convert BGRA WGC texture to NV12")?;
         Ok(self.output.clone())
     }
+}
+
+fn video_processor_rect(width: u32, height: u32) -> eros::Result<RECT> {
+    Ok(RECT {
+        left: 0,
+        top: 0,
+        right: i32::try_from(width).with_context(|| "D3D11 video processor width exceeds i32")?,
+        bottom: i32::try_from(height)
+            .with_context(|| "D3D11 video processor height exceeds i32")?,
+    })
 }
 
 fn set_video_processor_color_space(
