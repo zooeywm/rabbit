@@ -177,10 +177,12 @@ impl futures_core::Stream for GbmFramePipelineSubscription {
                 SubscriptionFrames::Latest(frames) => Pin::new(frames).poll_next(context),
                 SubscriptionFrames::Reliable(receiver) => {
                     let mut recv = receiver.recv_async();
-                    Pin::new(&mut recv).poll(context).map(|result| match result {
-                        Ok(item) => Some(item),
-                        Err(_) => None,
-                    })
+                    Pin::new(&mut recv)
+                        .poll(context)
+                        .map(|result| match result {
+                            Ok(item) => Some(item),
+                            Err(_) => None,
+                        })
                 }
             };
             match next {
@@ -390,11 +392,9 @@ impl FramePipelineSource {
                         publisher.borrow_mut().publish(frame);
                     }
                     (FrameFanout::Latest(publisher), Err(error)) => {
-                        publisher.borrow_mut().fail(
-                            error
-                                .with_context(|| "GPU frame pipeline failed")
-                                .into(),
-                        );
+                        publisher
+                            .borrow_mut()
+                            .fail(error.with_context(|| "GPU frame pipeline failed").into());
                         return;
                     }
                     (FrameFanout::Reliable { .. }, _) => return,
@@ -903,13 +903,28 @@ mod tests {
             let shared_parameters = parameters(1920, 1080);
             let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
             let first = manager
-                .subscribe(&ScreenId(1), shared_parameters, frame_rate(60), FrameDelivery::Latest)
+                .subscribe(
+                    &ScreenId(1),
+                    shared_parameters,
+                    frame_rate(60),
+                    FrameDelivery::Latest,
+                )
                 .expect("First frame pipeline subscription should be created");
             let second = manager
-                .subscribe(&ScreenId(1), shared_parameters, frame_rate(120), FrameDelivery::Latest)
+                .subscribe(
+                    &ScreenId(1),
+                    shared_parameters,
+                    frame_rate(120),
+                    FrameDelivery::Latest,
+                )
                 .expect("Second frame pipeline subscription should be created");
             let different = manager
-                .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(90), FrameDelivery::Latest)
+                .subscribe(
+                    &ScreenId(1),
+                    parameters(1280, 720),
+                    frame_rate(90),
+                    FrameDelivery::Latest,
+                )
                 .expect("Different frame pipeline subscription should be created");
 
             assert!(Rc::ptr_eq(&first.source, &second.source));
@@ -978,7 +993,12 @@ mod tests {
             let first = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60), FrameDelivery::Latest)
+                    .subscribe(
+                        &ScreenId(1),
+                        parameters(1920, 1080),
+                        frame_rate(60),
+                        FrameDelivery::Latest,
+                    )
                     .expect("First frame pipeline subscription should be created")
             };
             let first_worker = deps
@@ -988,7 +1008,12 @@ mod tests {
             let second = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120), FrameDelivery::Latest)
+                    .subscribe(
+                        &ScreenId(1),
+                        parameters(1280, 720),
+                        frame_rate(120),
+                        FrameDelivery::Latest,
+                    )
                     .expect("Second frame pipeline subscription should be created")
             };
             let second_worker = deps
@@ -1015,13 +1040,23 @@ mod tests {
             let mut first = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1920, 1080), frame_rate(60), FrameDelivery::Latest)
+                    .subscribe(
+                        &ScreenId(1),
+                        parameters(1920, 1080),
+                        frame_rate(60),
+                        FrameDelivery::Latest,
+                    )
                     .expect("First frame pipeline subscription should be created")
             };
             let mut second = {
                 let manager = GbmFramePipelineManager::inj_ref_mut(&mut deps);
                 manager
-                    .subscribe(&ScreenId(1), parameters(1280, 720), frame_rate(120), FrameDelivery::Latest)
+                    .subscribe(
+                        &ScreenId(1),
+                        parameters(1280, 720),
+                        frame_rate(120),
+                        FrameDelivery::Latest,
+                    )
                     .expect("Second frame pipeline subscription should be created")
             };
             let sender = deps

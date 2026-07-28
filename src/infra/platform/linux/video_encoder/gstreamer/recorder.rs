@@ -184,7 +184,8 @@ impl GStreamerScreenRecorder {
             let vpp = create_required_element("vapostproc", "video-postprocessor")?;
             let filter = create_required_element("capsfilter", "video-postprocessor-output")?;
             filter.set_property("caps", vpp_caps);
-            let queue = create_pipeline_stage_queue("processed-frame-queue", RECORD_STAGE_QUEUE_BUFFERS)?;
+            let queue =
+                create_pipeline_stage_queue("processed-frame-queue", RECORD_STAGE_QUEUE_BUFFERS)?;
             // Default leaky=no: never discard.
             Some((vpp, filter, queue))
         } else {
@@ -205,9 +206,12 @@ impl GStreamerScreenRecorder {
         let sink = create_required_element("filesink", "file-output")?;
         sink.set_property(
             "location",
-            output_path
-                .to_str()
-                .with_context(|| format!("Recording path is not valid UTF-8: {}", output_path.display()))?,
+            output_path.to_str().with_context(|| {
+                format!(
+                    "Recording path is not valid UTF-8: {}",
+                    output_path.display()
+                )
+            })?,
         );
         sink.set_property("sync", false);
         sink.set_property("async", false);
@@ -348,9 +352,7 @@ impl GStreamerScreenRecorder {
             .checked_mul(self.next_frame_index)
             .with_context(|| "Recording PTS overflowed")?;
         {
-            let buffer = frame
-                .buffer
-                .make_mut();
+            let buffer = frame.buffer.make_mut();
             buffer.set_pts(Some(ClockTime::from_nseconds(pts)));
             buffer.set_dts(Some(ClockTime::from_nseconds(pts)));
             buffer.set_duration(Some(self.frame_duration));

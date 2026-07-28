@@ -23,8 +23,8 @@ mod worker;
 #[cfg(test)]
 pub(crate) use crate::infra::platform::screen_capture::kms::worker::empty_kms_frame;
 pub(crate) use crate::infra::platform::screen_capture::kms::worker::{
-    KmsCaptureLease, KmsCapturedFrame, KmsCapturedSource, KmsCompositionFallback, KmsFrameQueuePolicy,
-    KmsFrameReceiver,
+    KmsCaptureLease, KmsCapturedFrame, KmsCapturedSource, KmsCompositionFallback,
+    KmsFrameQueuePolicy, KmsFrameReceiver,
 };
 pub(crate) use composition::KmsCompositionTransform;
 pub(crate) use egl_context::{EglContext, EglDmaBufImage};
