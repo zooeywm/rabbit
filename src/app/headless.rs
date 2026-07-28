@@ -32,9 +32,9 @@ use crate::{
         unsync_queue::UnsyncQueue,
     },
     kernel::{
-        absolute_pointer::AbsolutePointerInjector as _,
         connection_request::PeerCapabilities,
         frame_pipeline::FramePipelineManager,
+        input::RemoteInputInjector as _,
         protocol::{PROTOCOL_NAME, protocol_version_string},
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{Session, SessionId, SessionMessage, SessionRecv, SessionRole},
@@ -79,7 +79,7 @@ where
     app.run_app().await?;
     let local_capabilities = PeerCapabilities::local_host(ScreenLayoutManager::screens(&app).len());
     let mut model = ApplicationModel::new(app, requester_name, local_capabilities);
-    let mut absolute_pointer_injector = Stack::create_absolute_pointer_injector();
+    let mut remote_input_injector = Stack::create_remote_input_injector();
     let screens = ScreenLayoutManager::screens(&model.app).to_vec();
     info!(
         event = "headless_screens_detected",
@@ -165,7 +165,7 @@ where
             HeadlessMessage::SessionMessage(id, message) => {
                 handle_session_message::<Stack>(
                     &mut model,
-                    &mut absolute_pointer_injector,
+                    &mut remote_input_injector,
                     id,
                     message,
                     &sender,
@@ -363,7 +363,7 @@ fn apply_headless_timeouts<Stack>(
 
 async fn handle_session_message<Stack>(
     model: &mut ApplicationModel<Stack>,
-    absolute_pointer_injector: &mut Stack::AbsolutePointerInjector,
+    remote_input_injector: &mut Stack::RemoteInputInjector,
     id: SessionId,
     message: SessionMessage,
     sender: &UnsyncQueue<HeadlessMessage>,
@@ -430,39 +430,38 @@ where
                 apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
             }
         }
-        HostControlDecision::AbsolutePointerMove(movement) => {
+        HostControlDecision::RemoteInput(input) => {
+            let screen_id = input.screen_id();
             let has_active_stream = model
                 .sessions
                 .iter()
                 .find(|session| session.send.id() == id)
-                .is_some_and(|session| session.screen_streams.contains_key(&movement.screen_id));
+                .is_some_and(|session| session.screen_streams.contains_key(&screen_id));
             if !has_active_stream {
                 warn!(
-                    event = "absolute_pointer_stream_missing",
+                    event = "remote_input_stream_missing",
                     session_id = id.0,
-                    screen_id = movement.screen_id.get(),
-                    "Ignored absolute pointer movement without an active screen stream"
+                    screen_id = screen_id.get(),
+                    "Ignored remote input without an active screen stream"
                 );
                 return Ok(());
             }
-            let Some(screen) = model.app.screen(&movement.screen_id).cloned() else {
+            let Some(screen) = model.app.screen(&screen_id).cloned() else {
                 warn!(
-                    event = "absolute_pointer_screen_missing",
+                    event = "remote_input_screen_missing",
                     session_id = id.0,
-                    screen_id = movement.screen_id.get(),
-                    "Ignored absolute pointer movement for an unavailable screen"
+                    screen_id = screen_id.get(),
+                    "Ignored remote input for an unavailable screen"
                 );
                 return Ok(());
             };
-            if let Err(error) =
-                absolute_pointer_injector.move_absolute(movement, &screen, model.app.screens())
-            {
+            if let Err(error) = remote_input_injector.inject(input, &screen, model.app.screens()) {
                 warn!(
-                    event = "absolute_pointer_injection_failed",
+                    event = "remote_input_injection_failed",
                     session_id = id.0,
-                    screen_id = movement.screen_id.get(),
+                    screen_id = screen_id.get(),
                     error = ?error,
-                    "Failed to inject absolute pointer movement"
+                    "Failed to inject remote input"
                 );
             }
         }

@@ -87,7 +87,9 @@ export component RabbitWindow inherits Window {
     callback disconnect-device(int);
     callback retry-connect();
     callback stop-stream();
-    callback absolute-pointer-moved(float, float, float, float);
+    callback remote-pointer-moved(float, float, float, float, float, float);
+    callback remote-mouse-button(PointerEventButton, bool);
+    callback remote-keyboard(string, bool, bool);
 
     // Keep every pixel outside the video viewport opaque while leaving the
     // viewport itself transparent for a native video surface below this window.
@@ -447,15 +449,51 @@ export component RabbitWindow inherits Window {
                             vertical-stretch: 1;
                             border-radius: root.video-fill-window-active ? 0px : 10px;
 
-                            TouchArea {
-                                pointer-event(event) => {
-                                    if event.kind == PointerEventKind.move {
-                                        root.absolute-pointer-moved(
-                                            self.mouse-x / 1px,
-                                            self.mouse-y / 1px,
-                                            self.width / 1px,
-                                            self.height / 1px,
-                                        );
+                            input-focus := FocusScope {
+                                width: 100%;
+                                height: 100%;
+                                key-pressed(event) => {
+                                    root.remote-keyboard(event.text, true, event.repeat);
+                                    accept
+                                }
+                                key-released(event) => {
+                                    root.remote-keyboard(event.text, false, false);
+                                    accept
+                                }
+
+                                TouchArea {
+                                    property <length> previous-x;
+                                    property <length> previous-y;
+                                    property <bool> previous-valid;
+
+                                    pointer-event(event) => {
+                                        if event.kind == PointerEventKind.down {
+                                            input-focus.focus();
+                                            self.previous-x = self.mouse-x;
+                                            self.previous-y = self.mouse-y;
+                                            self.previous-valid = true;
+                                            root.remote-mouse-button(event.button, true);
+                                        } else if event.kind == PointerEventKind.up {
+                                            root.remote-mouse-button(event.button, false);
+                                        } else if event.kind == PointerEventKind.cancel {
+                                            self.previous-valid = false;
+                                        } else if event.kind == PointerEventKind.move {
+                                            root.remote-pointer-moved(
+                                                self.mouse-x / 1px,
+                                                self.mouse-y / 1px,
+                                                self.previous-valid
+                                                    ? (self.mouse-x - self.previous-x) / 1px
+                                                    : 0,
+                                                self.previous-valid
+                                                    ? (self.mouse-y - self.previous-y) / 1px
+                                                    : 0,
+                                                self.width / 1px,
+                                                self.height / 1px,
+                                            );
+                                            self.previous-x = self.mouse-x;
+                                            self.previous-y = self.mouse-y;
+                                            self.previous-valid = true;
+                                        }
                                     }
                                 }
                             }

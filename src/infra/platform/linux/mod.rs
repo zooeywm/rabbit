@@ -1,9 +1,9 @@
-mod absolute_pointer;
 mod client_video_probe;
 mod dma_buf;
 mod egl_dma_buf;
 mod frame_pipeline;
 mod gpu;
+mod input;
 mod screen_capture;
 mod screen_layout;
 mod video_decoder;
@@ -14,10 +14,10 @@ mod worker_reaper;
 
 use std::time::Duration;
 
-pub(crate) use absolute_pointer::LinuxAbsolutePointerInjector;
 pub(crate) use frame_pipeline::{
     GbmFramePipelineFrame, GbmFramePipelineManager, GbmFramePipelineManagerState,
 };
+pub(crate) use input::LinuxRemoteInputInjector;
 pub(crate) use screen_capture::{KmsScreenCaptureManager, KmsScreenCaptureManagerState};
 pub(crate) use screen_layout::{
     NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_screen_layout_manager_state,

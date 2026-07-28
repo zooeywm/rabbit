@@ -13,8 +13,8 @@ use crate::{
     },
     infra::{
         ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,
-        WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsAbsolutePointerInjector,
-        WindowsDecodedFrame, WindowsScreenLayoutManagerState, WindowsVideoDecoder,
+        WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsDecodedFrame,
+        WindowsRemoteInputInjector, WindowsScreenLayoutManagerState, WindowsVideoDecoder,
         WindowsVideoEncoder, WorkerReaper, WorkerReaperHandle,
     },
     kernel::{session::ReceivedVideoFrame, video_renderer::VideoRenderer as _},
@@ -84,7 +84,7 @@ impl ApplicationStack for WgcD3d11ApplicationStack {
     type RemoteVideo = RemoteVideo;
     type RemoteVideoViewStack = RemoteVideoViewStack;
     type ScreenStreamEncoder = WindowsVideoEncoder;
-    type AbsolutePointerInjector = WindowsAbsolutePointerInjector;
+    type RemoteInputInjector = WindowsRemoteInputInjector;
 
     fn name() -> &'static str {
         "windows-wgc-d3d11-mf"
@@ -115,8 +115,8 @@ impl ApplicationStack for WgcD3d11ApplicationStack {
         ))
     }
 
-    fn create_absolute_pointer_injector() -> Self::AbsolutePointerInjector {
-        WindowsAbsolutePointerInjector::new()
+    fn create_remote_input_injector() -> Self::RemoteInputInjector {
+        WindowsRemoteInputInjector::new()
     }
 }
 

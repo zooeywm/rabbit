@@ -12,12 +12,12 @@
 //! Kernel code must not depend on GUI, OS-specific crates, or `infra`.
 //! Platform adapters implement kernel traits; `app` orchestrates them.
 
-pub mod absolute_pointer;
 pub mod capability;
 pub mod connection_request;
 pub mod domain_error;
 pub mod frame_pipeline;
 pub mod geometry;
+pub mod input;
 pub mod protocol;
 pub mod screen_capture;
 pub mod screen_configuration;

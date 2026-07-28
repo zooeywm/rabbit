@@ -26,6 +26,8 @@ pub struct PeerCapabilities {
     pub encoder_profiles: Vec<EncoderProfileTag>,
     /// Host accepts absolute pointer movements from a controller.
     pub absolute_pointer: bool,
+    /// Host accepts Rabbit reliable keyboard, mouse-button, and relative-pointer input.
+    pub reliable_input: bool,
 }
 
 impl Default for PeerCapabilities {
@@ -34,6 +36,7 @@ impl Default for PeerCapabilities {
             max_screens: ScreenId::MAX.saturating_add(1),
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
             absolute_pointer: true,
+            reliable_input: true,
         }
     }
 }
@@ -48,6 +51,7 @@ impl PeerCapabilities {
             max_screens,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
             absolute_pointer: true,
+            reliable_input: true,
         }
     }
 }

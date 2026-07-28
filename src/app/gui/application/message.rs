@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use crate::{
     app::{
-        gui::{state::WorkspaceSection, view::AbsolutePointerViewportEvent},
+        gui::{state::WorkspaceSection, view::PointerViewportEvent},
         services::host_stream::HostStreamPlan,
     },
     infra::{
@@ -12,6 +12,7 @@ use crate::{
     kernel::{
         connection_request::PeerCapabilities,
         geometry::PixelSize,
+        input::{InputState, KeyboardKey, MouseButton},
         screen_configuration::ScreenStreamRequestId,
         screen_manager::ScreenId,
         session::{ReceivedVideoFrame, SessionId, SessionMessage, SessionRecv, SessionSend},
@@ -93,7 +94,16 @@ pub(super) enum RootMessage {
     DisconnectDevice(usize),
     ResetDirectConnection,
     StopCurrentScreenStream,
-    AbsolutePointerMoved(AbsolutePointerViewportEvent),
+    PointerMoved(PointerViewportEvent),
+    Keyboard {
+        key: KeyboardKey,
+        state: InputState,
+        repeat: bool,
+    },
+    MouseButton {
+        button: MouseButton,
+        state: InputState,
+    },
 }
 
 #[derive(Clone)]

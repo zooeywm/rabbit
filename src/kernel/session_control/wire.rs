@@ -4,10 +4,13 @@ use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt, binread, binrw, io::C
 use bytes::Bytes;
 use eros::Context;
 
-use super::{ControlMessage, OutgoingAbsolutePointerMove, OutgoingScreenList, ScreenInfo};
+use super::{ControlMessage, OutgoingRemoteInput, OutgoingScreenList, ScreenInfo};
 use crate::kernel::{
-    absolute_pointer::{AbsolutePointerMove, NormalizedPosition},
     geometry::{FrameRate, PixelSize},
+    input::{
+        AbsolutePointerMove, InputState, KeyboardInput, KeyboardKey, MouseButton, MouseButtonInput,
+        NormalizedPosition, RelativePointerMove, RemoteInputEvent,
+    },
     screen_configuration::{
         RemoteDisplayMode, RequestKeyFrame, ResolutionResult, ScreenResolutionOutcome,
         ScreenResolutionStatus, ScreenStreamRequest, ScreenStreamRequestId,
@@ -26,6 +29,9 @@ pub(super) enum WireControlMessageTag {
     StopScreenStream = 3,
     RequestKeyFrame = 4,
     AbsolutePointerMove = 5,
+    KeyboardInput = 6,
+    MouseButtonInput = 7,
+    RelativePointerMove = 8,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -127,6 +133,28 @@ pub(super) struct WireAbsolutePointerMove {
     screen_id: u8,
     x: u16,
     y: u16,
+}
+
+#[derive(BinRead, BinWrite)]
+pub(super) struct WireKeyboardInput {
+    screen_id: u8,
+    key: u16,
+    state: u8,
+    repeat: u8,
+}
+
+#[derive(BinRead, BinWrite)]
+pub(super) struct WireMouseButtonInput {
+    screen_id: u8,
+    button: u8,
+    state: u8,
+}
+
+#[derive(BinRead, BinWrite)]
+pub(super) struct WireRelativePointerMove {
+    screen_id: u8,
+    delta_x: i32,
+    delta_y: i32,
 }
 
 #[binrw]
@@ -589,32 +617,68 @@ impl TryFrom<RequestKeyFrame> for TransportMessage {
     }
 }
 
-impl TryFrom<AbsolutePointerMove> for OutgoingAbsolutePointerMove {
+impl TryFrom<RemoteInputEvent> for OutgoingRemoteInput {
     type Error = eros::ErrorUnion;
 
-    fn try_from(movement: AbsolutePointerMove) -> eros::Result<Self> {
-        let mut writer = begin_control_message(WireControlMessageTag::AbsolutePointerMove)?;
-        writer
-            .write_be(&WireAbsolutePointerMove {
-                screen_id: movement.screen_id.0,
-                x: movement.position.x,
-                y: movement.position.y,
-            })
-            .with_context(|| {
-                format!(
-                    "Failed to encode absolute pointer movement for screen {}",
-                    movement.screen_id.0
-                )
-            })?;
+    fn try_from(input: RemoteInputEvent) -> eros::Result<Self> {
+        let writer = match input {
+            RemoteInputEvent::AbsolutePointerMove(movement) => {
+                let mut writer = begin_control_message(WireControlMessageTag::AbsolutePointerMove)?;
+                writer
+                    .write_be(&WireAbsolutePointerMove {
+                        screen_id: movement.screen_id.0,
+                        x: movement.position.x,
+                        y: movement.position.y,
+                    })
+                    .with_context(|| "Failed to encode absolute pointer movement")?;
+                writer
+            }
+            RemoteInputEvent::Keyboard(input) => {
+                let mut writer = begin_control_message(WireControlMessageTag::KeyboardInput)?;
+                writer
+                    .write_be(&WireKeyboardInput {
+                        screen_id: input.screen_id.0,
+                        key: input.key.wire_code(),
+                        state: input.state.wire_code(),
+                        repeat: u8::from(input.repeat),
+                    })
+                    .with_context(|| "Failed to encode keyboard input")?;
+                writer
+            }
+            RemoteInputEvent::MouseButton(input) => {
+                let mut writer = begin_control_message(WireControlMessageTag::MouseButtonInput)?;
+                writer
+                    .write_be(&WireMouseButtonInput {
+                        screen_id: input.screen_id.0,
+                        button: input.button.wire_code(),
+                        state: input.state.wire_code(),
+                    })
+                    .with_context(|| "Failed to encode mouse button input")?;
+                writer
+            }
+            RemoteInputEvent::RelativePointerMove(movement) => {
+                let mut writer = begin_control_message(WireControlMessageTag::RelativePointerMove)?;
+                writer
+                    .write_be(&WireRelativePointerMove {
+                        screen_id: movement.screen_id.0,
+                        delta_x: movement.delta_x,
+                        delta_y: movement.delta_y,
+                    })
+                    .with_context(|| "Failed to encode relative pointer movement")?;
+                writer
+            }
+        };
         let mut message = finish_control_message(writer);
-        message.delivery = Delivery::Unreliable;
+        if !input.is_reliable() {
+            message.delivery = Delivery::Unreliable;
+        }
         Ok(Self(message))
     }
 }
 
-impl From<OutgoingAbsolutePointerMove> for TransportMessage {
-    fn from(movement: OutgoingAbsolutePointerMove) -> Self {
-        movement.0
+impl From<OutgoingRemoteInput> for TransportMessage {
+    fn from(input: OutgoingRemoteInput) -> Self {
+        input.0
     }
 }
 
@@ -702,7 +766,7 @@ impl TryFrom<TransportMessage> for ControlMessage {
                 let wire = reader
                     .read_be::<WireAbsolutePointerMove>()
                     .with_context(|| "Failed to decode absolute pointer movement")?;
-                Self::AbsolutePointerMove(AbsolutePointerMove {
+                Self::RemoteInput(RemoteInputEvent::AbsolutePointerMove(AbsolutePointerMove {
                     screen_id: ScreenId::try_from(wire.screen_id).with_context(|| {
                         format!(
                             "Failed to decode absolute pointer movement screen ID {}",
@@ -713,13 +777,52 @@ impl TryFrom<TransportMessage> for ControlMessage {
                         x: wire.x,
                         y: wire.y,
                     },
-                })
+                }))
+            }
+            WireControlMessageTag::KeyboardInput => {
+                let wire = reader
+                    .read_be::<WireKeyboardInput>()
+                    .with_context(|| "Failed to decode keyboard input")?;
+                let state = InputState::try_from(wire.state)?;
+                let repeat = match wire.repeat {
+                    0 => false,
+                    1 => true,
+                    value => eros::bail!("Invalid keyboard repeat flag {}", value),
+                };
+                if state == InputState::Released && repeat {
+                    eros::bail!("Released keyboard input cannot be marked as repeated");
+                }
+                Self::RemoteInput(RemoteInputEvent::Keyboard(KeyboardInput {
+                    screen_id: ScreenId::try_from(wire.screen_id)?,
+                    key: KeyboardKey::try_from(wire.key)?,
+                    state,
+                    repeat,
+                }))
+            }
+            WireControlMessageTag::MouseButtonInput => {
+                let wire = reader
+                    .read_be::<WireMouseButtonInput>()
+                    .with_context(|| "Failed to decode mouse button input")?;
+                Self::RemoteInput(RemoteInputEvent::MouseButton(MouseButtonInput {
+                    screen_id: ScreenId::try_from(wire.screen_id)?,
+                    button: MouseButton::try_from(wire.button)?,
+                    state: InputState::try_from(wire.state)?,
+                }))
+            }
+            WireControlMessageTag::RelativePointerMove => {
+                let wire = reader
+                    .read_be::<WireRelativePointerMove>()
+                    .with_context(|| "Failed to decode relative pointer movement")?;
+                Self::RemoteInput(RemoteInputEvent::RelativePointerMove(RelativePointerMove {
+                    screen_id: ScreenId::try_from(wire.screen_id)?,
+                    delta_x: wire.delta_x,
+                    delta_y: wire.delta_y,
+                }))
             }
         };
-        let expected_delivery = if matches!(message, Self::AbsolutePointerMove(_)) {
-            Delivery::Unreliable
-        } else {
-            Delivery::ReliableOrdered
+        let expected_delivery = match &message {
+            Self::RemoteInput(input) if !input.is_reliable() => Delivery::Unreliable,
+            _ => Delivery::ReliableOrdered,
         };
         if delivery != expected_delivery {
             eros::bail!(

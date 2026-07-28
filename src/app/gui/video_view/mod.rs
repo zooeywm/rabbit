@@ -698,6 +698,7 @@ mod tests {
             Gui::<<TestApplicationStack as ApplicationStack>::RemoteVideoViewStack>::new(
                 crate::app::config::VideoDisplayPreference::Slint,
                 Duration::from_secs(2),
+                crate::app::config::PointerMode::Absolute,
             )
             .expect("Slint video test window should be created");
         publisher

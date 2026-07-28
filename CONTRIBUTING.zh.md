@@ -78,9 +78,9 @@ cargo xwin clippy --target x86_64-pc-windows-msvc
 
 某步无法运行时，在交接中说明原因。
 
-## Linux 绝对输入权限
+## Linux 远程输入权限
 
-远程绝对鼠标注入使用 `/dev/uinput`。请通过 udev 规则为运行 Rabbit 的用户授予读写权限，不要以 root 身份运行 Rabbit：
+远程键盘和鼠标注入使用 `/dev/uinput`。请通过 udev 规则为运行 Rabbit 的用户授予读写权限，不要以 root 身份运行 Rabbit：
 
 ```shell
 sudo groupadd -f uinput
@@ -92,6 +92,13 @@ sudo udevadm trigger --name-match=uinput
 ```
 
 修改用户组后需注销并重新登录。
+
+鼠标移动默认使用绝对定位。测试可靠相对移动时，在 `config.toml` 中设置：
+
+```toml
+[input]
+pointer_mode = "relative"
+```
 
 ## 提交约定
 

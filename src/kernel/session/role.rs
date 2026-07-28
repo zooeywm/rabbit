@@ -30,7 +30,7 @@ pub(super) fn validate_received_control(
         }
         ControlMessage::StopScreenStream(_) => return Ok(()),
         ControlMessage::RequestKeyFrame(_) => (SessionRole::Host, "RequestKeyFrame"),
-        ControlMessage::AbsolutePointerMove(_) => (SessionRole::Host, "AbsolutePointerMove"),
+        ControlMessage::RemoteInput(_) => (SessionRole::Host, "RemoteInput"),
     };
 
     if role != expected {

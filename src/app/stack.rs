@@ -4,8 +4,8 @@ use crate::{
     app::{App, config::Config, gui::VideoViewStack},
     infra::{ConnectionEndpoint, WorkerReaper, WorkerReaperHandle},
     kernel::{
-        absolute_pointer::AbsolutePointerInjector,
         frame_pipeline::FramePipelineManager,
+        input::RemoteInputInjector,
         screen_capture::ScreenCaptureManager,
         screen_manager::ScreenLayoutManager,
         session::ReceivedVideoFrame,
@@ -59,7 +59,7 @@ where
         Frame = <Self::RemoteVideo as RemoteVideoStack>::Frame,
     >;
     type ScreenStreamEncoder: VideoEncoder<Input = <Self::App as FramePipelineManager>::Frame>;
-    type AbsolutePointerInjector: AbsolutePointerInjector;
+    type RemoteInputInjector: RemoteInputInjector;
 
     fn name() -> &'static str;
 
@@ -70,5 +70,5 @@ where
         worker_reaper_handle: WorkerReaperHandle,
     ) -> eros::Result<Self::App>;
 
-    fn create_absolute_pointer_injector() -> Self::AbsolutePointerInjector;
+    fn create_remote_input_injector() -> Self::RemoteInputInjector;
 }

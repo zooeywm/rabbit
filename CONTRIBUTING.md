@@ -79,9 +79,9 @@ cargo xwin clippy --target x86_64-pc-windows-msvc
 
 If a verification step cannot be run, explain why in the handoff.
 
-## Linux Absolute Input Permission
+## Linux Remote Input Permission
 
-Remote absolute pointer injection uses `/dev/uinput`. Grant the user running
+Remote keyboard and pointer injection use `/dev/uinput`. Grant the user running
 Rabbit read/write access with a udev rule instead of running Rabbit as root:
 
 ```shell
@@ -94,6 +94,14 @@ sudo udevadm trigger --name-match=uinput
 ```
 
 Log out and back in after changing group membership.
+
+Pointer movement defaults to absolute positioning. To exercise reliable relative
+movement, set the following in `config.toml`:
+
+```toml
+[input]
+pointer_mode = "relative"
+```
 
 ## Commit Convention
 

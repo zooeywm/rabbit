@@ -146,6 +146,7 @@ mod tests {
             max_screens: 1,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
             absolute_pointer: false,
+            reliable_input: false,
         };
         let err = validate_set_screen_streams(
             &request_with_n_streams(2),
@@ -177,6 +178,7 @@ mod tests {
             max_screens: 0,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
             absolute_pointer: false,
+            reliable_input: false,
         };
         let err = validate_controller_set_screen_streams(
             &request_with_n_streams(1),

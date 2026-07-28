@@ -16,7 +16,7 @@ use crate::{
     },
     infra::{
         ConnectionEndpoint, GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder,
-        GbmFramePipelineManagerState, KmsScreenCaptureManagerState, LinuxAbsolutePointerInjector,
+        GbmFramePipelineManagerState, KmsScreenCaptureManagerState, LinuxRemoteInputInjector,
         NativeVideoRenderer, NativeVideoViewport, NiriScreenLayoutManagerState,
         OpenGlVideoRenderer, WorkerReaper, WorkerReaperHandle,
     },
@@ -111,7 +111,7 @@ impl ApplicationStack for NiriKmsGbmApplicationStack {
     type RemoteVideo = RemoteVideo;
     type RemoteVideoViewStack = RemoteVideoViewStack;
     type ScreenStreamEncoder = GStreamerVideoEncoder;
-    type AbsolutePointerInjector = LinuxAbsolutePointerInjector;
+    type RemoteInputInjector = LinuxRemoteInputInjector;
 
     fn name() -> &'static str {
         "linux/niri-kms-gbm-gstreamer-wayland"
@@ -142,8 +142,8 @@ impl ApplicationStack for NiriKmsGbmApplicationStack {
         ))
     }
 
-    fn create_absolute_pointer_injector() -> Self::AbsolutePointerInjector {
-        LinuxAbsolutePointerInjector::new()
+    fn create_remote_input_injector() -> Self::RemoteInputInjector {
+        LinuxRemoteInputInjector::new()
     }
 }
 

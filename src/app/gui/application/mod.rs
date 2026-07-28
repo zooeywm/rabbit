@@ -106,7 +106,8 @@ where
     listener: ListenerState,
     remote_stream: RemoteStreamState<Stack::RemoteVideo>,
     host_stream: HostStreamState,
-    absolute_pointer_injector: Stack::AbsolutePointerInjector,
+    remote_input_injector: Stack::RemoteInputInjector,
+    relative_pointer_accumulator: crate::app::gui::input::RelativeDeltaAccumulator,
     _logger_guard: LoggerGuard,
 }
 
@@ -472,7 +473,8 @@ where
                 pending_stops: HashSet::new(),
                 timeout_policy: SessionTimeoutPolicy::default(),
             },
-            absolute_pointer_injector: Stack::create_absolute_pointer_injector(),
+            remote_input_injector: Stack::create_remote_input_injector(),
+            relative_pointer_accumulator: Default::default(),
             _logger_guard: logger_guard,
         })
     }
@@ -578,11 +580,18 @@ where
                     screen_id,
                 } => RootMessage::VideoFrameReady(session_id, screen_id),
                 GuiIntent::VideoRendererFailed(error) => RootMessage::VideoRendererFailed(error),
-                GuiIntent::AbsolutePointerMoved(mailbox) => RootMessage::AbsolutePointerMoved(
-                    mailbox
+                GuiIntent::PointerMoved(pointer) => RootMessage::PointerMoved(match pointer {
+                    crate::app::gui::view::PointerIntent::Direct(event) => event,
+                    crate::app::gui::view::PointerIntent::Coalesced(mailbox) => mailbox
                         .take()
-                        .expect("absolute pointer notification must carry its latest position"),
-                ),
+                        .expect("coalesced pointer notification must carry a position"),
+                }),
+                GuiIntent::Keyboard { key, state, repeat } => {
+                    RootMessage::Keyboard { key, state, repeat }
+                }
+                GuiIntent::MouseButton { button, state } => {
+                    RootMessage::MouseButton { button, state }
+                }
                 GuiIntent::Close => RootMessage::Close,
             },
             Either::Right((Err(_), _)) => RootMessage::Close,

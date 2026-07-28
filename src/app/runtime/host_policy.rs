@@ -71,6 +71,7 @@ mod tests {
             max_screens: 0,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
             absolute_pointer: false,
+            reliable_input: false,
         };
         let request = SetScreenStreams {
             request_id: ScreenStreamRequestId(1),

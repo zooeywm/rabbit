@@ -15,7 +15,7 @@ use crate::app::{
     },
 };
 use crate::kernel::{
-    absolute_pointer::AbsolutePointerInjector as _,
+    input::RemoteInputInjector as _,
     screen_configuration::ScreenResolutionStatus,
     screen_manager::ScreenLayoutManager,
     session::{SessionMessage, SessionRole},
@@ -113,7 +113,7 @@ where
                     }
                     SessionMessage::Control(ControlMessage::SetScreenStreams(_))
                     | SessionMessage::Control(ControlMessage::RequestKeyFrame(_))
-                    | SessionMessage::Control(ControlMessage::AbsolutePointerMove(_)) => {
+                    | SessionMessage::Control(ControlMessage::RemoteInput(_)) => {
                         warn!(
                             session_id = id.0,
                             "Controller role received host-only control message"
@@ -290,44 +290,42 @@ where
                 );
                 Ok(true)
             }
-            HostControlDecision::AbsolutePointerMove(movement) => {
+            HostControlDecision::RemoteInput(input) => {
+                let screen_id = input.screen_id();
                 let has_active_stream = self
                     .model
                     .sessions
                     .iter()
                     .find(|session| session.send.id() == id)
-                    .is_some_and(|session| {
-                        session.screen_streams.contains_key(&movement.screen_id)
-                    });
+                    .is_some_and(|session| session.screen_streams.contains_key(&screen_id));
                 if !has_active_stream {
                     warn!(
-                        event = "absolute_pointer_stream_missing",
+                        event = "remote_input_stream_missing",
                         session_id = id.0,
-                        screen_id = movement.screen_id.get(),
-                        "Ignored absolute pointer movement without an active screen stream"
+                        screen_id = screen_id.get(),
+                        "Ignored remote input without an active screen stream"
                     );
                     return Ok(true);
                 }
-                let Some(screen) = self.model.app.screen(&movement.screen_id).cloned() else {
+                let Some(screen) = self.model.app.screen(&screen_id).cloned() else {
                     warn!(
-                        event = "absolute_pointer_screen_missing",
+                        event = "remote_input_screen_missing",
                         session_id = id.0,
-                        screen_id = movement.screen_id.get(),
-                        "Ignored absolute pointer movement for an unavailable screen"
+                        screen_id = screen_id.get(),
+                        "Ignored remote input for an unavailable screen"
                     );
                     return Ok(true);
                 };
-                if let Err(error) = self.absolute_pointer_injector.move_absolute(
-                    movement,
-                    &screen,
-                    self.model.app.screens(),
-                ) {
+                if let Err(error) =
+                    self.remote_input_injector
+                        .inject(input, &screen, self.model.app.screens())
+                {
                     warn!(
-                        event = "absolute_pointer_injection_failed",
+                        event = "remote_input_injection_failed",
                         session_id = id.0,
-                        screen_id = movement.screen_id.get(),
+                        screen_id = screen_id.get(),
                         error = ?error,
-                        "Failed to inject absolute pointer movement"
+                        "Failed to inject remote input"
                     );
                 }
                 Ok(true)

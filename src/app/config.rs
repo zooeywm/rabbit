@@ -21,6 +21,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub network: NetworkConfig,
     pub video: VideoConfig,
+    pub input: InputConfig,
     pub recording: RecordingConfig,
 }
 
@@ -62,6 +63,20 @@ pub struct VideoConfig {
     pub enable_client_probing: bool,
     pub probe_interval_ms: u64,
     pub display_backend: VideoDisplayPreference,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PointerMode {
+    #[default]
+    Absolute,
+    Relative,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct InputConfig {
+    pub pointer_mode: PointerMode,
 }
 
 impl Default for VideoConfig {
@@ -121,6 +136,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             network: NetworkConfig::default(),
             video: VideoConfig::default(),
+            input: InputConfig::default(),
             recording: RecordingConfig::default(),
             project_dirs: None,
             app_name: APP_NAME,
@@ -187,7 +203,9 @@ const fn default_app_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::config::{Config, NetworkTransport, RecordingConfig, VideoDisplayPreference};
+    use crate::app::config::{
+        Config, NetworkTransport, PointerMode, RecordingConfig, VideoDisplayPreference,
+    };
 
     #[test]
     fn network_transport_defaults_to_quic() {
@@ -206,6 +224,14 @@ mod tests {
     fn network_transport_reports_its_listener_protocol() {
         assert_eq!(NetworkTransport::Quic.listener_protocol(), "UDP");
         assert_eq!(NetworkTransport::Tcp.listener_protocol(), "TCP");
+    }
+
+    #[test]
+    fn pointer_mode_defaults_to_absolute_and_accepts_relative() {
+        assert_eq!(Config::default().input.pointer_mode, PointerMode::Absolute);
+        let config = toml::from_str::<Config>("[input]\npointer_mode = \"relative\"")
+            .expect("relative pointer mode should deserialize");
+        assert_eq!(config.input.pointer_mode, PointerMode::Relative);
     }
 
     #[test]

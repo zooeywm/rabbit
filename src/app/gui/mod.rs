@@ -1,6 +1,7 @@
 //! GUI shell, view bindings, and application message loop.
 
 mod application;
+mod input;
 mod state;
 mod video_view;
 mod view;
@@ -23,8 +24,11 @@ where
     Stack: ApplicationStack,
 {
     let probe_interval = Duration::from_millis(config.video.probe_interval_ms);
-    let (gui, publisher, intents) =
-        Gui::<Stack::RemoteVideoViewStack>::new(config.video.display_backend, probe_interval)?;
+    let (gui, publisher, intents) = Gui::<Stack::RemoteVideoViewStack>::new(
+        config.video.display_backend,
+        probe_interval,
+        config.input.pointer_mode,
+    )?;
     let thread_publisher = publisher.clone();
     let application_thread = std::thread::Builder::new()
         .name("rabbit-app".to_string())

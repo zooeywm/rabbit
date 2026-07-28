@@ -9,8 +9,8 @@
 mod wire;
 
 use crate::kernel::{
-    absolute_pointer::AbsolutePointerMove,
     geometry::{FrameRate, PixelSize},
+    input::RemoteInputEvent,
     screen_configuration::{
         RequestKeyFrame, ScreenStreamsConfigured, SetScreenStreams, StopScreenStream,
     },
@@ -31,7 +31,7 @@ pub struct ScreenInfo {
 pub struct OutgoingScreenList(pub(crate) TransportMessage);
 
 #[derive(Debug)]
-pub struct OutgoingAbsolutePointerMove(pub(crate) TransportMessage);
+pub struct OutgoingRemoteInput(pub(crate) TransportMessage);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlMessage {
@@ -40,20 +40,23 @@ pub enum ControlMessage {
     ScreenStreamsConfigured(ScreenStreamsConfigured),
     StopScreenStream(StopScreenStream),
     RequestKeyFrame(RequestKeyFrame),
-    AbsolutePointerMove(AbsolutePointerMove),
+    RemoteInput(RemoteInputEvent),
 }
 
 #[cfg(test)]
 mod tests {
     use crate::kernel::{
-        absolute_pointer::{AbsolutePointerMove, NormalizedPosition},
         geometry::{FrameRate, PixelSize},
+        input::{
+            AbsolutePointerMove, InputState, KeyboardInput, KeyboardKey, MouseButton,
+            MouseButtonInput, NormalizedPosition, RelativePointerMove, RemoteInputEvent,
+        },
         screen_configuration::{
             RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
         },
         screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
         session_control::{
-            ControlMessage, OutgoingAbsolutePointerMove, OutgoingScreenList, ScreenInfo,
+            ControlMessage, OutgoingRemoteInput, OutgoingScreenList, ScreenInfo,
             wire::{
                 WireFrameRate, WirePixelSize, WireScreenInfo, WireScreenLayout, WireScreenRect,
                 WireScreenTransform,
@@ -64,25 +67,67 @@ mod tests {
 
     #[test]
     fn absolute_pointer_move_round_trips_as_unreliable_control() {
-        let expected = AbsolutePointerMove {
+        let expected = RemoteInputEvent::AbsolutePointerMove(AbsolutePointerMove {
             screen_id: ScreenId(2),
             position: NormalizedPosition {
                 x: 12_345,
                 y: 54_321,
             },
-        };
+        });
         let message = TransportMessage::from(
-            OutgoingAbsolutePointerMove::try_from(expected)
+            OutgoingRemoteInput::try_from(expected)
                 .expect("absolute pointer movement should encode"),
         );
         assert_eq!(message.delivery, Delivery::Unreliable);
 
-        let ControlMessage::AbsolutePointerMove(decoded) =
+        let ControlMessage::RemoteInput(decoded) =
             ControlMessage::try_from(message).expect("absolute pointer movement should decode")
         else {
             panic!("decoded control message should be an absolute pointer movement");
         };
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn keyboard_button_and_relative_moves_are_reliable_control() {
+        let inputs = [
+            RemoteInputEvent::Keyboard(KeyboardInput {
+                screen_id: ScreenId(1),
+                key: KeyboardKey::A,
+                state: InputState::Pressed,
+                repeat: false,
+            }),
+            RemoteInputEvent::MouseButton(MouseButtonInput {
+                screen_id: ScreenId(1),
+                button: MouseButton::Back,
+                state: InputState::Released,
+            }),
+            RemoteInputEvent::RelativePointerMove(RelativePointerMove {
+                screen_id: ScreenId(1),
+                delta_x: -17,
+                delta_y: 23,
+            }),
+        ];
+
+        for expected in inputs {
+            let message = TransportMessage::from(
+                OutgoingRemoteInput::try_from(expected).expect("remote input should encode"),
+            );
+            assert_eq!(message.delivery, Delivery::ReliableOrdered);
+            let ControlMessage::RemoteInput(decoded) =
+                ControlMessage::try_from(message.clone()).expect("remote input should decode")
+            else {
+                panic!("decoded control message should be remote input");
+            };
+            assert_eq!(decoded, expected);
+
+            let mut wrong_delivery = message;
+            wrong_delivery.delivery = Delivery::Unreliable;
+            assert!(
+                ControlMessage::try_from(wrong_delivery).is_err(),
+                "reliable input must reject unreliable transport delivery"
+            );
+        }
     }
 
     #[test]

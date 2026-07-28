@@ -6,14 +6,18 @@ use std::{
 use eros::Context as _;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::app::gui::video_view::{self, VideoViewPublisher};
+use crate::app::gui::{
+    input::{keyboard_key_from_slint, mouse_button_from_slint},
+    video_view::{self, VideoViewPublisher},
+};
 use crate::app::{
-    config::{APP_ID, VideoDisplayPreference},
+    config::{APP_ID, PointerMode, VideoDisplayPreference},
     gui::state::{
         ConnectedDeviceView, ConnectionRequestView, HostedScreenStreamView, RemoteScreenView,
         ViewPage, ViewState, WorkspaceSection,
     },
 };
+use crate::kernel::input::{InputState, KeyboardKey, MouseButton};
 
 slint::slint! {
     export {
@@ -27,7 +31,7 @@ slint::slint! {
     } from "../../../ui/app.slint";
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum GuiIntent {
     SelectSection(WorkspaceSection),
     Connect(String),
@@ -51,44 +55,50 @@ pub(crate) enum GuiIntent {
         screen_id: crate::kernel::screen_manager::ScreenId,
     },
     VideoRendererFailed(String),
-    AbsolutePointerMoved(AbsolutePointerMailbox),
+    PointerMoved(PointerIntent),
+    Keyboard {
+        key: KeyboardKey,
+        state: InputState,
+        repeat: bool,
+    },
+    MouseButton {
+        button: MouseButton,
+        state: InputState,
+    },
     Close,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct AbsolutePointerViewportEvent {
+pub(crate) struct PointerViewportEvent {
     pub(crate) x: f32,
     pub(crate) y: f32,
+    pub(crate) delta_x: f32,
+    pub(crate) delta_y: f32,
     pub(crate) viewport_width: f32,
     pub(crate) viewport_height: f32,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum PointerIntent {
+    Direct(PointerViewportEvent),
+    Coalesced(PointerMailbox),
+}
+
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AbsolutePointerMailbox {
-    state: Arc<Mutex<AbsolutePointerMailboxState>>,
+pub(crate) struct PointerMailbox {
+    state: Arc<Mutex<PointerMailboxState>>,
 }
-
-impl PartialEq for AbsolutePointerMailbox {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.state, &other.state)
-    }
-}
-
-impl Eq for AbsolutePointerMailbox {}
 
 #[derive(Debug, Default)]
-struct AbsolutePointerMailboxState {
-    latest: Option<AbsolutePointerViewportEvent>,
+struct PointerMailboxState {
+    latest: Option<PointerViewportEvent>,
     notification_pending: bool,
 }
 
-impl AbsolutePointerMailbox {
-    fn submit(&self, event: AbsolutePointerViewportEvent, sender: &flume::Sender<GuiIntent>) {
+impl PointerMailbox {
+    fn submit(&self, event: PointerViewportEvent, sender: &flume::Sender<GuiIntent>) {
         let notify = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("absolute pointer mailbox poisoned");
+            let mut state = self.state.lock().expect("pointer mailbox poisoned");
             state.latest = Some(event);
             if state.notification_pending {
                 false
@@ -99,22 +109,20 @@ impl AbsolutePointerMailbox {
         };
         if notify
             && sender
-                .send(GuiIntent::AbsolutePointerMoved(self.clone()))
+                .send(GuiIntent::PointerMoved(PointerIntent::Coalesced(
+                    self.clone(),
+                )))
                 .is_err()
         {
-            let mut state = self
-                .state
+            self.state
                 .lock()
-                .expect("absolute pointer mailbox poisoned");
-            state.notification_pending = false;
+                .expect("pointer mailbox poisoned")
+                .notification_pending = false;
         }
     }
 
-    pub(crate) fn take(&self) -> Option<AbsolutePointerViewportEvent> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("absolute pointer mailbox poisoned");
+    pub(crate) fn take(&self) -> Option<PointerViewportEvent> {
+        let mut state = self.state.lock().expect("pointer mailbox poisoned");
         state.notification_pending = false;
         state.latest.take()
     }
@@ -156,6 +164,7 @@ where
     pub(crate) fn new(
         video_display: VideoDisplayPreference,
         probe_interval: Duration,
+        pointer_mode: PointerMode,
     ) -> eros::Result<(Self, ViewPublisher<VideoView>, flume::Receiver<GuiIntent>)> {
         VideoView::select_slint_backend()?;
         let window = RabbitWindow::new().context("Failed to create the Slint Rabbit window")?;
@@ -245,16 +254,63 @@ where
         }
         {
             let sender = sender.clone();
-            let mailbox = AbsolutePointerMailbox::default();
-            window.on_absolute_pointer_moved(move |x, y, viewport_width, viewport_height| {
-                mailbox.submit(
-                    AbsolutePointerViewportEvent {
+            let mailbox = PointerMailbox::default();
+            window.on_remote_pointer_moved(
+                move |x, y, delta_x, delta_y, viewport_width, viewport_height| {
+                    let event = PointerViewportEvent {
                         x,
                         y,
+                        delta_x,
+                        delta_y,
                         viewport_width,
                         viewport_height,
-                    },
+                    };
+                    match pointer_mode {
+                        PointerMode::Absolute => mailbox.submit(event, &sender),
+                        PointerMode::Relative => send_intent(
+                            &sender,
+                            GuiIntent::PointerMoved(PointerIntent::Direct(event)),
+                        ),
+                    }
+                },
+            );
+        }
+        {
+            let sender = sender.clone();
+            window.on_remote_mouse_button(move |button, pressed| {
+                let Some(button) = mouse_button_from_slint(button) else {
+                    return;
+                };
+                send_intent(
                     &sender,
+                    GuiIntent::MouseButton {
+                        button,
+                        state: if pressed {
+                            InputState::Pressed
+                        } else {
+                            InputState::Released
+                        },
+                    },
+                );
+            });
+        }
+        {
+            let sender = sender.clone();
+            window.on_remote_keyboard(move |text, pressed, repeat| {
+                let Some(key) = keyboard_key_from_slint(text.as_str()) else {
+                    return;
+                };
+                send_intent(
+                    &sender,
+                    GuiIntent::Keyboard {
+                        key,
+                        state: if pressed {
+                            InputState::Pressed
+                        } else {
+                            InputState::Released
+                        },
+                        repeat,
+                    },
                 );
             });
         }

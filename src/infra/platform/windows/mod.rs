@@ -1,7 +1,7 @@
-mod absolute_pointer;
 mod client_video_probe;
 mod frame_pipeline;
 mod host_video_probe;
+mod input;
 mod screen_capture;
 mod screen_layout;
 mod video_decoder;
@@ -11,8 +11,8 @@ mod worker_reaper;
 
 use std::time::Duration;
 
-pub(crate) use absolute_pointer::WindowsAbsolutePointerInjector;
 pub(crate) use frame_pipeline::{WgcFramePipelineManager, WgcFramePipelineManagerState};
+pub(crate) use input::WindowsRemoteInputInjector;
 pub(crate) use screen_capture::{WgcScreenCaptureManager, WgcScreenCaptureManagerState};
 pub(crate) use screen_layout::{
     WindowsScreenLayoutManager, WindowsScreenLayoutManagerState, create_screen_layout_manager_state,

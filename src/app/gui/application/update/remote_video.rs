@@ -5,6 +5,7 @@ use tracing::{error, trace, warn};
 
 use crate::app::runtime::controller_policy::evaluate_controller_set_screen_streams;
 use crate::app::{
+    config::{Config, PointerMode},
     gui::{
         application::{
             RootApplication,
@@ -15,7 +16,10 @@ use crate::app::{
     platform::ApplicationStack,
 };
 use crate::kernel::{
-    absolute_pointer::{AbsolutePointerMove, map_viewport_position},
+    input::{
+        AbsolutePointerMove, KeyboardInput, MouseButtonInput, RelativePointerMove,
+        RemoteInputEvent, map_viewport_position,
+    },
     screen_configuration::{RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams},
 };
 
@@ -29,17 +33,8 @@ where
         sender: &MessageSender,
     ) -> eros::Result<bool> {
         match message {
-            RootMessage::AbsolutePointerMoved(event) => {
+            RootMessage::PointerMoved(event) => {
                 let Some(target) = self.remote_stream.screen_stream.streaming_target() else {
-                    return Ok(false);
-                };
-                let Some(position) = map_viewport_position(
-                    event.x,
-                    event.y,
-                    event.viewport_width,
-                    event.viewport_height,
-                    target.frame_size,
-                ) else {
                     return Ok(false);
                 };
                 let Some(session) = self
@@ -50,17 +45,104 @@ where
                 else {
                     return Ok(false);
                 };
-                if !session.peer_capabilities.absolute_pointer {
+                let input = match <Stack::App as AsRef<Config>>::as_ref(&self.model.app)
+                    .input
+                    .pointer_mode
+                {
+                    PointerMode::Absolute => {
+                        if !session.peer_capabilities.absolute_pointer {
+                            return Ok(false);
+                        }
+                        let Some(position) = map_viewport_position(
+                            event.x,
+                            event.y,
+                            event.viewport_width,
+                            event.viewport_height,
+                            target.frame_size,
+                        ) else {
+                            return Ok(false);
+                        };
+                        RemoteInputEvent::AbsolutePointerMove(AbsolutePointerMove {
+                            screen_id: target.screen_id,
+                            position,
+                        })
+                    }
+                    PointerMode::Relative => {
+                        if !session.peer_capabilities.reliable_input {
+                            return Ok(false);
+                        }
+                        let Some((delta_x, delta_y)) = self
+                            .relative_pointer_accumulator
+                            .accumulate(event.delta_x, event.delta_y)
+                        else {
+                            return Ok(false);
+                        };
+                        RemoteInputEvent::RelativePointerMove(RelativePointerMove {
+                            screen_id: target.screen_id,
+                            delta_x,
+                            delta_y,
+                        })
+                    }
+                };
+                session
+                    .send
+                    .send_remote_input(input)
+                    .await
+                    .with_context(|| format!("Failed to send {input:?}"))?;
+                Ok(false)
+            }
+            RootMessage::Keyboard { key, state, repeat } => {
+                let Some(target) = self.remote_stream.screen_stream.streaming_target() else {
+                    return Ok(false);
+                };
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == target.session_id)
+                else {
+                    return Ok(false);
+                };
+                if !session.peer_capabilities.reliable_input {
+                    return Ok(false);
+                }
+                let input = RemoteInputEvent::Keyboard(KeyboardInput {
+                    screen_id: target.screen_id,
+                    key,
+                    state,
+                    repeat,
+                });
+                session
+                    .send
+                    .send_remote_input(input)
+                    .await
+                    .with_context(|| "Failed to send keyboard input")?;
+                Ok(false)
+            }
+            RootMessage::MouseButton { button, state } => {
+                let Some(target) = self.remote_stream.screen_stream.streaming_target() else {
+                    return Ok(false);
+                };
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == target.session_id)
+                else {
+                    return Ok(false);
+                };
+                if !session.peer_capabilities.reliable_input {
                     return Ok(false);
                 }
                 session
                     .send
-                    .send_absolute_pointer_move(AbsolutePointerMove {
+                    .send_remote_input(RemoteInputEvent::MouseButton(MouseButtonInput {
                         screen_id: target.screen_id,
-                        position,
-                    })
+                        button,
+                        state,
+                    }))
                     .await
-                    .with_context(|| "Failed to send absolute pointer movement")?;
+                    .with_context(|| "Failed to send mouse button input")?;
                 Ok(false)
             }
             RootMessage::StopCurrentScreenStream => {

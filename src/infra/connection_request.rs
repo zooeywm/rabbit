@@ -28,6 +28,7 @@ const REQUESTER_NAME_LENGTH_SIZE: usize = size_of::<u16>();
 const PROTOCOL_VERSION_SIZE: usize = size_of::<u16>() * 2;
 const CAPABILITY_HEADER_SIZE: usize = size_of::<u8>() * 2;
 const CAPABILITY_TAG_ABSOLUTE_POINTER: u8 = 0x80;
+const CAPABILITY_TAG_RELIABLE_INPUT: u8 = 0x81;
 const RESPONSE_SIZE: usize = size_of::<u8>();
 /// TCP handshake preface for protocol-aware connection requests.
 const TCP_REQUEST_MAGIC: &[u8; 5] = b"RBTC\x02";
@@ -490,8 +491,9 @@ fn warn_protocol_mismatch(remote_address: SocketAddr, request: &ConnectionReques
 }
 
 fn encode_peer_capabilities(capabilities: &PeerCapabilities) -> eros::Result<BytesMut> {
-    let tag_count =
-        capabilities.encoder_profiles.len() + usize::from(capabilities.absolute_pointer);
+    let tag_count = capabilities.encoder_profiles.len()
+        + usize::from(capabilities.absolute_pointer)
+        + usize::from(capabilities.reliable_input);
     if tag_count > MAX_CAPABILITY_TAGS {
         eros::bail!(
             "Connection advertises more than {} capability tags",
@@ -508,6 +510,9 @@ fn encode_peer_capabilities(capabilities: &PeerCapabilities) -> eros::Result<Byt
     }
     if capabilities.absolute_pointer {
         body.put_u8(CAPABILITY_TAG_ABSOLUTE_POINTER);
+    }
+    if capabilities.reliable_input {
+        body.put_u8(CAPABILITY_TAG_RELIABLE_INPUT);
     }
     Ok(body)
 }
@@ -527,9 +532,12 @@ fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, 
     }
     let mut encoder_profiles = Vec::with_capacity(profile_count);
     let mut absolute_pointer = false;
+    let mut reliable_input = false;
     for tag in body.split_to(profile_count) {
         if tag == CAPABILITY_TAG_ABSOLUTE_POINTER {
             absolute_pointer = true;
+        } else if tag == CAPABILITY_TAG_RELIABLE_INPUT {
+            reliable_input = true;
         } else if let Ok(profile) = EncoderProfileTag::try_from(tag) {
             encoder_profiles.push(profile);
         }
@@ -539,6 +547,7 @@ fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, 
             max_screens,
             encoder_profiles,
             absolute_pointer,
+            reliable_input,
         },
         body,
     ))
@@ -918,6 +927,7 @@ mod tests {
             };
             assert_eq!(host_capabilities.max_screens, 2);
             assert!(host_capabilities.absolute_pointer);
+            assert!(host_capabilities.reliable_input);
             incoming_task
                 .await
                 .expect("Incoming TCP approval task should finish");
