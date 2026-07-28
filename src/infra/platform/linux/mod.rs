@@ -1,16 +1,16 @@
-pub(crate) mod absolute_pointer;
-pub(crate) mod client_video_probe;
-pub(crate) mod dma_buf;
-pub(crate) mod egl_dma_buf;
-pub(crate) mod frame_pipeline;
-pub(crate) mod gpu;
-pub(crate) mod screen_capture;
-pub(crate) mod screen_layout;
-pub(crate) mod video_decoder;
-pub(crate) mod video_encoder;
-pub(crate) mod video_probe;
-pub(crate) mod video_renderer;
-pub(crate) mod worker_reaper;
+mod absolute_pointer;
+mod client_video_probe;
+mod dma_buf;
+mod egl_dma_buf;
+mod frame_pipeline;
+mod gpu;
+mod screen_capture;
+mod screen_layout;
+mod video_decoder;
+mod video_encoder;
+mod video_probe;
+mod video_renderer;
+mod worker_reaper;
 
 use std::time::Duration;
 

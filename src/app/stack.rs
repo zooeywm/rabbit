@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use crate::{
-    app::{App, cli::RecordOptions, config::Config, gui::VideoViewStack},
+    app::{App, config::Config, gui::VideoViewStack},
     infra::{ConnectionEndpoint, WorkerReaper, WorkerReaperHandle},
     kernel::{
         absolute_pointer::AbsolutePointerInjector,
@@ -71,42 +71,4 @@ where
     ) -> eros::Result<Self::App>;
 
     fn create_absolute_pointer_injector() -> Self::AbsolutePointerInjector;
-}
-
-#[cfg_attr(target_os = "linux", path = "linux/mod.rs")]
-#[cfg_attr(target_os = "windows", path = "windows/mod.rs")]
-mod selected;
-
-#[cfg(test)]
-pub(crate) use selected::TestApplicationStack;
-
-pub(crate) fn run() -> eros::Result<()> {
-    let config = Config::new()?;
-    selected::run(config)
-}
-
-pub(crate) fn run_headless() -> eros::Result<()> {
-    let config = Config::new()?;
-    selected::run_headless(config)
-}
-
-pub(crate) fn run_record(options: RecordOptions) -> eros::Result<()> {
-    let config = Config::new()?;
-    selected::run_record(config, options)
-}
-
-pub(crate) fn install_shutdown_handlers() {
-    selected::install_shutdown_handlers();
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::app::platform::ApplicationStack;
-
-    #[test]
-    fn selected_stack_can_run_the_application() {
-        fn assert_stack<Stack: ApplicationStack>() {}
-
-        assert_stack::<super::selected::TestApplicationStack>();
-    }
 }

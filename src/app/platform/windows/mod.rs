@@ -10,7 +10,6 @@ use crate::{
         App,
         config::Config,
         gui::{RabbitWindow, VideoViewStack},
-        platform::{ApplicationStack, RemoteVideoStack},
     },
     infra::{
         ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,
@@ -20,6 +19,8 @@ use crate::{
     },
     kernel::{session::ReceivedVideoFrame, video_renderer::VideoRenderer as _},
 };
+
+pub(crate) use crate::app::stack::{ApplicationStack, RemoteVideoStack, RunnableApp};
 
 enum WindowsApplicationStack {
     WgcD3d11,

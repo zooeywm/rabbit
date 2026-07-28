@@ -11,8 +11,8 @@ Thank you for contributing to Rabbit. The project values small, reviewable, and 
 - Do not mix unrelated refactoring or formatting with a functional change.
 - Keep platform implementations in `infra`, business capabilities and core data types in `kernel`, and workflow orchestration in `app`.
 - Do not suppress Rust's `dead_code` lint; remove unused code, exercise it in production, or place it behind a real module boundary.
-- Keep platform conditionals such as `cfg(target_os = ...)` and `cfg(unix)` inside platform modules. Generic modules must use a uniform platform interface.
-- Modules with child modules must use the `name/mod.rs` layout; do not combine `name.rs` with a sibling `name/` directory.
+- Keep platform conditionals inside platform implementations, except for the direct `mod platform` path selection in `app/mod.rs` and `infra/mod.rs`. Generic modules must use a uniform platform interface.
+- Modules with child modules must use the `name/mod.rs` layout; do not combine `name.rs` with a sibling `name/` directory. The `app::platform` and `infra::platform` aliases are deliberately mapped directly to `platform/linux/mod.rs` or `platform/windows/mod.rs`.
 
 ## Architecture
 

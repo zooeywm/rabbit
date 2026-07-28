@@ -11,8 +11,8 @@
 - 不要把无关重构或格式化混进功能变更。
 - 平台实现放在 `infra`，业务能力与核心数据类型放在 `kernel`，工作流编排放在 `app`。
 - 禁止抑制 Rust 的 `dead_code` lint；应删除未使用代码、在生产路径中实际使用，或放入真实的模块边界。
-- `cfg(target_os = ...)`、`cfg(unix)` 等平台条件编译只能写在 platform 模块内；通用模块必须通过统一的平台接口调用。
-- 含子模块的模块必须使用 `name/mod.rs` 布局；禁止同时使用 `name.rs` 与同级 `name/` 目录。
+- 平台条件编译只能写在平台实现内；仅 `app/mod.rs` 与 `infra/mod.rs` 中直接选择 `mod platform` 路径的声明例外。通用模块必须通过统一的平台接口调用。
+- 含子模块的模块必须使用 `name/mod.rs` 布局；禁止同时使用 `name.rs` 与同级 `name/` 目录。`app::platform` 和 `infra::platform` 特意直接映射到 `platform/linux/mod.rs` 或 `platform/windows/mod.rs`。
 
 ## 架构
 

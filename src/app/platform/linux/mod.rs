@@ -13,7 +13,6 @@ use crate::{
         App,
         config::Config,
         gui::{RabbitWindow, VideoViewStack},
-        platform::{ApplicationStack, RemoteVideoStack},
     },
     infra::{
         ConnectionEndpoint, GStreamerDecodedFrame, GStreamerVideoDecoder, GStreamerVideoEncoder,
@@ -23,6 +22,8 @@ use crate::{
     },
     kernel::session::ReceivedVideoFrame,
 };
+
+pub(crate) use crate::app::stack::{ApplicationStack, RemoteVideoStack, RunnableApp};
 
 enum LinuxApplicationStack {
     NiriKmsGbm,

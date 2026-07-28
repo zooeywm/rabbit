@@ -6,11 +6,14 @@ mod gui;
 pub(crate) mod headless;
 mod logging;
 mod model;
+#[cfg_attr(target_os = "linux", path = "platform/linux/mod.rs")]
+#[cfg_attr(target_os = "windows", path = "platform/windows/mod.rs")]
 mod platform;
 pub(crate) mod runtime;
 mod screen_stream;
 pub(crate) mod services;
 pub(crate) mod shutdown;
+mod stack;
 
 use tracing::{info, warn};
 
@@ -21,11 +24,20 @@ use crate::{
 };
 
 pub(crate) use logging::{LoggerGuard, init_logging};
-pub(crate) use platform::run as run_gui;
-pub(crate) use platform::run_headless;
-pub(crate) use platform::run_record;
 
 pub use cli::{Cli, Command, RecordOptions};
+
+pub(crate) fn run_gui() -> eros::Result<()> {
+    platform::run(Config::new()?)
+}
+
+pub(crate) fn run_headless() -> eros::Result<()> {
+    platform::run_headless(Config::new()?)
+}
+
+pub(crate) fn run_record(options: RecordOptions) -> eros::Result<()> {
+    platform::run_record(Config::new()?, options)
+}
 
 /// Root application state and dependency container.
 pub struct App<ScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState> {
@@ -85,5 +97,17 @@ where
         info!("Selected primary screen:{:?}", primary_screen);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::platform::{ApplicationStack, TestApplicationStack};
+
+    #[test]
+    fn selected_stack_can_run_the_application() {
+        fn assert_stack<Stack: ApplicationStack>() {}
+
+        assert_stack::<TestApplicationStack>();
     }
 }
