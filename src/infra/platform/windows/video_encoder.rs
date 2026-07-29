@@ -1586,7 +1586,7 @@ fn configure_transform(
             )
             .with_context(|| "Failed to attach DXGI device manager to H.264 encoder")?;
     }
-    configure_codec_low_latency(transform, attribute_low_latency, bitrate)?;
+    configure_codec_low_latency(transform, attribute_low_latency, frame_rate, bitrate)?;
 
     let output_type = create_h264_output_type(size, frame_rate, bitrate)?;
     unsafe { transform.SetOutputType(0, &output_type, 0) }
@@ -1608,6 +1608,7 @@ fn configure_transform(
 fn configure_codec_low_latency(
     transform: &IMFTransform,
     attribute_low_latency: bool,
+    frame_rate: FrameRate,
     bitrate: VideoBitrate,
 ) -> eros::Result<()> {
     let bitrate_bps = bitrate.bits_per_second();
@@ -1650,12 +1651,8 @@ fn configure_codec_low_latency(
         &CODECAPI_AVEncCommonMeanBitRate,
         &VARIANT::from(bitrate_bps),
     );
-    let buffer_size_bytes = bitrate_bps / 8 / H264_CPB_INTERVALS_PER_SECOND;
-    let bounded_buffer = set_optional_codec_property(
-        &codec_api,
-        &CODECAPI_AVEncCommonBufferSize,
-        &VARIANT::from(buffer_size_bytes),
-    );
+    let (bounded_buffer, buffer_frames, buffer_size_bytes) =
+        configure_cpb_buffer(&codec_api, bitrate_bps, frame_rate);
     info!(
         event = "windows_h264_encoder_low_latency_configured",
         attribute_low_latency,
@@ -1671,10 +1668,48 @@ fn configure_codec_low_latency(
         mean_bitrate,
         bounded_buffer,
         bitrate_bps,
+        buffer_frames,
         buffer_size_bytes,
         "Configured Windows H.264 encoder for bounded real-time output without frame reordering"
     );
     Ok(())
+}
+
+fn configure_cpb_buffer(
+    codec_api: &ICodecAPI,
+    bitrate_bps: u32,
+    frame_rate: FrameRate,
+) -> (bool, u32, u32) {
+    for buffer_frames in [1_u32, 2, 4] {
+        let buffer_size_bytes = cpb_size_bytes(bitrate_bps, frame_rate, buffer_frames);
+        match unsafe {
+            codec_api.SetValue(
+                &CODECAPI_AVEncCommonBufferSize,
+                &VARIANT::from(buffer_size_bytes),
+            )
+        } {
+            Ok(()) => return (true, buffer_frames, buffer_size_bytes),
+            Err(error) => {
+                debug!(
+                    event = "windows_h264_encoder_cpb_rejected",
+                    buffer_frames,
+                    buffer_size_bytes,
+                    error = ?error,
+                    "Windows H.264 encoder rejected a bounded CPB size"
+                );
+            }
+        }
+    }
+    (false, 0, 0)
+}
+
+fn cpb_size_bytes(bitrate_bps: u32, frame_rate: FrameRate, buffer_frames: u32) -> u32 {
+    let bits = u128::from(bitrate_bps)
+        .saturating_mul(u128::from(frame_rate.denominator().max(1)))
+        .saturating_mul(u128::from(buffer_frames.max(1)));
+    let bits_per_byte_frame = u128::from(frame_rate.numerator().max(1)).saturating_mul(8);
+    bits.div_ceil(bits_per_byte_frame)
+        .clamp(1, u128::from(u32::MAX)) as u32
 }
 
 fn set_optional_codec_property(
@@ -2058,7 +2093,6 @@ const RTP_SSRC: u32 = 0x5242_4954;
 const MAX_ENCODER_OUTPUT_SAMPLE_SIZE: u32 = 4 * 1024 * 1024;
 const MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT: usize = 8;
 const H264_INFINITE_GOP_LENGTH: u32 = u32::MAX;
-const H264_CPB_INTERVALS_PER_SECOND: u32 = 10;
 
 #[cfg(test)]
 mod tests {
@@ -2068,12 +2102,21 @@ mod tests {
 
     use super::{
         EncoderTimeline, FixedFrameClock, H264_INFINITE_GOP_LENGTH, WindowsEncoderBackend,
-        rtp_timestamp_from_hns,
+        cpb_size_bytes, rtp_timestamp_from_hns,
     };
 
     #[test]
     fn windows_h264_policy_disables_periodic_key_frames() {
         assert_eq!(H264_INFINITE_GOP_LENGTH, u32::MAX);
+    }
+
+    #[test]
+    fn windows_h264_cpb_defaults_to_one_frame() {
+        let frame_rate = FrameRate::new(120, 1).expect("frame rate");
+
+        assert_eq!(cpb_size_bytes(20_000_000, frame_rate, 1), 20_834);
+        assert_eq!(cpb_size_bytes(20_000_000, frame_rate, 2), 41_667);
+        assert_eq!(cpb_size_bytes(20_000_000, frame_rate, 4), 83_334);
     }
 
     #[test]
