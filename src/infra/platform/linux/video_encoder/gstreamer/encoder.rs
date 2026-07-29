@@ -13,7 +13,7 @@ use futures_util::future::{Either, select};
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{
     Cast as _, ElementExt as _, ElementExtManual as _, GObjectExtManualGst as _, GstBinExt as _,
-    GstBinExtManual as _, GstObjectExt as _,
+    GstBinExtManual as _, GstObjectExt as _, PadExt as _,
 };
 
 use super::{
@@ -161,6 +161,9 @@ impl GStreamerVideoEncoder {
                 )
             })?;
         let (bitrate_kbps, cpb_size_kbits) = configure_low_latency_encoder(&element, bitrate)?;
+        let (h264_profile, h264_profile_caps) = select_h264_profile(&element)?;
+        let profile_filter = create_required_element("capsfilter", "h264-profile")?;
+        profile_filter.set_property("caps", &h264_profile_caps);
         let source = create_required_element("appsrc", "video-input")?;
         let Ok(source) = source.downcast::<gstreamer_app::AppSrc>() else {
             eros::bail!("GStreamer appsrc factory returned an unexpected element type");
@@ -201,6 +204,7 @@ impl GStreamerVideoEncoder {
         let base_elements = [
             source.upcast_ref(),
             &element,
+            &profile_filter,
             &encoded_output_queue,
             &parser,
             &payloader,
@@ -219,6 +223,7 @@ impl GStreamerVideoEncoder {
                 filter,
                 queue,
                 &element,
+                &profile_filter,
                 &encoded_output_queue,
                 &parser,
                 &payloader,
@@ -254,6 +259,7 @@ impl GStreamerVideoEncoder {
             frame_rate_denominator = input_signature.frame_rate.denominator(),
             bitrate_kbps,
             cpb_size_kbits,
+            h264_profile,
             key_int_max = H264_KEY_INT_MAX,
             "Selected Linux video encoder pipeline"
         );
@@ -600,6 +606,32 @@ impl GStreamerVideoEncoder {
         );
         Ok(())
     }
+}
+
+fn select_h264_profile(
+    encoder: &gstreamer::Element,
+) -> eros::Result<(&'static str, gstreamer::Caps)> {
+    let source = encoder
+        .static_pad("src")
+        .with_context(|| "Linux H.264 encoder has no source pad")?;
+    let supported = source.query_caps(None);
+    for (name, caps_name) in [
+        ("high", "high"),
+        ("main", "main"),
+        ("baseline", "constrained-baseline"),
+        ("baseline", "baseline"),
+    ] {
+        let caps = gstreamer::Caps::builder("video/x-h264")
+            .field("profile", caps_name)
+            .build();
+        if supported.can_intersect(&caps) {
+            return Ok((name, caps));
+        }
+    }
+    eros::bail!(
+        "Linux H.264 encoder supports none of High, Main, or Baseline: {}",
+        supported
+    )
 }
 
 async fn send_rtp_packet<SendPacket, SendFuture>(

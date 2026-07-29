@@ -58,6 +58,7 @@ use windows::{
             MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
             MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
             MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_Base,
+            eAVEncH264VProfile_High, eAVEncH264VProfile_Main,
         },
         System::{
             Com::CoTaskMemFree,
@@ -304,6 +305,7 @@ struct MfH264Encoder {
     frame_size: PixelSize,
     frame_rate: FrameRate,
     bitrate: VideoBitrate,
+    profile: H264Profile,
     frame_duration_hns: i64,
     timeline: EncoderTimeline,
     sequence: u16,
@@ -431,7 +433,7 @@ impl MfH264Encoder {
             .with_context(|| "D3D11 immediate context does not expose ID3D11VideoContext")?;
         let dxgi_manager = create_dxgi_device_manager(&d3d)?;
         let adapter_vendor_id = d3d_adapter_vendor_id(&d3d)?;
-        let transform = activate_h264_encoder(
+        let (transform, profile) = activate_h264_encoder(
             &dxgi_manager,
             frame_size,
             frame_rate,
@@ -474,6 +476,7 @@ impl MfH264Encoder {
             frame_size,
             frame_rate,
             bitrate,
+            profile,
             frame_duration_hns: frame_duration_hns(frame_rate),
             timeline: EncoderTimeline::new(frame_rate_mode, frame_rate),
             sequence: 0,
@@ -1003,7 +1006,7 @@ impl MfH264Encoder {
     }
 
     fn renegotiate_output_type(&mut self) -> eros::Result<()> {
-        let mut h264_type_count = 0u32;
+        let mut available_types = Vec::new();
         for index in 0..64 {
             let media_type = match unsafe {
                 self.transform
@@ -1021,16 +1024,34 @@ impl MfH264Encoder {
             if unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }.ok() != Some(MFVideoFormat_H264) {
                 continue;
             }
-            h264_type_count += 1;
+            let profile = unsafe { media_type.GetUINT32(&MF_MT_MPEG2_PROFILE) }
+                .ok()
+                .and_then(H264Profile::from_media_foundation_value);
+            available_types.push((index, media_type, profile));
+        }
+        available_types.sort_by_key(|(_, _, profile)| match profile {
+            Some(H264Profile::High) => 0,
+            Some(H264Profile::Main) => 1,
+            Some(H264Profile::Baseline) => 2,
+            None => 3,
+        });
+        let h264_type_count = available_types.len();
+        for (index, media_type, advertised_profile) in available_types {
             match unsafe {
                 self.transform
                     .SetOutputType(self.output_stream_id, &media_type, 0)
             } {
                 Ok(()) => {
+                    self.profile = unsafe { media_type.GetUINT32(&MF_MT_MPEG2_PROFILE) }
+                        .ok()
+                        .and_then(H264Profile::from_media_foundation_value)
+                        .or(advertised_profile)
+                        .unwrap_or(self.profile);
                     self.refresh_output_stream_info()?;
                     info!(
                         event = "windows_h264_encoder_output_type_renegotiated",
                         available_type_index = index,
+                        h264_profile = self.profile.name(),
                         output_buffer_size = self.output_stream_buffer_size,
                         output_provides_samples = self.output_stream_info_flags
                             & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
@@ -1055,7 +1076,7 @@ impl MfH264Encoder {
         // a useful compatibility fallback and still performs SetOutputType as
         // required to resume ProcessOutput.
         let requested_type =
-            create_h264_output_type(self.frame_size, self.frame_rate, self.bitrate)?;
+            create_h264_output_type(self.frame_size, self.frame_rate, self.bitrate, self.profile)?;
         unsafe {
             self.transform
                 .SetOutputType(self.output_stream_id, &requested_type, 0)
@@ -1069,6 +1090,7 @@ impl MfH264Encoder {
         info!(
             event = "windows_h264_encoder_output_type_renegotiated",
             available_type_index = -1,
+            h264_profile = self.profile.name(),
             output_buffer_size = self.output_stream_buffer_size,
             output_provides_samples =
                 self.output_stream_info_flags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0,
@@ -1439,6 +1461,39 @@ fn create_dxgi_device_manager(d3d: &ID3D11Device) -> eros::Result<IMFDXGIDeviceM
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum H264Profile {
+    High,
+    Main,
+    Baseline,
+}
+
+impl H264Profile {
+    const PREFERRED: [Self; 3] = [Self::High, Self::Main, Self::Baseline];
+
+    fn media_foundation_value(self) -> u32 {
+        match self {
+            Self::High => eAVEncH264VProfile_High.0 as u32,
+            Self::Main => eAVEncH264VProfile_Main.0 as u32,
+            Self::Baseline => eAVEncH264VProfile_Base.0 as u32,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Main => "main",
+            Self::Baseline => "baseline",
+        }
+    }
+
+    fn from_media_foundation_value(value: u32) -> Option<Self> {
+        Self::PREFERRED
+            .into_iter()
+            .find(|profile| profile.media_foundation_value() == value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowsEncoderBackend {
     Nvenc,
     QuickSync,
@@ -1512,7 +1567,7 @@ fn activate_h264_encoder(
     frame_rate: FrameRate,
     bitrate: VideoBitrate,
     adapter_vendor_id: u32,
-) -> eros::Result<IMFTransform> {
+) -> eros::Result<(IMFTransform, H264Profile)> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -1591,18 +1646,21 @@ fn activate_h264_encoder(
                 continue;
             }
         };
-        if let Err(error) = configure_transform(&transform, dxgi_manager, size, frame_rate, bitrate)
+        let profile = match configure_transform(&transform, dxgi_manager, size, frame_rate, bitrate)
         {
-            warn!(
-                event = "windows_h264_encoder_candidate_rejected",
-                attempt = attempt + 1,
-                backend = candidate.backend.name(),
-                encoder_name = candidate.name.as_deref().unwrap_or("<unavailable>"),
-                error = ?error,
-                "Windows hardware encoder candidate rejected the stream configuration"
-            );
-            continue;
-        }
+            Ok(profile) => profile,
+            Err(error) => {
+                warn!(
+                    event = "windows_h264_encoder_candidate_rejected",
+                    attempt = attempt + 1,
+                    backend = candidate.backend.name(),
+                    encoder_name = candidate.name.as_deref().unwrap_or("<unavailable>"),
+                    error = ?error,
+                    "Windows hardware encoder candidate rejected the stream configuration"
+                );
+                continue;
+            }
+        };
         info!(
             event = "windows_h264_encoder_selected",
             backend = candidate.backend.name(),
@@ -1620,9 +1678,10 @@ fn activate_h264_encoder(
             hardware = true,
             candidate_count = count,
             selection_attempt = attempt + 1,
+            h264_profile = profile.name(),
             "Selected Windows video encoder pipeline"
         );
-        return Ok(transform);
+        return Ok((transform, profile));
     }
 
     eros::bail!(
@@ -1646,7 +1705,7 @@ fn configure_transform(
     size: PixelSize,
     frame_rate: FrameRate,
     bitrate: VideoBitrate,
-) -> eros::Result<()> {
+) -> eros::Result<H264Profile> {
     let mut attribute_low_latency = false;
     unsafe {
         if let Ok(attributes) = transform.GetAttributes() {
@@ -1664,9 +1723,26 @@ fn configure_transform(
     let codec_properties =
         configure_codec_low_latency(transform, attribute_low_latency, frame_rate, bitrate)?;
 
-    let output_type = create_h264_output_type(size, frame_rate, bitrate)?;
-    unsafe { transform.SetOutputType(0, &output_type, 0) }
-        .with_context(|| "Failed to configure H.264 encoder output type")?;
+    let mut selected_profile = None;
+    for profile in H264Profile::PREFERRED {
+        let output_type = create_h264_output_type(size, frame_rate, bitrate, profile)?;
+        match unsafe { transform.SetOutputType(0, &output_type, 0) } {
+            Ok(()) => {
+                selected_profile = Some(profile);
+                break;
+            }
+            Err(error) => {
+                debug!(
+                    event = "windows_h264_encoder_profile_rejected",
+                    h264_profile = profile.name(),
+                    error = ?error,
+                    "Windows H.264 encoder rejected an output profile"
+                );
+            }
+        }
+    }
+    let selected_profile = selected_profile
+        .with_context(|| "Windows H.264 encoder rejected High, Main, and Baseline")?;
     let input_type = create_nv12_input_type(size, frame_rate)?;
     unsafe { transform.SetInputType(0, &input_type, 0) }
         .with_context(|| "Failed to configure H.264 encoder NV12 input type")?;
@@ -1679,7 +1755,21 @@ fn configure_transform(
             .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
             .with_context(|| "Failed to start H.264 encoder stream")?;
     }
-    Ok(())
+    let effective_profile = unsafe {
+        transform
+            .GetOutputCurrentType(0)
+            .and_then(|media_type| media_type.GetUINT32(&MF_MT_MPEG2_PROFILE))
+    }
+    .ok()
+    .and_then(H264Profile::from_media_foundation_value)
+    .unwrap_or(selected_profile);
+    info!(
+        event = "windows_h264_encoder_profile_selected",
+        requested_profile = selected_profile.name(),
+        effective_profile = effective_profile.name(),
+        "Selected Windows H.264 encoder profile"
+    );
+    Ok(effective_profile)
 }
 
 #[derive(Clone, Copy)]
@@ -1928,6 +2018,7 @@ fn create_h264_output_type(
     size: PixelSize,
     frame_rate: FrameRate,
     bitrate: VideoBitrate,
+    profile: H264Profile,
 ) -> eros::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType() }
         .with_context(|| "Failed to create H.264 output media type")?;
@@ -1935,7 +2026,7 @@ fn create_h264_output_type(
     unsafe {
         media_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate.bits_per_second())?;
         media_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, H264_INFINITE_GOP_LENGTH)?;
-        media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, profile.media_foundation_value())?;
         media_type.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 0)?;
     }
     Ok(media_type)
