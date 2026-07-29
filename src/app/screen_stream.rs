@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::VecDeque,
     future::Future as _,
     pin::Pin,
@@ -19,8 +20,8 @@ use crate::{
             SessionSend,
             fec::{encode_access_unit, fec_rtp_packet_size},
         },
-        transport::TransportSend,
-        video_encoder::{VideoEncoder, VideoEncoderCommand, VideoEncoderParameters},
+        transport::{TransportSend, TransportTelemetry},
+        video_encoder::{VideoBitrate, VideoEncoder, VideoEncoderCommand, VideoEncoderParameters},
     },
 };
 
@@ -60,11 +61,13 @@ where
         "Host screen stream started"
     );
 
+    let adaptive_commands = encoder_commands.clone();
     let commands = futures_util::stream::poll_fn(move |context| {
         let mut command = encoder_commands.pop();
         Pin::new(&mut command).poll(context).map(Some)
     });
     let mut scheduler = VideoDatagramScheduler::new(parameters);
+    let bitrate_controller = Rc::new(RefCell::new(AdaptiveBitrateController::new(parameters)));
 
     ScreenStream::<_, _, Encoder, _>::new(
         CancellableFrames {
@@ -80,9 +83,25 @@ where
                 .into_iter()
                 .map(Into::into)
                 .collect::<Vec<bytes::Bytes>>();
-            let scheduled = encode_access_unit(payloads, parameters.fec_percentage)
-                .map(|payloads| scheduler.schedule_access_unit(payloads));
-            async move { scheduled?.send(&session, screen_id).await }
+            let rtp_packets = payloads.len();
+            let rtp_bytes = payloads.iter().map(bytes::Bytes::len).sum();
+            let h264_bytes = payloads
+                .iter()
+                .map(|packet| packet.len().saturating_sub(RTP_FIXED_HEADER_SIZE))
+                .sum();
+            let scheduled =
+                encode_access_unit(payloads, parameters.fec_percentage).map(|payloads| {
+                    scheduler.schedule_access_unit(payloads, h264_bytes, rtp_packets, rtp_bytes)
+                });
+            let bitrate_controller = Rc::clone(&bitrate_controller);
+            let adaptive_commands = adaptive_commands.clone();
+            async move {
+                let report = scheduled?.send(&session, screen_id).await?;
+                if let Some(bitrate) = bitrate_controller.borrow_mut().record(report) {
+                    adaptive_commands.push(VideoEncoderCommand::SetBitrate(bitrate));
+                }
+                Ok(())
+            }
         },
     )
     .run()
@@ -111,8 +130,15 @@ impl VideoDatagramScheduler {
         }
     }
 
-    fn schedule_access_unit(&mut self, payloads: Vec<bytes::Bytes>) -> ScheduledVideoAccessUnit {
+    fn schedule_access_unit(
+        &mut self,
+        payloads: Vec<bytes::Bytes>,
+        h264_bytes: usize,
+        rtp_packets: usize,
+        rtp_bytes: usize,
+    ) -> ScheduledVideoAccessUnit {
         let started_at = Instant::now();
+        let fec_bytes = payloads.iter().map(bytes::Bytes::len).sum();
         let mut pending = VecDeque::from(payloads);
         let mut send_at = self.next_batch_at.unwrap_or(started_at).max(started_at);
         let mut batches = Vec::new();
@@ -128,6 +154,10 @@ impl VideoDatagramScheduler {
             started_at,
             maximum_age: self.max_access_unit_age,
             batches,
+            h264_bytes,
+            rtp_packets,
+            rtp_bytes,
+            fec_bytes,
         }
     }
 }
@@ -136,13 +166,22 @@ struct ScheduledVideoAccessUnit {
     started_at: Instant,
     maximum_age: Duration,
     batches: Vec<(Instant, Vec<bytes::Bytes>)>,
+    h264_bytes: usize,
+    rtp_packets: usize,
+    rtp_bytes: usize,
+    fec_bytes: usize,
 }
 
 impl ScheduledVideoAccessUnit {
-    async fn send<Send>(self, session: &SessionSend<Send>, screen_id: ScreenId) -> eros::Result<()>
+    async fn send<Send>(
+        self,
+        session: &SessionSend<Send>,
+        screen_id: ScreenId,
+    ) -> eros::Result<VideoSendReport>
     where
         Send: TransportSend,
     {
+        let telemetry_before = session.transport_telemetry();
         let batch_count = self.batches.len();
         for (batch_index, (send_at, batch)) in self.batches.into_iter().enumerate() {
             let delay = send_at.saturating_duration_since(Instant::now());
@@ -171,8 +210,190 @@ impl ScheduledVideoAccessUnit {
                 "A complete video access unit exceeded its pacing age budget"
             );
         }
-        Ok(())
+        Ok(VideoSendReport {
+            elapsed: access_unit_age,
+            maximum_age: self.maximum_age,
+            h264_bytes: self.h264_bytes,
+            rtp_packets: self.rtp_packets,
+            rtp_bytes: self.rtp_bytes,
+            fec_bytes: self.fec_bytes,
+            telemetry_before,
+            telemetry_after: session.transport_telemetry(),
+        })
     }
+}
+
+struct VideoSendReport {
+    elapsed: Duration,
+    maximum_age: Duration,
+    h264_bytes: usize,
+    rtp_packets: usize,
+    rtp_bytes: usize,
+    fec_bytes: usize,
+    telemetry_before: Option<TransportTelemetry>,
+    telemetry_after: Option<TransportTelemetry>,
+}
+
+struct AdaptiveBitrateController {
+    requested: VideoBitrate,
+    current: VideoBitrate,
+    minimum_bps: u32,
+    window_started: Instant,
+    last_telemetry: Option<TransportTelemetry>,
+    minimum_rtt: Option<Duration>,
+    stable_windows: u8,
+    frames: u64,
+    h264_bytes: u64,
+    rtp_packets: u64,
+    rtp_bytes: u64,
+    fec_bytes: u64,
+    late_frames: u64,
+}
+
+impl AdaptiveBitrateController {
+    fn new(parameters: VideoEncoderParameters) -> Self {
+        let requested_bps = parameters.bitrate.bits_per_second();
+        Self {
+            requested: parameters.bitrate,
+            current: parameters.bitrate,
+            minimum_bps: (requested_bps / 4).max(MIN_ADAPTIVE_BITRATE_BPS),
+            window_started: Instant::now(),
+            last_telemetry: None,
+            minimum_rtt: None,
+            stable_windows: 0,
+            frames: 0,
+            h264_bytes: 0,
+            rtp_packets: 0,
+            rtp_bytes: 0,
+            fec_bytes: 0,
+            late_frames: 0,
+        }
+    }
+
+    fn record(&mut self, report: VideoSendReport) -> Option<VideoBitrate> {
+        self.frames = self.frames.saturating_add(1);
+        self.h264_bytes = self.h264_bytes.saturating_add(report.h264_bytes as u64);
+        self.rtp_packets = self.rtp_packets.saturating_add(report.rtp_packets as u64);
+        self.rtp_bytes = self.rtp_bytes.saturating_add(report.rtp_bytes as u64);
+        self.fec_bytes = self.fec_bytes.saturating_add(report.fec_bytes as u64);
+        self.late_frames = self
+            .late_frames
+            .saturating_add(u64::from(report.elapsed > report.maximum_age));
+        let telemetry = report.telemetry_after.or(report.telemetry_before);
+        if let Some(telemetry) = telemetry {
+            self.minimum_rtt = Some(
+                self.minimum_rtt
+                    .map_or(telemetry.rtt, |minimum| minimum.min(telemetry.rtt)),
+            );
+        }
+        let elapsed = self.window_started.elapsed();
+        if elapsed < ADAPTIVE_BITRATE_WINDOW {
+            return None;
+        }
+
+        let previous = self.last_telemetry;
+        self.last_telemetry = telemetry;
+        let lost_packets = counter_delta(telemetry, previous, |value| value.lost_packets);
+        let congestion_events = counter_delta(telemetry, previous, |value| value.congestion_events);
+        let quic_bytes = counter_delta(telemetry, previous, |value| value.transmitted_bytes);
+        let rtt_inflated = telemetry
+            .zip(self.minimum_rtt)
+            .is_some_and(|(current, minimum)| {
+                current.rtt
+                    > minimum
+                        .saturating_mul(3)
+                        .checked_div(2)
+                        .unwrap_or(minimum)
+                        .saturating_add(Duration::from_millis(5))
+            });
+        let datagram_buffer_exhausted =
+            telemetry.is_some_and(|value| value.datagram_buffer_space == 0);
+        let congested = lost_packets > 0
+            || congestion_events > 0
+            || rtt_inflated
+            || datagram_buffer_exhausted
+            || self.late_frames > 0;
+        let old_bitrate = self.current;
+        if congested {
+            self.stable_windows = 0;
+            self.current = VideoBitrate::new(
+                self.current
+                    .bits_per_second()
+                    .saturating_mul(85)
+                    .checked_div(100)
+                    .unwrap_or(self.minimum_bps)
+                    .max(self.minimum_bps),
+            )
+            .expect("adaptive bitrate minimum is positive");
+        } else {
+            self.stable_windows = self.stable_windows.saturating_add(1);
+            if self.stable_windows >= ADAPTIVE_STABLE_WINDOWS {
+                self.stable_windows = 0;
+                self.current = VideoBitrate::new(
+                    self.current
+                        .bits_per_second()
+                        .saturating_add(ADAPTIVE_BITRATE_INCREMENT_BPS)
+                        .min(self.requested.bits_per_second()),
+                )
+                .expect("requested bitrate is positive");
+            }
+        }
+
+        info!(
+            event = "video_bitrate_feedback",
+            window_ms = elapsed.as_secs_f64() * 1_000.0,
+            requested_bitrate_bps = self.requested.bits_per_second(),
+            target_bitrate_bps = self.current.bits_per_second(),
+            frames = self.frames,
+            h264_bytes = self.h264_bytes,
+            h264_bps = byte_rate_bps(self.h264_bytes, elapsed),
+            rtp_packets = self.rtp_packets,
+            rtp_bytes = self.rtp_bytes,
+            rtp_bps = byte_rate_bps(self.rtp_bytes, elapsed),
+            fec_bytes = self.fec_bytes,
+            fec_bps = byte_rate_bps(self.fec_bytes, elapsed),
+            quic_bytes,
+            quic_bps = byte_rate_bps(quic_bytes, elapsed),
+            lost_packets,
+            congestion_events,
+            rtt_ms = telemetry.map_or(0.0, |value| value.rtt.as_secs_f64() * 1_000.0),
+            congestion_window = telemetry.map_or(0, |value| value.congestion_window),
+            datagram_buffer_space = telemetry.map_or(0, |value| value.datagram_buffer_space),
+            late_frames = self.late_frames,
+            "Video bitrate feedback window"
+        );
+        self.window_started = Instant::now();
+        self.frames = 0;
+        self.h264_bytes = 0;
+        self.rtp_packets = 0;
+        self.rtp_bytes = 0;
+        self.fec_bytes = 0;
+        self.late_frames = 0;
+        (self.current != old_bitrate).then_some(self.current)
+    }
+}
+
+fn counter_delta(
+    current: Option<TransportTelemetry>,
+    previous: Option<TransportTelemetry>,
+    select: impl Fn(TransportTelemetry) -> u64,
+) -> u64 {
+    match (current, previous) {
+        (Some(current), Some(previous)) => select(current).saturating_sub(select(previous)),
+        _ => 0,
+    }
+}
+
+fn byte_rate_bps(bytes: u64, elapsed: Duration) -> u64 {
+    let nanoseconds = elapsed.as_nanos().max(1);
+    u64::try_from(
+        u128::from(bytes)
+            .saturating_mul(8_000_000_000)
+            .checked_div(nanoseconds)
+            .unwrap_or(0)
+            .min(u128::from(u64::MAX)),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn take_video_datagram_batch(pending: &mut VecDeque<bytes::Bytes>) -> Vec<bytes::Bytes> {
@@ -197,6 +418,11 @@ fn take_video_datagram_batch(pending: &mut VecDeque<bytes::Bytes>) -> Vec<bytes:
 const VIDEO_BATCH_MAX_PACKETS: usize = 64;
 const VIDEO_BATCH_MAX_BYTES: usize = 64 * 1024;
 const VIDEO_BATCH_INTERVAL: Duration = Duration::from_micros(750);
+const RTP_FIXED_HEADER_SIZE: usize = 12;
+const MIN_ADAPTIVE_BITRATE_BPS: u32 = 2_000_000;
+const ADAPTIVE_BITRATE_WINDOW: Duration = Duration::from_secs(1);
+const ADAPTIVE_STABLE_WINDOWS: u8 = 4;
+const ADAPTIVE_BITRATE_INCREMENT_BPS: u32 = 500_000;
 
 struct CancellableFrames<Frames> {
     frames: Frames,
@@ -225,17 +451,30 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, future::poll_fn, pin::Pin};
+    use std::{
+        collections::VecDeque,
+        future::poll_fn,
+        pin::Pin,
+        time::{Duration, Instant},
+    };
 
     use bytes::Bytes;
     use futures_core::Stream as _;
 
     use crate::{
         app::screen_stream::{
-            CancellableFrames, VIDEO_BATCH_MAX_BYTES, VIDEO_BATCH_MAX_PACKETS,
-            take_video_datagram_batch,
+            AdaptiveBitrateController, CancellableFrames, VIDEO_BATCH_MAX_BYTES,
+            VIDEO_BATCH_MAX_PACKETS, VideoSendReport, take_video_datagram_batch,
         },
         infra::unsync_queue::UnsyncQueue,
+        kernel::{
+            geometry::FrameRate,
+            transport::TransportTelemetry,
+            video_encoder::{
+                VideoBitrate, VideoCodec, VideoEncoderParameters, VideoFecPercentage,
+                VideoFrameRateMode,
+            },
+        },
     };
 
     #[test]
@@ -272,5 +511,47 @@ mod tests {
         let first = take_video_datagram_batch(&mut packet_limited);
         assert_eq!(first.len(), VIDEO_BATCH_MAX_PACKETS);
         assert_eq!(packet_limited.len(), 1);
+    }
+
+    #[test]
+    fn adaptive_bitrate_reduces_on_quic_loss() {
+        let parameters = VideoEncoderParameters {
+            codec: VideoCodec::H264,
+            frame_rate: FrameRate::new(120, 1).expect("frame rate"),
+            frame_rate_mode: VideoFrameRateMode::Dynamic,
+            bitrate: VideoBitrate::new(40_000_000).expect("bitrate"),
+            fec_percentage: VideoFecPercentage::DEFAULT,
+        };
+        let mut controller = AdaptiveBitrateController::new(parameters);
+        controller.window_started = Instant::now() - Duration::from_secs(2);
+        controller.last_telemetry = Some(telemetry(100, 0));
+
+        let adjusted = controller.record(VideoSendReport {
+            elapsed: Duration::from_millis(2),
+            maximum_age: Duration::from_millis(16),
+            h264_bytes: 10_000,
+            rtp_packets: 10,
+            rtp_bytes: 10_120,
+            fec_bytes: 12_000,
+            telemetry_before: None,
+            telemetry_after: Some(telemetry(200, 1)),
+        });
+
+        assert_eq!(
+            adjusted.map(VideoBitrate::bits_per_second),
+            Some(34_000_000)
+        );
+    }
+
+    fn telemetry(sent_packets: u64, lost_packets: u64) -> TransportTelemetry {
+        TransportTelemetry {
+            rtt: Duration::from_millis(2),
+            congestion_window: 1_000_000,
+            congestion_events: lost_packets,
+            lost_packets,
+            sent_packets,
+            transmitted_bytes: sent_packets.saturating_mul(1_200),
+            datagram_buffer_space: 64 * 1024,
+        }
     }
 }

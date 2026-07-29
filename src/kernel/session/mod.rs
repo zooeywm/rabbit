@@ -144,6 +144,10 @@ where
         self.send.max_unreliable_payload_size()
     }
 
+    pub fn transport_telemetry(&self) -> Option<crate::kernel::transport::TransportTelemetry> {
+        self.send.telemetry()
+    }
+
     pub fn is_closed_normally(&self) -> bool {
         self.send.is_closed_normally()
     }

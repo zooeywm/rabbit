@@ -4,6 +4,7 @@
 //! video cannot silently renumber across peers.
 
 use crate::kernel::{protocol::CONTROL_CHANNEL_ID, screen_manager::ScreenId};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportChannel {
@@ -44,6 +45,17 @@ pub struct TransportMessage {
     pub payload: bytes::Bytes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportTelemetry {
+    pub rtt: Duration,
+    pub congestion_window: u64,
+    pub congestion_events: u64,
+    pub lost_packets: u64,
+    pub sent_packets: u64,
+    pub transmitted_bytes: u64,
+    pub datagram_buffer_space: usize,
+}
+
 pub trait Transport {
     type SendHalf: TransportSend;
     type RecvHalf: TransportRecv;
@@ -53,6 +65,10 @@ pub trait Transport {
 
 pub trait TransportSend {
     fn max_unreliable_payload_size(&self) -> Option<usize>;
+
+    fn telemetry(&self) -> Option<TransportTelemetry> {
+        None
+    }
 
     fn is_closed_normally(&self) -> bool {
         false

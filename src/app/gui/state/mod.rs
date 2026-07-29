@@ -122,7 +122,7 @@ mod tests {
     fn h264_bitrate_reference_tracks_target_geometry() {
         assert_eq!(
             recommended_bitrate_text(VideoCodec::H264, "1920", "1080", "60").as_deref(),
-            Some("21")
+            Some("12")
         );
         assert_eq!(
             format_bitrate_mbps(VideoBitrate::new(80_500_000).expect("bitrate should be valid")),

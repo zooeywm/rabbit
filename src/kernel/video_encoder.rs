@@ -97,13 +97,20 @@ pub enum VideoFrameRateMode {
 }
 
 fn recommended_h264_bitrate(frame_size: PixelSize, frame_rate: FrameRate) -> VideoBitrate {
-    // Screen-content H.264 reference: 1/6 bit per pixel per frame, rounded up
-    // to whole Mbps. Keep codec-specific policy here so H.265/AV1 can use
-    // independent models without changing stream configuration semantics.
-    let pixels = u128::from(frame_size.width) * u128::from(frame_size.height);
-    let scaled = pixels
+    // Screen-content H.264 reference tiers at 60 FPS. Frame-rate scaling stays
+    // codec-specific so HEVC and AV1 can use independent quality models.
+    let pixels = u64::from(frame_size.width) * u64::from(frame_size.height);
+    let base = match pixels {
+        0..=921_600 => 6_u128 * BITS_PER_MEGABIT,
+        921_601..=2_073_600 => 12_u128 * BITS_PER_MEGABIT,
+        2_073_601..=3_686_400 => 20_u128 * BITS_PER_MEGABIT,
+        3_686_401..=8_294_400 => 40_u128 * BITS_PER_MEGABIT,
+        _ => 60_u128 * BITS_PER_MEGABIT,
+    };
+    let scaled = base
         .saturating_mul(u128::from(frame_rate.numerator()))
-        .div_ceil(u128::from(frame_rate.denominator()).saturating_mul(H264_PIXELS_PER_BIT));
+        .div_ceil(u128::from(frame_rate.denominator()).saturating_mul(60))
+        .clamp(base / 2, base.saturating_mul(4));
     let rounded = scaled.div_ceil(BITS_PER_MEGABIT) * BITS_PER_MEGABIT;
     let bits_per_second = rounded.clamp(
         u128::from(MIN_RECOMMENDED_BITRATE_BPS),
@@ -115,6 +122,7 @@ fn recommended_h264_bitrate(frame_size: PixelSize, frame_rate: FrameRate) -> Vid
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoEncoderCommand {
     RequestKeyFrame,
+    SetBitrate(VideoBitrate),
 }
 
 /// Runs one long-lived encoder over a stream of processed video frames.
@@ -136,7 +144,6 @@ pub trait VideoEncoder {
         SendFuture: Future<Output = eros::Result<()>>;
 }
 
-const H264_PIXELS_PER_BIT: u128 = 6;
 const BITS_PER_MEGABIT: u128 = 1_000_000;
 const MIN_RECOMMENDED_BITRATE_BPS: u32 = 1_000_000;
 const MAX_RECOMMENDED_BITRATE_BPS: u32 = 1_000_000_000;
@@ -250,7 +257,7 @@ mod tests {
                     sixty,
                 )
                 .bits_per_second(),
-            21_000_000
+            12_000_000
         );
         assert_eq!(
             codec
@@ -262,7 +269,7 @@ mod tests {
                     one_twenty,
                 )
                 .bits_per_second(),
-            104_000_000
+            80_000_000
         );
     }
 }

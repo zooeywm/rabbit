@@ -12,7 +12,7 @@ use futures_core::Stream as _;
 use futures_util::future::{Either, select};
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{
-    Cast as _, ElementExt as _, ElementExtManual as _, GObjectExtManualGst as _,
+    Cast as _, ElementExt as _, ElementExtManual as _, GObjectExtManualGst as _, GstBinExt as _,
     GstBinExtManual as _, GstObjectExt as _,
 };
 
@@ -570,6 +570,9 @@ impl GStreamerVideoEncoder {
                     self.request_key_frame()?;
                     self.submit_latest_frame()?;
                 }
+                Event::Command(Some(VideoEncoderCommand::SetBitrate(bitrate))) => {
+                    self.set_bitrate(bitrate)?;
+                }
                 Event::Command(None) => commands_open = false,
                 Event::Packet(packet) => match packet? {
                     Some(packet) => send_rtp_packet(packet, &mut packet_batch, send_packet).await?,
@@ -580,6 +583,22 @@ impl GStreamerVideoEncoder {
                 },
             }
         }
+    }
+
+    fn set_bitrate(&self, bitrate: VideoBitrate) -> eros::Result<()> {
+        let encoder = self
+            .pipeline
+            .by_name("h264-encoder")
+            .with_context(|| "Running GStreamer pipeline has no H.264 encoder")?;
+        configure_low_latency_encoder(&encoder, bitrate)?;
+        tracing::info!(
+            event = "linux_h264_encoder_bitrate_updated",
+            requested_bitrate_bps = bitrate.bits_per_second(),
+            effective_bitrate_kbps = encoder.property::<u32>("bitrate"),
+            effective_cpb_size_kbits = encoder.property::<u32>("cpb-size"),
+            "Updated Linux H.264 encoder bitrate"
+        );
+        Ok(())
     }
 }
 

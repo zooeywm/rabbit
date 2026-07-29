@@ -67,6 +67,13 @@ impl TransportSend for SessionTransportSend {
         }
     }
 
+    fn telemetry(&self) -> Option<crate::kernel::transport::TransportTelemetry> {
+        match self {
+            Self::Quic(send) => send.telemetry(),
+            Self::Tcp(send) => send.telemetry(),
+        }
+    }
+
     async fn send_unreliable(&self, channel: TransportChannel, payload: Bytes) -> eros::Result<()> {
         match self {
             Self::Quic(send) => send.send_unreliable(channel, payload).await,

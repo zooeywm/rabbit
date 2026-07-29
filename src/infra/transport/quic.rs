@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::infra::unsync_queue::UnsyncQueue;
 use crate::kernel::transport::{
     Delivery, Transport, TransportChannel, TransportMessage, TransportRecv, TransportSend,
+    TransportTelemetry,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use eros::Context;
@@ -167,6 +168,19 @@ impl TransportSend for QuicTransportSend {
 
     fn is_closed_normally(&self) -> bool {
         is_normal_close_reason(self.connection.close_reason())
+    }
+
+    fn telemetry(&self) -> Option<TransportTelemetry> {
+        let stats = self.connection.stats();
+        Some(TransportTelemetry {
+            rtt: self.connection.rtt(),
+            congestion_window: stats.path.cwnd,
+            congestion_events: stats.path.congestion_events,
+            lost_packets: stats.path.lost_packets,
+            sent_packets: stats.path.sent_packets,
+            transmitted_bytes: stats.udp_tx.bytes,
+            datagram_buffer_space: self.connection.datagram_send_buffer_space(),
+        })
     }
 
     fn send_unreliable(

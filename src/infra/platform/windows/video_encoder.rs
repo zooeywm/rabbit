@@ -263,6 +263,16 @@ where
                     .await
                     .with_context(|| "Failed to encode the retained Windows recovery key frame")?;
             }
+            Event::Command(Some(VideoEncoderCommand::SetBitrate(bitrate))) => {
+                if let Err(error) = encoder.set_bitrate(bitrate) {
+                    warn!(
+                        event = "windows_h264_encoder_bitrate_update_failed",
+                        requested_bitrate_bps = bitrate.bits_per_second(),
+                        error = ?error,
+                        "Windows H.264 encoder rejected adaptive bitrate update"
+                    );
+                }
+            }
             Event::Command(None) => commands_open = false,
             Event::FixedFrameDue => {
                 encoder.encode_latest_frame(&mut send_packet).await?;
@@ -487,6 +497,40 @@ impl MfH264Encoder {
         let device = unsafe { frame.texture().GetDevice() }
             .with_context(|| "Failed to query the recovered Windows capture D3D11 device")?;
         Ok(self.d3d.as_raw() == device.as_raw())
+    }
+
+    fn set_bitrate(&mut self, requested: VideoBitrate) -> eros::Result<()> {
+        if requested == self.bitrate {
+            return Ok(());
+        }
+        let codec_api: ICodecAPI = self
+            .transform
+            .cast()
+            .with_context(|| "Windows H.264 encoder does not expose ICodecAPI")?;
+        unsafe {
+            codec_api.SetValue(
+                &CODECAPI_AVEncCommonMeanBitRate,
+                &VARIANT::from(requested.bits_per_second()),
+            )
+        }
+        .with_context(|| "Failed to update Windows H.264 mean bitrate")?;
+        let (_, cpb_frames, cpb_bytes) =
+            configure_cpb_buffer(&codec_api, requested.bits_per_second(), self.frame_rate);
+        let effective_bps = unsafe { codec_api.GetValue(&CODECAPI_AVEncCommonMeanBitRate) }
+            .ok()
+            .and_then(|value| variant_numeric_value(&value))
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(requested.bits_per_second());
+        self.bitrate = VideoBitrate::new(effective_bps)?;
+        info!(
+            event = "windows_h264_encoder_bitrate_updated",
+            requested_bitrate_bps = requested.bits_per_second(),
+            effective_bitrate_bps = effective_bps,
+            cpb_frames,
+            cpb_bytes,
+            "Updated Windows H.264 encoder bitrate"
+        );
+        Ok(())
     }
 
     async fn encode_frame<SendPacket, SendFuture>(
