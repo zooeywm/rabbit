@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, future::Future, rc::Rc, time::Duration};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use eros::Context as _;
@@ -9,7 +14,7 @@ use futures_util::{
 use tracing::{debug, info, warn};
 use windows::{
     Win32::{
-        Foundation::RECT,
+        Foundation::{E_FAIL, E_NOTIMPL, E_POINTER, RECT},
         Graphics::{
             Direct3D11::{
                 D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER,
@@ -32,14 +37,15 @@ use windows::{
             CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonRealTime,
             CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
             CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFActivate,
-            IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample,
-            IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-            MF_E_NO_EVENTS_AVAILABLE, MF_E_NO_MORE_TYPES, MF_E_TRANSFORM_NEED_MORE_INPUT,
-            MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
-            MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-            MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING,
-            MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE,
-            MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateDXGIDeviceManager,
+            IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFDXGIDeviceManager,
+            IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
+            METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+            MF_E_NO_MORE_TYPES, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+            MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE,
+            MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
+            MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG2_PROFILE,
+            MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
+            MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateDXGIDeviceManager,
             MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
             MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFT_CATEGORY_VIDEO_ENCODER,
             MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
@@ -155,11 +161,27 @@ where
         max_packet_size,
     )
     .with_context(|| "Failed to initialize Windows Media Foundation H.264 encoder")?;
+    info!(
+        event = "windows_video_encoder_scheduling_selected",
+        frame_rate_mode = ?parameters.frame_rate_mode,
+        input_handling = match parameters.frame_rate_mode {
+            VideoFrameRateMode::Dynamic => "encode-on-content-update",
+            VideoFrameRateMode::Fixed => "retain-latest-and-encode-on-fixed-clock",
+        },
+        media_foundation_events = if encoder.transform_event_generator.is_some() {
+            "async-callback"
+        } else {
+            "synchronous-process-output"
+        },
+        "Selected Windows video encoder scheduling"
+    );
     encoder.request_key_frame();
     encoder.encode_frame(&first_frame, &mut send_packet).await?;
     drop(first_frame);
 
     let mut commands_open = true;
+    let mut fixed_clock = (parameters.frame_rate_mode == VideoFrameRateMode::Fixed)
+        .then(|| FixedFrameClock::new(frame_rate));
     loop {
         enum Event<Frame> {
             Frame(Option<eros::Result<Rc<Frame>>>),
@@ -184,12 +206,17 @@ where
                 Either::Right((frame, _)) => Event::Frame(frame),
             },
             VideoFrameRateMode::Fixed => {
-                let tick = compio::time::sleep(frame_duration(frame_rate));
+                let tick = compio::time::sleep(
+                    fixed_clock
+                        .as_ref()
+                        .expect("Fixed frame-rate mode must have a clock")
+                        .delay(),
+                );
                 futures_util::pin_mut!(tick);
-                match select(input, tick).await {
-                    Either::Left((Either::Left((command, _)), _)) => Event::Command(command),
-                    Either::Left((Either::Right((frame, _)), _)) => Event::Frame(frame),
-                    Either::Right(((), _)) => Event::FixedFrameDue,
+                match select(tick, input).await {
+                    Either::Left(((), _)) => Event::FixedFrameDue,
+                    Either::Right((Either::Left((command, _)), _)) => Event::Command(command),
+                    Either::Right((Either::Right((frame, _)), _)) => Event::Frame(frame),
                 }
             }
         };
@@ -197,7 +224,12 @@ where
         match event {
             Event::Frame(Some(frame)) => {
                 let frame = frame?;
-                encoder.encode_frame(&frame, &mut send_packet).await?;
+                match parameters.frame_rate_mode {
+                    VideoFrameRateMode::Dynamic => {
+                        encoder.encode_frame(&frame, &mut send_packet).await?;
+                    }
+                    VideoFrameRateMode::Fixed => encoder.update_latest_frame(&frame)?,
+                }
             }
             Event::Frame(None) => break,
             Event::Command(Some(VideoEncoderCommand::RequestKeyFrame)) => {
@@ -210,6 +242,10 @@ where
             Event::Command(None) => commands_open = false,
             Event::FixedFrameDue => {
                 encoder.encode_latest_frame(&mut send_packet).await?;
+                fixed_clock
+                    .as_mut()
+                    .expect("Fixed frame-rate tick must have a clock")
+                    .advance();
             }
         }
     }
@@ -220,6 +256,8 @@ where
 struct MfH264Encoder {
     transform: IMFTransform,
     transform_event_generator: Option<IMFMediaEventGenerator>,
+    transform_event_callback: Option<IMFAsyncCallback>,
+    transform_event_results: Option<flume::Receiver<IMFAsyncResult>>,
     _dxgi_manager: IMFDXGIDeviceManager,
     video: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
@@ -242,6 +280,7 @@ struct MfH264Encoder {
     logged_output_format: bool,
     async_accepts_input: bool,
     latest_input: Option<ID3D11Texture2D>,
+    latest_probe: Option<HostVideoFrameProbe>,
     pending_probes: VecDeque<Option<HostVideoFrameProbe>>,
     probe_reporter: Option<HostVideoProbeReporter>,
 }
@@ -256,6 +295,26 @@ enum AsyncEncoderEvent {
     NeedInput,
     HaveOutput,
     DrainComplete,
+}
+
+#[windows::core::implement(IMFAsyncCallback)]
+struct EncoderEventCallback {
+    results: flume::Sender<IMFAsyncResult>,
+}
+
+impl IMFAsyncCallback_Impl for EncoderEventCallback_Impl {
+    fn GetParameters(&self, _flags: *mut u32, _queue: *mut u32) -> windows::core::Result<()> {
+        Err(windows::core::Error::from_hresult(E_NOTIMPL))
+    }
+
+    fn Invoke(&self, result: windows::core::Ref<IMFAsyncResult>) -> windows::core::Result<()> {
+        let result = result
+            .cloned()
+            .ok_or_else(|| windows::core::Error::from_hresult(E_POINTER))?;
+        self.results
+            .send(result)
+            .map_err(|_| windows::core::Error::from_hresult(E_FAIL))
+    }
 }
 
 impl MfH264Encoder {
@@ -292,6 +351,16 @@ impl MfH264Encoder {
         let output_stream_info = unsafe { transform.GetOutputStreamInfo(0) }
             .with_context(|| "Failed to query H.264 encoder output stream info")?;
         let transform_event_generator = transform.cast::<IMFMediaEventGenerator>().ok();
+        let (transform_event_callback, transform_event_results) =
+            if let Some(events) = &transform_event_generator {
+                let (results, receiver) = flume::unbounded();
+                let callback: IMFAsyncCallback = EncoderEventCallback { results }.into();
+                unsafe { events.BeginGetEvent(&callback, None::<&windows::core::IUnknown>) }
+                    .with_context(|| "Failed to subscribe to Windows H.264 encoder events")?;
+                (Some(callback), Some(receiver))
+            } else {
+                (None, None)
+            };
         let async_accepts_input = transform_event_generator.is_none();
         let probe_reporter = first_frame
             .probe
@@ -301,6 +370,8 @@ impl MfH264Encoder {
         Ok(Self {
             transform,
             transform_event_generator,
+            transform_event_callback,
+            transform_event_results,
             _dxgi_manager: dxgi_manager,
             video,
             video_context,
@@ -323,6 +394,7 @@ impl MfH264Encoder {
             logged_output_format: false,
             async_accepts_input,
             latest_input: None,
+            latest_probe: None,
             pending_probes: VecDeque::new(),
             probe_reporter,
         })
@@ -341,6 +413,11 @@ impl MfH264Encoder {
         SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
+        self.update_latest_frame(frame)?;
+        self.encode_latest_frame(send_packet).await
+    }
+
+    fn update_latest_frame(&mut self, frame: &WindowsFramePipelineFrame) -> eros::Result<()> {
         if frame.size != self.frame_size {
             eros::bail!(
                 "Windows encoder does not support dynamic frame size changes yet: got {}x{}, expected {}x{}",
@@ -363,11 +440,12 @@ impl MfH264Encoder {
             probe.mark_vpp_started();
         }
         let nv12 = self.convert_to_nv12(frame.texture())?;
-        self.latest_input = Some(nv12.clone());
+        self.latest_input = Some(nv12);
         if let Some(probe) = &mut probe {
             probe.mark_vpp_completed();
         }
-        self.encode_input(nv12, probe, send_packet).await
+        self.latest_probe = probe;
+        Ok(())
     }
 
     async fn encode_latest_frame<SendPacket, SendFuture>(
@@ -383,7 +461,8 @@ impl MfH264Encoder {
             .as_ref()
             .cloned()
             .with_context(|| "Windows encoder has no retained frame to encode")?;
-        self.encode_input(texture, None, send_packet).await
+        let probe = self.latest_probe.take();
+        self.encode_input(texture, probe, send_packet).await
     }
 
     async fn encode_input<SendPacket, SendFuture>(
@@ -561,46 +640,54 @@ impl MfH264Encoder {
         let Some(events) = &self.transform_event_generator else {
             return Ok(AsyncEncoderEvent::HaveOutput);
         };
+        let results = self
+            .transform_event_results
+            .as_ref()
+            .with_context(|| "Windows H.264 encoder event callback has no result channel")?;
+        let callback = self
+            .transform_event_callback
+            .as_ref()
+            .with_context(|| "Windows H.264 encoder event callback is unavailable")?;
 
-        for _ in 0..100 {
-            match unsafe {
-                events.GetEvent(windows::Win32::Media::MediaFoundation::MF_EVENT_FLAG_NO_WAIT)
-            } {
-                Ok(event) => {
-                    let event_type = unsafe { event.GetType() }
-                        .with_context(|| "Failed to read H.264 encoder event type")?;
-                    let status = unsafe { event.GetStatus() }
-                        .with_context(|| "Failed to read H.264 encoder event status")?;
-                    debug!(
-                        event = "windows_h264_encoder_event",
-                        event_type,
-                        status = ?status,
-                        "Received Windows H.264 encoder event"
-                    );
-                    if status.is_err() {
-                        Err(windows::core::Error::from_hresult(status))
-                            .with_context(|| "Windows H.264 encoder event reported failure")?;
-                    }
-                    if event_type == METransformHaveOutput.0 as u32 {
-                        return Ok(AsyncEncoderEvent::HaveOutput);
-                    }
-                    if event_type == METransformNeedInput.0 as u32 {
-                        return Ok(AsyncEncoderEvent::NeedInput);
-                    }
-                    if event_type == METransformDrainComplete.0 as u32 {
-                        return Ok(AsyncEncoderEvent::DrainComplete);
-                    }
-                }
-                Err(error) if error.code() == MF_E_NO_EVENTS_AVAILABLE => {
-                    compio::time::sleep(Duration::from_millis(1)).await;
-                }
-                Err(error) => {
-                    Err(error).with_context(|| "Failed to read Windows H.264 encoder event")?;
-                }
+        loop {
+            let result = results
+                .recv_async()
+                .await
+                .with_context(|| "Windows H.264 encoder event callback disconnected")?;
+            let event = unsafe { events.EndGetEvent(&result) }
+                .with_context(|| "Failed to complete Windows H.264 encoder event")?;
+            let event_type = unsafe { event.GetType() }
+                .with_context(|| "Failed to read H.264 encoder event type")?;
+            let status = unsafe { event.GetStatus() }
+                .with_context(|| "Failed to read H.264 encoder event status")?;
+            debug!(
+                event = "windows_h264_encoder_event",
+                event_type,
+                status = ?status,
+                "Received Windows H.264 encoder event"
+            );
+            if status.is_err() {
+                Err(windows::core::Error::from_hresult(status))
+                    .with_context(|| "Windows H.264 encoder event reported failure")?;
+            }
+
+            let encoder_event = if event_type == METransformHaveOutput.0 as u32 {
+                Some(AsyncEncoderEvent::HaveOutput)
+            } else if event_type == METransformNeedInput.0 as u32 {
+                Some(AsyncEncoderEvent::NeedInput)
+            } else if event_type == METransformDrainComplete.0 as u32 {
+                Some(AsyncEncoderEvent::DrainComplete)
+            } else {
+                None
+            };
+            if encoder_event != Some(AsyncEncoderEvent::DrainComplete) {
+                unsafe { events.BeginGetEvent(callback, None::<&windows::core::IUnknown>) }
+                    .with_context(|| "Failed to rearm Windows H.264 encoder event callback")?;
+            }
+            if let Some(encoder_event) = encoder_event {
+                return Ok(encoder_event);
             }
         }
-
-        Ok(AsyncEncoderEvent::NeedInput)
     }
 
     fn process_output(&mut self) -> eros::Result<Option<EncodedOutput>> {
@@ -1498,6 +1585,46 @@ fn frame_duration(frame_rate: FrameRate) -> Duration {
     Duration::from_nanos(nanoseconds.max(1))
 }
 
+struct FixedFrameClock {
+    period: Duration,
+    next_frame_at: Instant,
+}
+
+impl FixedFrameClock {
+    fn new(frame_rate: FrameRate) -> Self {
+        Self::new_at(frame_rate, Instant::now())
+    }
+
+    fn new_at(frame_rate: FrameRate, now: Instant) -> Self {
+        let period = frame_duration(frame_rate);
+        Self {
+            period,
+            next_frame_at: now.checked_add(period).unwrap_or(now),
+        }
+    }
+
+    fn delay(&self) -> Duration {
+        self.delay_at(Instant::now())
+    }
+
+    fn delay_at(&self, now: Instant) -> Duration {
+        self.next_frame_at.saturating_duration_since(now)
+    }
+
+    fn advance(&mut self) {
+        self.advance_at(Instant::now());
+    }
+
+    fn advance_at(&mut self, now: Instant) {
+        let next = self.next_frame_at.checked_add(self.period).unwrap_or(now);
+        self.next_frame_at = if next > now {
+            next
+        } else {
+            now.checked_add(self.period).unwrap_or(now)
+        };
+    }
+}
+
 fn create_input_sample(texture: &ID3D11Texture2D) -> eros::Result<IMFSample> {
     let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false) }
         .with_context(|| "Failed to wrap NV12 D3D11 texture for Media Foundation")?;
@@ -1532,3 +1659,40 @@ const MAX_ENCODER_OUTPUT_SAMPLE_SIZE: u32 = 4 * 1024 * 1024;
 const MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT: usize = 8;
 const H264_KEY_FRAME_INTERVAL: u32 = 1_024;
 const H264_CPB_INTERVALS_PER_SECOND: u32 = 10;
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use crate::kernel::geometry::FrameRate;
+
+    use super::FixedFrameClock;
+
+    #[test]
+    fn fixed_frame_clock_keeps_its_deadline_when_content_arrives() {
+        let start = Instant::now();
+        let clock = FixedFrameClock::new_at(FrameRate::new(100, 1).expect("frame rate"), start);
+
+        assert_eq!(
+            clock.delay_at(start + Duration::from_millis(4)),
+            Duration::from_millis(6)
+        );
+        assert_eq!(
+            clock.delay_at(start + Duration::from_millis(9)),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn fixed_frame_clock_skips_missed_ticks_without_bursting() {
+        let start = Instant::now();
+        let mut clock = FixedFrameClock::new_at(FrameRate::new(100, 1).expect("frame rate"), start);
+
+        clock.advance_at(start + Duration::from_millis(35));
+
+        assert_eq!(
+            clock.delay_at(start + Duration::from_millis(35)),
+            Duration::from_millis(10)
+        );
+    }
+}

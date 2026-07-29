@@ -4637,6 +4637,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-wlr",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
