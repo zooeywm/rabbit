@@ -328,7 +328,6 @@ impl MfH264Encoder {
                     "Windows H.264 encoder rejected the on-demand key-frame request"
                 );
             }
-            let _ = unsafe { sample.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1) };
             self.force_key_frame = false;
         }
         unsafe {
@@ -672,7 +671,9 @@ impl MfH264Encoder {
             .transform
             .cast()
             .with_context(|| "Windows H.264 encoder does not expose ICodecAPI")?;
-        let value = variant_bool(true);
+        // CODECAPI_AVEncVideoForceKeyFrame is an ULONG (VT_UI4), not a VARIANT_BOOL.
+        // Some hardware encoders accept the wrong variant type without acting on it.
+        let value = VARIANT::from(1_u32);
         Ok(
             unsafe { codec_api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value) }
                 .with_context(|| "Failed to request a Windows H.264 key frame")?,
