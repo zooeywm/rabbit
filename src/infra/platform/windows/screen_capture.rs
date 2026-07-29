@@ -122,10 +122,28 @@ impl WgcD3dDevice {
 #[derive(Debug)]
 pub(crate) struct WgcCapturedFrame {
     pub(crate) screen_id: ScreenId,
-    pub(crate) texture: ID3D11Texture2D,
+    pub(crate) surface: WgcCapturedSurface,
     pub(crate) content_size: crate::kernel::geometry::PixelSize,
     pub(crate) frame_rate: crate::kernel::geometry::FrameRate,
     pub(crate) probe: Option<HostVideoFrameProbe>,
+}
+
+#[derive(Debug)]
+pub(crate) struct WgcCapturedSurface {
+    texture: ID3D11Texture2D,
+    owner: Direct3D11CaptureFrame,
+}
+
+impl WgcCapturedSurface {
+    pub(crate) fn texture(&self) -> &ID3D11Texture2D {
+        &self.texture
+    }
+}
+
+impl Drop for WgcCapturedSurface {
+    fn drop(&mut self) {
+        let _ = self.owner.Close();
+    }
 }
 
 pub(crate) struct WgcCaptureLease {
@@ -267,10 +285,12 @@ fn capture_frame_texture(
         height = content.Height,
         "WGC frame arrived"
     );
-    let _ = frame.Close();
     Ok(WgcCapturedFrame {
         screen_id,
-        texture,
+        surface: WgcCapturedSurface {
+            texture,
+            owner: frame,
+        },
         content_size: crate::kernel::geometry::PixelSize {
             width: content.Width.max(0) as u32,
             height: content.Height.max(0) as u32,

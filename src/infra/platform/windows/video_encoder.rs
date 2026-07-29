@@ -221,7 +221,7 @@ impl MfH264Encoder {
         unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }
             .with_context(|| "Failed to start Media Foundation")?;
 
-        let d3d = unsafe { first_frame.texture.GetDevice() }
+        let d3d = unsafe { first_frame.texture().GetDevice() }
             .with_context(|| "Failed to get the WGC frame D3D11 device")?;
         let video: ID3D11VideoDevice = d3d
             .cast()
@@ -681,7 +681,7 @@ impl MfH264Encoder {
     }
 
     fn create_input_sample(&mut self, frame: &WgcFramePipelineFrame) -> eros::Result<IMFSample> {
-        let nv12 = self.convert_to_nv12(&frame.texture)?;
+        let nv12 = self.convert_to_nv12(frame.texture())?;
         let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &nv12, 0, false) }
             .with_context(|| "Failed to wrap NV12 D3D11 texture for Media Foundation")?;
         let sample = unsafe { MFCreateSample() }

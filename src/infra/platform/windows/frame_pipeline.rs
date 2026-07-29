@@ -14,7 +14,7 @@ use crate::kernel::{
     screen_manager::ScreenId,
 };
 
-use super::screen_capture::{WgcCaptureLease, WgcFrameReceiver};
+use super::screen_capture::{WgcCaptureLease, WgcCapturedSurface, WgcFrameReceiver};
 
 #[derive(Debug, Default, kudi::DepInj)]
 #[target(WgcFramePipelineManager)]
@@ -29,11 +29,17 @@ impl WgcFramePipelineManagerState {
 #[derive(Debug)]
 pub(crate) struct WgcFramePipelineFrame {
     pub(crate) screen_id: ScreenId,
-    pub(crate) texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
     pub(crate) size: PixelSize,
     pub(crate) source_frame_rate: FrameRate,
     pub(crate) frame_rate: FrameRate,
     pub(crate) probe: Option<super::host_video_probe::HostVideoFrameProbe>,
+    surface: WgcCapturedSurface,
+}
+
+impl WgcFramePipelineFrame {
+    pub(crate) fn texture(&self) -> &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D {
+        self.surface.texture()
+    }
 }
 
 pub(crate) struct WgcFramePipelineSubscription {
@@ -75,7 +81,6 @@ impl futures_core::Stream for WgcFramePipelineSubscription {
                     }
                     let emitted = WgcFramePipelineFrame {
                         screen_id: frame.screen_id,
-                        texture: frame.texture,
                         size: if this.frame_size.width == 0 || this.frame_size.height == 0 {
                             frame.content_size
                         } else {
@@ -84,6 +89,7 @@ impl futures_core::Stream for WgcFramePipelineSubscription {
                         source_frame_rate: frame.frame_rate,
                         frame_rate: this.frame_rate,
                         probe,
+                        surface: frame.surface,
                     };
                     return Poll::Ready(Some(Ok(Rc::new(emitted))));
                 }
