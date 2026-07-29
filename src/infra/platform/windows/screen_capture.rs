@@ -31,10 +31,10 @@ use windows::{
                 ID3D11Texture2D,
             },
             Dxgi::{
-                Common::DXGI_FORMAT_B8G8R8A8_UNORM, CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND,
-                DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIAdapter1,
-                IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutput5,
-                IDXGIOutputDuplication, IDXGIResource,
+                Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT,
+                DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
+                IDXGIOutput, IDXGIOutput1, IDXGIOutput5, IDXGIOutputDuplication, IDXGIResource,
             },
         },
         System::Threading::{
@@ -190,30 +190,34 @@ pub(crate) struct WindowsCapturedFrame {
 
 #[derive(Debug)]
 pub(crate) struct WindowsCapturedSurface {
-    texture: ID3D11Texture2D,
+    texture: Option<ID3D11Texture2D>,
     owner: WindowsCapturedSurfaceOwner,
 }
 
 #[derive(Debug)]
 enum WindowsCapturedSurfaceOwner {
     Wgc(Direct3D11CaptureFrame),
-    DesktopDuplication(flume::Sender<()>),
+    DesktopDuplication(flume::Sender<ID3D11Texture2D>),
 }
 
 impl WindowsCapturedSurface {
     pub(crate) fn texture(&self) -> &ID3D11Texture2D {
-        &self.texture
+        self.texture
+            .as_ref()
+            .expect("a captured surface always owns its texture")
     }
 }
 
 impl Drop for WindowsCapturedSurface {
     fn drop(&mut self) {
-        match &self.owner {
+        match &mut self.owner {
             WindowsCapturedSurfaceOwner::Wgc(frame) => {
                 let _ = frame.Close();
             }
-            WindowsCapturedSurfaceOwner::DesktopDuplication(release) => {
-                let _ = release.try_send(());
+            WindowsCapturedSurfaceOwner::DesktopDuplication(recycle) => {
+                if let Some(texture) = self.texture.take() {
+                    let _ = recycle.try_send(texture);
+                }
             }
         }
     }
@@ -422,9 +426,10 @@ fn acquire_desktop_duplication(
     probe_frame_id: Option<Arc<AtomicU64>>,
     probe_interval: Duration,
 ) -> eros::Result<ScreenCaptureSource<WindowsCaptureLease, WindowsFrameReceiver>> {
-    let capture = DesktopDuplicationCapture::new(monitor)?;
+    let capture = DesktopDuplicationCapture::new(monitor, frame_schedule.frame_rate_mode)?;
     let (commands, command_receiver) = flume::bounded(1);
     let (sender, receiver) = flume::bounded(1);
+    let stale = receiver.clone();
     let thread = thread::Builder::new()
         .name(format!("rabbit-ddx-{}", screen_id.get()))
         .spawn(move || {
@@ -434,6 +439,7 @@ fn acquire_desktop_duplication(
                 probe_interval,
                 commands: command_receiver,
                 frames: sender.clone(),
+                stale,
             };
             if let Err(error) =
                 run_desktop_duplication_capture(capture, frame_rate, frame_schedule, &output)
@@ -457,15 +463,20 @@ fn acquire_desktop_duplication(
 }
 
 struct DesktopDuplicationCapture {
-    device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     size: crate::kernel::geometry::PixelSize,
-    texture: Option<ID3D11Texture2D>,
+    texture_pool: DesktopDuplicationTexturePool,
+    fixed_snapshot: Option<ID3D11Texture2D>,
 }
 
 impl DesktopDuplicationCapture {
-    fn new(monitor: WindowsMonitorHandle) -> eros::Result<Self> {
+    fn new(
+        monitor: WindowsMonitorHandle,
+        frame_rate_mode: VideoFrameRateMode,
+    ) -> eros::Result<Self> {
+        const TEXTURE_COUNT: usize = 4;
+
         let (adapter, output) = find_dxgi_output(monitor)?;
         let device = create_d3d_device_for_adapter(&adapter)?;
         let context = unsafe { device.GetImmediateContext() }
@@ -483,6 +494,12 @@ impl DesktopDuplicationCapture {
         if size.width == 0 || size.height == 0 {
             eros::bail!("Desktop Duplication returned an empty desktop mode");
         }
+        let fixed_snapshot = match frame_rate_mode {
+            VideoFrameRateMode::Dynamic => None,
+            VideoFrameRateMode::Fixed => Some(create_desktop_duplication_texture(&device, size)?),
+        };
+        let texture_pool_size = TEXTURE_COUNT - usize::from(fixed_snapshot.is_some());
+        let texture_pool = DesktopDuplicationTexturePool::new(&device, size, texture_pool_size)?;
         info!(
             event = "windows_desktop_duplication_selected",
             backend = "dxgi-desktop-duplication",
@@ -492,18 +509,25 @@ impl DesktopDuplicationCapture {
             width = size.width,
             height = size.height,
             format = ?description.ModeDesc.Format,
+            texture_pool_size,
+            snapshot_texture = fixed_snapshot.is_some(),
+            total_capture_textures = TEXTURE_COUNT,
             "Selected Windows screen capture pipeline"
         );
         Ok(Self {
-            device,
             context,
             duplication,
             size,
-            texture: None,
+            texture_pool,
+            fixed_snapshot,
         })
     }
 
-    fn acquire_latest(&mut self, timeout_ms: u32) -> eros::Result<bool> {
+    fn acquire_latest_into(
+        &mut self,
+        timeout_ms: u32,
+        target: Option<&ID3D11Texture2D>,
+    ) -> eros::Result<bool> {
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         match unsafe {
@@ -520,8 +544,10 @@ impl DesktopDuplicationCapture {
 
         let result = if frame_info.LastPresentTime == 0 {
             Ok(false)
+        } else if let Some(target) = target {
+            self.copy_desktop_texture(resource, target).map(|()| true)
         } else {
-            self.copy_desktop_texture(resource).map(|()| true)
+            Ok(true)
         };
         let release = unsafe { self.duplication.ReleaseFrame() }
             .with_context(|| "Failed to release a Desktop Duplication frame");
@@ -530,7 +556,11 @@ impl DesktopDuplicationCapture {
         Ok(frame_info.LastPresentTime != 0)
     }
 
-    fn copy_desktop_texture(&mut self, resource: Option<IDXGIResource>) -> eros::Result<()> {
+    fn copy_desktop_texture(
+        &self,
+        resource: Option<IDXGIResource>,
+        target: &ID3D11Texture2D,
+    ) -> eros::Result<()> {
         let resource =
             resource.with_context(|| "Desktop Duplication returned no desktop resource")?;
         let source: ID3D11Texture2D = resource
@@ -549,36 +579,81 @@ impl DesktopDuplicationCapture {
                 source_desc.Format
             );
         }
-        if self.texture.is_none() {
-            let owned_desc = D3D11_TEXTURE2D_DESC {
-                Width: source_desc.Width,
-                Height: source_desc.Height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: source_desc.Format,
-                SampleDesc: source_desc.SampleDesc,
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let mut texture = None;
-            unsafe {
-                self.device
-                    .CreateTexture2D(&owned_desc, None, Some(&mut texture))
-            }
-            .with_context(|| "Failed to allocate Desktop Duplication snapshot texture")?;
-            self.texture = Some(texture.with_context(
-                || "CreateTexture2D returned no Desktop Duplication snapshot texture",
-            )?);
-        }
-        let texture = self
-            .texture
-            .as_ref()
-            .with_context(|| "Desktop Duplication snapshot texture is unavailable")?;
-        unsafe { self.context.CopyResource(texture, &source) };
+        unsafe { self.context.CopyResource(target, &source) };
         Ok(())
     }
+
+    fn take_output_texture(
+        &self,
+        output: &DesktopDuplicationCaptureOutput,
+    ) -> Option<ID3D11Texture2D> {
+        self.texture_pool.take().or_else(|| {
+            output.evict_stale();
+            self.texture_pool.take()
+        })
+    }
+
+    fn recycle_output_texture(&self, texture: ID3D11Texture2D) {
+        self.texture_pool.recycle(texture);
+    }
+}
+
+struct DesktopDuplicationTexturePool {
+    recycle: flume::Sender<ID3D11Texture2D>,
+    available: flume::Receiver<ID3D11Texture2D>,
+}
+
+impl DesktopDuplicationTexturePool {
+    fn new(
+        device: &ID3D11Device,
+        size: crate::kernel::geometry::PixelSize,
+        texture_count: usize,
+    ) -> eros::Result<Self> {
+        let (recycle, available) = flume::bounded(texture_count);
+        for _ in 0..texture_count {
+            if recycle
+                .try_send(create_desktop_duplication_texture(device, size)?)
+                .is_err()
+            {
+                eros::bail!("Failed to initialize Desktop Duplication texture pool");
+            }
+        }
+        Ok(Self { recycle, available })
+    }
+
+    fn take(&self) -> Option<ID3D11Texture2D> {
+        self.available.try_recv().ok()
+    }
+
+    fn recycle(&self, texture: ID3D11Texture2D) {
+        let _ = self.recycle.try_send(texture);
+    }
+}
+
+fn create_desktop_duplication_texture(
+    device: &ID3D11Device,
+    size: crate::kernel::geometry::PixelSize,
+) -> eros::Result<ID3D11Texture2D> {
+    let description = D3D11_TEXTURE2D_DESC {
+        Width: size.width,
+        Height: size.height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe { device.CreateTexture2D(&description, None, Some(&mut texture)) }
+        .with_context(|| "Failed to allocate Desktop Duplication capture texture")?;
+    Ok(texture
+        .with_context(|| "CreateTexture2D returned no Desktop Duplication capture texture")?)
 }
 
 fn run_desktop_duplication_capture(
@@ -608,7 +683,11 @@ fn run_dynamic_desktop_duplication_capture(
             return Ok(());
         }
 
-        if !capture.acquire_latest(SHUTDOWN_POLL_INTERVAL_MS)? {
+        let texture = capture.take_output_texture(output);
+        if !capture.acquire_latest_into(SHUTDOWN_POLL_INTERVAL_MS, texture.as_ref())? {
+            if let Some(texture) = texture {
+                capture.recycle_output_texture(texture);
+            }
             // AcquireNextFrame holds the D3D11 device's unfair multithread lock
             // for the entire timeout. Yield it while the desktop is idle so an
             // on-demand IDR or encoder teardown is not starved by the capture
@@ -616,7 +695,15 @@ fn run_dynamic_desktop_duplication_capture(
             thread::sleep(Duration::from_millis(10));
             continue;
         }
-        if !output.publish(capture, frame_rate, false)? {
+        let Some(texture) = texture else {
+            trace!(
+                event = "windows_desktop_duplication_frame_dropped",
+                reason = "capture-texture-pool-exhausted",
+                "Dropped an unencoded Desktop Duplication frame"
+            );
+            continue;
+        };
+        if !output.publish(texture, capture, frame_rate, false) {
             return Ok(());
         }
     }
@@ -629,6 +716,7 @@ fn run_fixed_desktop_duplication_capture(
 ) -> eros::Result<()> {
     let timer = HighResolutionWaitableTimer::new()?;
     let mut clock = FixedCaptureClock::new(frame_rate);
+    let mut snapshot_valid = false;
     info!(
         event = "windows_desktop_duplication_fixed_rate_configured",
         screen_id = output.screen_id.get(),
@@ -649,11 +737,25 @@ fn run_fixed_desktop_duplication_capture(
             return Ok(());
         }
 
-        let _updated = capture.acquire_latest(0)?;
-        if capture.texture.is_none() {
+        let snapshot = capture
+            .fixed_snapshot
+            .as_ref()
+            .cloned()
+            .with_context(|| "Fixed Desktop Duplication snapshot texture is unavailable")?;
+        snapshot_valid |= capture.acquire_latest_into(0, Some(&snapshot))?;
+        if !snapshot_valid {
             continue;
         }
-        if !output.publish(capture, frame_rate, true)? {
+        let Some(texture) = capture.take_output_texture(output) else {
+            trace!(
+                event = "windows_desktop_duplication_frame_dropped",
+                reason = "capture-texture-pool-exhausted",
+                "Dropped an unencoded fixed-rate Desktop Duplication frame"
+            );
+            continue;
+        };
+        unsafe { capture.context.CopyResource(&texture, &snapshot) };
+        if !output.publish(texture, capture, frame_rate, true) {
             return Ok(());
         }
     }
@@ -665,21 +767,17 @@ struct DesktopDuplicationCaptureOutput {
     probe_interval: Duration,
     commands: flume::Receiver<DesktopDuplicationCommand>,
     frames: flume::Sender<eros::Result<WindowsCapturedFrame>>,
+    stale: flume::Receiver<eros::Result<WindowsCapturedFrame>>,
 }
 
 impl DesktopDuplicationCaptureOutput {
     fn publish(
         &self,
+        texture: ID3D11Texture2D,
         capture: &DesktopDuplicationCapture,
         frame_rate: FrameRate,
         fixed_rate_paced: bool,
-    ) -> eros::Result<bool> {
-        let texture = capture
-            .texture
-            .as_ref()
-            .cloned()
-            .with_context(|| "Desktop Duplication snapshot texture is unavailable")?;
-        let (release, released) = flume::bounded(1);
+    ) -> bool {
         let probe = self.probe_frame_id.as_ref().map(|next_frame_id| {
             HostVideoFrameProbe::new(
                 next_frame_id.fetch_add(1, Ordering::Relaxed),
@@ -689,28 +787,31 @@ impl DesktopDuplicationCaptureOutput {
         let frame = WindowsCapturedFrame {
             screen_id: self.screen_id,
             surface: WindowsCapturedSurface {
-                texture,
-                owner: WindowsCapturedSurfaceOwner::DesktopDuplication(release),
+                texture: Some(texture),
+                owner: WindowsCapturedSurfaceOwner::DesktopDuplication(
+                    capture.texture_pool.recycle.clone(),
+                ),
             },
             content_size: capture.size,
             frame_rate,
             fixed_rate_paced,
             probe,
         };
-        if self.frames.send(Ok(frame)).is_err() {
-            let _ = released.recv();
-            return Ok(false);
-        }
-
+        let mut value = Ok(frame);
         loop {
-            match released.recv_timeout(Duration::from_millis(10)) {
-                Ok(()) | Err(flume::RecvTimeoutError::Disconnected) => return Ok(true),
-                Err(flume::RecvTimeoutError::Timeout) if self.shutdown_requested() => {
-                    return Ok(false);
+            match self.frames.try_send(value) {
+                Ok(()) => return true,
+                Err(flume::TrySendError::Full(returned)) => {
+                    value = returned;
+                    self.evict_stale();
                 }
-                Err(flume::RecvTimeoutError::Timeout) => {}
+                Err(flume::TrySendError::Disconnected(_)) => return false,
             }
         }
+    }
+
+    fn evict_stale(&self) {
+        let _ = self.stale.try_recv();
     }
 
     fn shutdown_requested(&self) -> bool {
@@ -949,7 +1050,7 @@ fn capture_frame_texture(
     Ok(WindowsCapturedFrame {
         screen_id,
         surface: WindowsCapturedSurface {
-            texture,
+            texture: Some(texture),
             owner: WindowsCapturedSurfaceOwner::Wgc(frame),
         },
         content_size: crate::kernel::geometry::PixelSize {
