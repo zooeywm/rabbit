@@ -11,7 +11,7 @@ use futures_util::{
     StreamExt as _,
     future::{Either, select},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use windows::{
     Win32::{
         Foundation::{E_FAIL, E_NOTIMPL, E_POINTER, RECT},
@@ -24,8 +24,8 @@ use windows::{
                 D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
                 D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
                 D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device,
-                ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1,
-                ID3D11VideoDevice, ID3D11VideoProcessorEnumerator,
+                ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext,
+                ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessorEnumerator,
             },
             Dxgi::Common::{
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
@@ -277,14 +277,20 @@ struct MfH264Encoder {
     force_key_frame: bool,
     logged_output_format: bool,
     async_accepts_input: bool,
-    latest_input: Option<ID3D11Texture2D>,
+    latest_input: Option<Rc<WindowsFramePipelineFrame>>,
     latest_probe: Option<HostVideoFrameProbe>,
-    pending_probes: VecDeque<Option<HostVideoFrameProbe>>,
+    pending_inputs: VecDeque<PendingInput>,
     probe_reporter: Option<HostVideoProbeReporter>,
 }
 
 struct EncodedOutput {
     sample: IMFSample,
+    probe: Option<HostVideoFrameProbe>,
+}
+
+struct PendingInput {
+    sample_time_hns: i64,
+    texture: Nv12InputTexture,
     probe: Option<HostVideoFrameProbe>,
 }
 
@@ -393,7 +399,7 @@ impl MfH264Encoder {
             async_accepts_input,
             latest_input: None,
             latest_probe: None,
-            pending_probes: VecDeque::new(),
+            pending_inputs: VecDeque::new(),
             probe_reporter,
         })
     }
@@ -404,7 +410,7 @@ impl MfH264Encoder {
 
     async fn encode_frame<SendPacket, SendFuture>(
         &mut self,
-        frame: &WindowsFramePipelineFrame,
+        frame: &Rc<WindowsFramePipelineFrame>,
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
     where
@@ -415,7 +421,7 @@ impl MfH264Encoder {
         self.encode_latest_frame(send_packet).await
     }
 
-    fn update_latest_frame(&mut self, frame: &WindowsFramePipelineFrame) -> eros::Result<()> {
+    fn update_latest_frame(&mut self, frame: &Rc<WindowsFramePipelineFrame>) -> eros::Result<()> {
         if frame.size != self.frame_size {
             eros::bail!(
                 "Windows encoder does not support dynamic frame size changes yet: got {}x{}, expected {}x{}",
@@ -434,14 +440,7 @@ impl MfH264Encoder {
             probe.mark_encoder_received();
         }
 
-        if let Some(probe) = &mut probe {
-            probe.mark_vpp_started();
-        }
-        let nv12 = self.convert_to_nv12(frame.texture())?;
-        self.latest_input = Some(nv12);
-        if let Some(probe) = &mut probe {
-            probe.mark_vpp_completed();
-        }
+        self.latest_input = Some(frame.clone());
         self.latest_probe = probe;
         Ok(())
     }
@@ -454,18 +453,34 @@ impl MfH264Encoder {
         SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
-        let texture = self
+        let frame = self
             .latest_input
             .as_ref()
             .cloned()
             .with_context(|| "Windows encoder has no retained frame to encode")?;
-        let probe = self.latest_probe.take();
+        let mut probe = self.latest_probe.take();
+        let texture = loop {
+            if let Some(probe) = &mut probe {
+                probe.mark_vpp_started();
+            }
+            match self.try_convert_to_nv12(frame.texture())? {
+                Some(texture) => {
+                    if let Some(probe) = &mut probe {
+                        probe.mark_vpp_completed();
+                    }
+                    break texture;
+                }
+                None => {
+                    self.wait_for_input_texture(send_packet).await?;
+                }
+            }
+        };
         self.encode_input(texture, probe, send_packet).await
     }
 
     async fn encode_input<SendPacket, SendFuture>(
         &mut self,
-        texture: ID3D11Texture2D,
+        texture: Nv12InputTexture,
         mut probe: Option<HostVideoFrameProbe>,
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
@@ -475,13 +490,24 @@ impl MfH264Encoder {
     {
         if self.transform_event_generator.is_some() {
             while !self.async_accepts_input {
-                self.handle_async_encoder_event().await?;
+                match self.handle_async_encoder_event().await? {
+                    AsyncEncoderEvent::HaveOutput => {
+                        self.receive_packets(send_packet).await?;
+                    }
+                    AsyncEncoderEvent::NeedInput => {}
+                    AsyncEncoderEvent::DrainComplete => {
+                        eros::bail!(
+                            "Windows H.264 encoder drained while waiting to accept an input"
+                        );
+                    }
+                }
             }
         }
 
-        let sample = create_input_sample(&texture)?;
+        let sample_time_hns = self.next_sample_time_hns;
+        let sample = create_input_sample(texture.texture())?;
         unsafe {
-            sample.SetSampleTime(self.next_sample_time_hns)?;
+            sample.SetSampleTime(sample_time_hns)?;
             sample.SetSampleDuration(self.frame_duration_hns)?;
         }
         if self.force_key_frame {
@@ -502,9 +528,19 @@ impl MfH264Encoder {
         if let Some(probe) = &mut probe {
             probe.mark_encoder_submitted();
         }
-        if self.probe_reporter.is_some() {
-            self.pending_probes.push_back(probe);
-        }
+        let texture_slot_id = texture.slot_id();
+        debug_assert!(
+            !self
+                .pending_inputs
+                .iter()
+                .any(|pending| pending.texture.slot_id() == texture_slot_id),
+            "one NV12 texture slot cannot belong to two pending encoder inputs"
+        );
+        self.pending_inputs.push_back(PendingInput {
+            sample_time_hns,
+            texture,
+            probe,
+        });
         let mut produced_output = false;
         if self.transform_event_generator.is_some() {
             self.async_accepts_input = false;
@@ -557,6 +593,41 @@ impl MfH264Encoder {
             }
         }
         self.receive_packets(send_packet).await
+    }
+
+    async fn wait_for_input_texture<SendPacket, SendFuture>(
+        &mut self,
+        send_packet: &mut SendPacket,
+    ) -> eros::Result<()>
+    where
+        SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
+        if self.transform_event_generator.is_some() {
+            loop {
+                match self.handle_async_encoder_event().await? {
+                    AsyncEncoderEvent::HaveOutput => {
+                        self.receive_packets(send_packet).await?;
+                        return Ok(());
+                    }
+                    AsyncEncoderEvent::NeedInput => {}
+                    AsyncEncoderEvent::DrainComplete => {
+                        eros::bail!(
+                            "Windows H.264 encoder drained while waiting for an NV12 input texture"
+                        );
+                    }
+                }
+            }
+        }
+
+        let pending_before = self.pending_inputs.len();
+        self.receive_packets(send_packet).await?;
+        if self.pending_inputs.len() >= pending_before {
+            eros::bail!(
+                "Windows H.264 encoder exhausted its NV12 texture pool without producing output"
+            );
+        }
+        Ok(())
     }
 
     async fn receive_packets<SendPacket, SendFuture>(
@@ -722,10 +793,46 @@ impl MfH264Encoder {
                     let Some(sample) = sample else {
                         return Ok(None);
                     };
-                    let mut probe = self.pending_probes.pop_front().flatten();
+                    let output_sample_time_hns = unsafe { sample.GetSampleTime() }.ok();
+                    let pending_index = output_sample_time_hns.and_then(|sample_time| {
+                        self.pending_inputs
+                            .iter()
+                            .position(|pending| pending.sample_time_hns == sample_time)
+                    });
+                    if output_sample_time_hns.is_some() && pending_index.is_none() {
+                        warn!(
+                            event = "windows_h264_encoder_output_pts_unmatched",
+                            output_sample_time_hns,
+                            oldest_pending_sample_time_hns = self
+                                .pending_inputs
+                                .front()
+                                .map(|pending| pending.sample_time_hns),
+                            "Falling back to input order for an unmatched encoder output PTS"
+                        );
+                    }
+                    let PendingInput {
+                        sample_time_hns,
+                        texture,
+                        mut probe,
+                    } = self
+                        .pending_inputs
+                        .remove(pending_index.unwrap_or(0))
+                        .with_context(
+                            || "Windows H.264 encoder produced output without a pending input",
+                        )?;
+                    let texture_slot_id = texture.slot_id();
+                    drop(texture);
                     if let Some(probe) = &mut probe {
                         probe.mark_encoder_completed();
                     }
+                    trace!(
+                        event = "windows_h264_encoder_input_completed",
+                        sample_time_hns,
+                        output_sample_time_hns,
+                        texture_slot_id,
+                        pending_inputs = self.pending_inputs.len(),
+                        "Released an NV12 encoder input texture"
+                    );
                     return Ok(Some(EncodedOutput { sample, probe }));
                 }
                 Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
@@ -856,16 +963,13 @@ impl MfH264Encoder {
         )
     }
 
-    fn convert_to_nv12(&mut self, texture: &ID3D11Texture2D) -> eros::Result<ID3D11Texture2D> {
+    fn try_convert_to_nv12(
+        &mut self,
+        texture: &ID3D11Texture2D,
+    ) -> eros::Result<Option<Nv12InputTexture>> {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
-        if desc.Format == DXGI_FORMAT_NV12
-            && desc.Width == self.frame_size.width
-            && desc.Height == self.frame_size.height
-        {
-            return Ok(texture.clone());
-        }
-        if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+        if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_NV12 {
             eros::bail!(
                 "Windows capture frame has unsupported D3D11 format {:?}",
                 desc.Format
@@ -910,12 +1014,61 @@ impl Drop for MfH264Encoder {
 struct BgraToNv12Converter {
     source_size: PixelSize,
     output_size: PixelSize,
-    output: ID3D11Texture2D,
+    texture_pool: Nv12TexturePool,
     enumerator: ID3D11VideoProcessorEnumerator,
-    output_view: windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorOutputView,
     processor: windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessor,
+    context: ID3D11DeviceContext,
     video: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
+}
+
+struct Nv12TexturePool {
+    recycle: flume::Sender<Nv12TextureSlot>,
+    available: flume::Receiver<Nv12TextureSlot>,
+}
+
+struct Nv12TextureSlot {
+    id: usize,
+    texture: ID3D11Texture2D,
+    output_view: windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorOutputView,
+}
+
+struct Nv12InputTexture {
+    slot: Option<Nv12TextureSlot>,
+    recycle: flume::Sender<Nv12TextureSlot>,
+}
+
+impl Nv12InputTexture {
+    fn slot_id(&self) -> usize {
+        self.slot
+            .as_ref()
+            .expect("an NV12 input lease always owns its texture slot")
+            .id
+    }
+
+    fn texture(&self) -> &ID3D11Texture2D {
+        &self
+            .slot
+            .as_ref()
+            .expect("an NV12 input lease always owns its texture slot")
+            .texture
+    }
+
+    fn output_view(&self) -> &windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessorOutputView {
+        &self
+            .slot
+            .as_ref()
+            .expect("an NV12 input lease always owns its texture slot")
+            .output_view
+    }
+}
+
+impl Drop for Nv12InputTexture {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            let _ = self.recycle.try_send(slot);
+        }
+    }
 }
 
 impl BgraToNv12Converter {
@@ -971,45 +1124,63 @@ impl BgraToNv12Converter {
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
-        let mut output = None;
-        unsafe { d3d.CreateTexture2D(&output_desc, None, Some(&mut output)) }
-            .with_context(|| "Failed to allocate NV12 encoder texture")?;
-        let output = output.with_context(|| "CreateTexture2D returned no NV12 texture")?;
-
         let output_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
             ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
             Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
                 Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
             },
         };
-        let mut output_view = None;
-        unsafe {
-            video.CreateVideoProcessorOutputView(
-                &output.cast::<ID3D11Resource>()?,
-                &enumerator,
-                &output_view_desc,
-                Some(&mut output_view),
-            )
+        const NV12_TEXTURE_COUNT: usize = 4;
+        let (recycle, available) = flume::bounded(NV12_TEXTURE_COUNT);
+        for id in 0..NV12_TEXTURE_COUNT {
+            let mut texture = None;
+            unsafe { d3d.CreateTexture2D(&output_desc, None, Some(&mut texture)) }
+                .with_context(|| "Failed to allocate pooled NV12 encoder texture")?;
+            let texture =
+                texture.with_context(|| "CreateTexture2D returned no pooled NV12 texture")?;
+            let mut output_view = None;
+            unsafe {
+                video.CreateVideoProcessorOutputView(
+                    &texture.cast::<ID3D11Resource>()?,
+                    &enumerator,
+                    &output_view_desc,
+                    Some(&mut output_view),
+                )
+            }
+            .with_context(|| "Failed to create pooled NV12 video processor output view")?;
+            let output_view =
+                output_view.with_context(|| "D3D11 returned no pooled processor output view")?;
+            if recycle
+                .try_send(Nv12TextureSlot {
+                    id,
+                    texture,
+                    output_view,
+                })
+                .is_err()
+            {
+                eros::bail!("Failed to initialize the NV12 encoder texture pool");
+            }
         }
-        .with_context(|| "Failed to create NV12 video processor output view")?;
-        let output_view = output_view.with_context(|| "D3D11 returned no processor output view")?;
         set_video_processor_color_space(video_context, &processor);
+        let context = unsafe { d3d.GetImmediateContext() }
+            .with_context(|| "Failed to get the NV12 texture pool D3D11 context")?;
         debug!(
             event = "windows_video_processor_scaler_configured",
             source_width = source_size.width,
             source_height = source_size.height,
             output_width = output_size.width,
             output_height = output_size.height,
+            texture_pool_size = NV12_TEXTURE_COUNT,
             "Configured full-frame D3D11 video processor scaling"
         );
 
         Ok(Self {
             source_size,
             output_size,
-            output,
+            texture_pool: Nv12TexturePool { recycle, available },
             enumerator,
-            output_view,
             processor,
+            context,
             video: video.clone(),
             video_context: video_context.clone(),
         })
@@ -1019,7 +1190,20 @@ impl BgraToNv12Converter {
         self.source_size == source_size && self.output_size == output_size
     }
 
-    fn convert(&mut self, texture: &ID3D11Texture2D) -> eros::Result<ID3D11Texture2D> {
+    fn convert(&mut self, texture: &ID3D11Texture2D) -> eros::Result<Option<Nv12InputTexture>> {
+        let Ok(slot) = self.texture_pool.available.try_recv() else {
+            return Ok(None);
+        };
+        let output = Nv12InputTexture {
+            slot: Some(slot),
+            recycle: self.texture_pool.recycle.clone(),
+        };
+        let mut source_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut source_desc) };
+        if source_desc.Format == DXGI_FORMAT_NV12 && self.source_size == self.output_size {
+            unsafe { self.context.CopyResource(output.texture(), texture) };
+            return Ok(Some(output));
+        }
         let input_view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
@@ -1056,10 +1240,10 @@ impl BgraToNv12Converter {
         }];
         unsafe {
             self.video_context
-                .VideoProcessorBlt(&self.processor, &self.output_view, 0, &streams)
+                .VideoProcessorBlt(&self.processor, output.output_view(), 0, &streams)
         }
         .with_context(|| "Failed to convert BGRA capture texture to NV12")?;
-        Ok(self.output.clone())
+        Ok(Some(output))
     }
 }
 
