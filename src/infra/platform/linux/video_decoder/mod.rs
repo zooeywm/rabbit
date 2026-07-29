@@ -57,11 +57,6 @@ impl GStreamerVideoDecoder {
         let output_caps = decoded_dma_buf_caps();
         let factory = Self::select_hardware_h264_decoder(&output_caps)?;
         let factory_name = factory.name();
-        info!(
-            event = "video_decoder_selected",
-            factory = %factory_name,
-            "Selected hardware H.264 DMA-BUF decoder"
-        );
         let decoder = factory
             .create()
             .name("h264-decoder")
@@ -160,6 +155,18 @@ impl GStreamerVideoDecoder {
         gstreamer::Element::link_many(elements)
             .with_context(|| "Failed to link GStreamer H.264 DMA-BUF decoding pipeline")?;
         let terminal_messages = terminal_messages(&pipeline)?;
+        info!(
+            event = "linux_video_decoder_selected",
+            framework = "gstreamer",
+            codec = "h264",
+            factory = %factory_name,
+            depayloader = "rtph264depay",
+            parser = "h264parse",
+            input_payload = "rtp",
+            output_memory = "dma-buf",
+            hardware = true,
+            "Selected Linux video decoder pipeline"
+        );
 
         Ok(Self {
             pipeline,

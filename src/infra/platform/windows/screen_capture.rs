@@ -290,11 +290,6 @@ fn acquire_wgc(
     probe_frame_id: Option<Arc<AtomicU64>>,
     probe_interval: Duration,
 ) -> eros::Result<ScreenCaptureSource<WindowsCaptureLease, WindowsFrameReceiver>> {
-    info!(
-        event = "windows_wgc_capture_selected",
-        screen_id = screen_id.get(),
-        "Selected Windows Graphics Capture"
-    );
     let item = create_capture_item_for_monitor(monitor)
         .with_context(|| format!("Failed to create WGC item for screen {}", screen_id.get()))?;
     let size = item
@@ -349,10 +344,17 @@ fn acquire_wgc(
     session
         .StartCapture()
         .with_context(|| "Failed to start WGC capture session")?;
-    debug!(
-        event = "wgc_capture_started",
-        screen_id = screen_id.0,
-        "WGC capture started"
+    info!(
+        event = "windows_wgc_capture_selected",
+        screen_id = screen_id.get(),
+        backend = "windows-graphics-capture",
+        graphics_api = "d3d11",
+        pixel_format = "bgra8-unorm",
+        memory = "d3d11-texture",
+        update_source = "frame-arrived",
+        width = size.Width,
+        height = size.Height,
+        "Selected Windows screen capture pipeline"
     );
 
     Ok(ScreenCaptureSource {
@@ -438,10 +440,14 @@ impl DesktopDuplicationCapture {
         }
         info!(
             event = "windows_desktop_duplication_selected",
+            backend = "dxgi-desktop-duplication",
+            graphics_api = "d3d11",
+            memory = "d3d11-texture",
+            update_source = "acquire-next-frame",
             width = size.width,
             height = size.height,
             format = ?description.ModeDesc.Format,
-            "Selected Windows Desktop Duplication capture"
+            "Selected Windows screen capture pipeline"
         );
         Ok(Self {
             device,

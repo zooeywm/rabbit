@@ -181,7 +181,15 @@ impl MfH264Decoder {
         }
         info!(
             event = "windows_video_decoder_selected",
-            "Selected Media Foundation D3D11 H.264 decoder"
+            framework = "media-foundation",
+            codec = "h264",
+            decoder_name = "Microsoft H.264 Decoder MFT",
+            transform_clsid = ?CLSID_MSH264DecoderMFT,
+            device_manager = "d3d11",
+            output_memory = "d3d11-texture",
+            output_format = "nv12",
+            d3d11_aware = true,
+            "Selected Windows video decoder pipeline"
         );
         Ok(Self {
             events: transform.cast().ok(),

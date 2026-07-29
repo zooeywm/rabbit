@@ -357,6 +357,18 @@ impl WaylandVideoRenderer {
                 "Wayland compositor does not expose usable color-representation-v1 metadata; keeping the independent desynchronized video subsurface"
             );
         }
+        tracing::info!(
+            event = "linux_video_renderer_selected",
+            backend = "wayland-subsurface",
+            presentation = "linux-dmabuf",
+            scaling = "wp-viewporter",
+            synchronization = "desynchronized",
+            zero_copy = true,
+            dmabuf_protocol_version = dmabuf_version,
+            supported_dmabuf_formats = state.supported_formats.0.len(),
+            bt709_limited_metadata = color_representation.is_some(),
+            "Selected Linux video renderer pipeline"
+        );
 
         Ok(Self {
             connection,

@@ -278,6 +278,24 @@ impl KmsCaptureLoop {
                 }
             }
         };
+        tracing::info!(
+            target: "rabbit::screen_capture",
+            event = "linux_screen_capture_selected",
+            output = %screen_name,
+            backend = "drm-kms",
+            capture_source = "drm-framebuffer-planes",
+            synchronization = "drm-vblank",
+            dynamic_update_source = match frame_rate_mode {
+                VideoFrameRateMode::Fixed => "disabled",
+                VideoFrameRateMode::Dynamic => "wayland-wlr-screencopy-damage",
+            },
+            composition_fallback = "gbm-egl-opengl",
+            memory = "dma-buf",
+            render_node = %capturer.gpu_device().render_node_path().display(),
+            frame_rate_mode = ?frame_rate_mode,
+            queue_policy = if drop_to_latest { "latest" } else { "reliable" },
+            "Selected Linux screen capture pipeline"
+        );
         let mut probe_clock = enable_probing.then(|| VideoProbeClock::new(probe_interval));
         let mut use_composed_fallback = false;
 
@@ -285,7 +303,17 @@ impl KmsCaptureLoop {
             loop {
                 match commands.try_recv() {
                     Ok(KmsCaptureCommand::UseComposedFallback) => {
-                        use_composed_fallback = true;
+                        if !use_composed_fallback {
+                            tracing::info!(
+                                target: "rabbit::screen_capture",
+                                event = "linux_screen_capture_composition_selected",
+                                output = %screen_name,
+                                compositor = "gbm-egl-opengl",
+                                output_memory = "dma-buf",
+                                "Selected Linux KMS composition fallback"
+                            );
+                            use_composed_fallback = true;
+                        }
                     }
                     Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
                     Err(TryRecvError::Empty) => break,

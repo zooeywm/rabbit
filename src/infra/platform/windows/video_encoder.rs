@@ -1072,13 +1072,18 @@ fn activate_h264_encoder() -> eros::Result<IMFTransform> {
         .with_context(|| "Failed to activate the hardware H.264 Media Foundation encoder")?;
     info!(
         event = "windows_h264_encoder_selected",
+        framework = "media-foundation",
+        codec = "h264",
         encoder_name = encoder_name.as_deref().unwrap_or("<unavailable>"),
         transform_clsid = ?transform_clsid,
         hardware_url = hardware_url.as_deref().unwrap_or("<unavailable>"),
         vendor_id = vendor_id.as_deref().unwrap_or("<unavailable>"),
+        input_memory = "d3d11-texture",
+        input_format = "nv12",
+        packetizer = "native-rtp-h264",
         hardware = true,
         candidate_count = count,
-        "Selected Media Foundation H.264 encoder"
+        "Selected Windows video encoder pipeline"
     );
     Ok(transform)
 }

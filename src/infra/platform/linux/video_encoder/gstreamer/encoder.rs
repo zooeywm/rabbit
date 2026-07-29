@@ -161,17 +161,6 @@ impl GStreamerVideoEncoder {
                 )
             })?;
         let (bitrate_kbps, cpb_size_kbits) = configure_low_latency_encoder(&element, bitrate)?;
-        tracing::info!(
-            target: "rabbit::video_encoder",
-            event = "video_encoder_selected",
-            factory = %factory_name,
-            frame_rate_numerator = input_signature.frame_rate.numerator(),
-            frame_rate_denominator = input_signature.frame_rate.denominator(),
-            bitrate_kbps,
-            cpb_size_kbits,
-            key_int_max = H264_KEY_INT_MAX,
-            "Selected low-latency hardware H.264 encoder"
-        );
         let source = create_required_element("appsrc", "video-input")?;
         let Ok(source) = source.downcast::<gstreamer_app::AppSrc>() else {
             eros::bail!("GStreamer appsrc factory returned an unexpected element type");
@@ -251,6 +240,23 @@ impl GStreamerVideoEncoder {
             None
         };
         let terminal_messages = terminal_messages(&pipeline)?;
+        tracing::info!(
+            target: "rabbit::video_encoder",
+            event = "linux_video_encoder_selected",
+            framework = "gstreamer",
+            codec = "h264",
+            factory = %factory_name,
+            input_memory = "dma-buf",
+            video_processor = if vpp.is_some() { "vapostproc" } else { "none" },
+            packetizer = "rtph264pay",
+            transport_payload = "rtp",
+            frame_rate_numerator = input_signature.frame_rate.numerator(),
+            frame_rate_denominator = input_signature.frame_rate.denominator(),
+            bitrate_kbps,
+            cpb_size_kbits,
+            key_int_max = H264_KEY_INT_MAX,
+            "Selected Linux video encoder pipeline"
+        );
 
         Ok(Self {
             pipeline,

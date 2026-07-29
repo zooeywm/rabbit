@@ -321,8 +321,14 @@ impl DecodeComposition {
             device.WaitForCommitCompletion()?;
         }
         info!(
-            event = "windows_video_composition_created",
-            "Created DirectComposition decode swap chain"
+            event = "windows_video_renderer_selected",
+            backend = "directcomposition",
+            presentation = "dxgi-decode-swap-chain",
+            decoded_memory = "d3d11-texture",
+            decoded_format = "nv12",
+            window_model = "native-child-hwnd",
+            zero_copy = true,
+            "Selected Windows video renderer pipeline"
         );
         Ok(Self {
             device,
