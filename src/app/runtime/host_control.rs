@@ -34,6 +34,38 @@ enum HostControlDecision {
     Ignore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AbsolutePointerQueueKey {
+    session_id: SessionId,
+    screen_id: ScreenId,
+}
+
+pub(crate) fn absolute_pointer_queue_key(
+    session_id: SessionId,
+    message: &SessionMessage,
+) -> Option<AbsolutePointerQueueKey> {
+    let SessionMessage::Control(ControlMessage::RemoteInput(
+        RemoteInputEvent::AbsolutePointerMove(movement),
+    )) = message
+    else {
+        return None;
+    };
+    Some(AbsolutePointerQueueKey {
+        session_id,
+        screen_id: movement.screen_id,
+    })
+}
+
+pub(crate) fn can_replace_queued_absolute_pointer(
+    incoming_key: Option<AbsolutePointerQueueKey>,
+    queued_session_id: SessionId,
+    queued_message: &SessionMessage,
+) -> bool {
+    incoming_key.is_some_and(|incoming_key| {
+        absolute_pointer_queue_key(queued_session_id, queued_message) == Some(incoming_key)
+    })
+}
+
 /// Shell-visible result after the shared Host runtime applies a control message.
 pub enum HostControlEffect {
     ConfigureStreams(HostStreamConfiguration),
@@ -278,6 +310,7 @@ mod tests {
     use super::*;
     use crate::kernel::{
         geometry::{FrameRate, PixelSize},
+        input::{AbsolutePointerMove, NormalizedPosition},
         screen_configuration::{
             RemoteDisplayMode, RequestKeyFrame, ScreenStreamRequest, ScreenStreamRequestId,
             SetScreenStreams,
@@ -345,6 +378,39 @@ mod tests {
         assert!(matches!(
             decision,
             HostControlDecision::SetScreenStreams(Ok(_))
+        ));
+    }
+
+    #[test]
+    fn absolute_pointer_queue_coalescing_is_scoped_by_session_and_screen() {
+        let incoming = SessionMessage::Control(ControlMessage::RemoteInput(
+            RemoteInputEvent::AbsolutePointerMove(AbsolutePointerMove {
+                screen_id: ScreenId(4),
+                position: NormalizedPosition { x: 10, y: 20 },
+            }),
+        ));
+        let matching = incoming.clone();
+        let other_screen = SessionMessage::Control(ControlMessage::RemoteInput(
+            RemoteInputEvent::AbsolutePointerMove(AbsolutePointerMove {
+                screen_id: ScreenId(5),
+                position: NormalizedPosition { x: 10, y: 20 },
+            }),
+        ));
+
+        assert!(can_replace_queued_absolute_pointer(
+            absolute_pointer_queue_key(SessionId(3), &incoming),
+            SessionId(3),
+            &matching,
+        ));
+        assert!(!can_replace_queued_absolute_pointer(
+            absolute_pointer_queue_key(SessionId(3), &incoming),
+            SessionId(4),
+            &matching,
+        ));
+        assert!(!can_replace_queued_absolute_pointer(
+            absolute_pointer_queue_key(SessionId(3), &incoming),
+            SessionId(3),
+            &other_screen,
         ));
     }
 }

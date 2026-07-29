@@ -40,7 +40,7 @@ where
             Ok(Some(SessionMessage::Video(frame))) => {
                 sender.post(RootMessage::VideoFrameReceived(id, frame));
             }
-            Ok(Some(message)) => sender.post(RootMessage::SessionMessageReceived(id, message)),
+            Ok(Some(message)) => sender.post_session_message(id, message),
             Ok(None) => {
                 sender.post(RootMessage::SessionClosed(id));
                 return;

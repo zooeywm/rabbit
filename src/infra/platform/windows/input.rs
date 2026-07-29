@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use eros::Context as _;
 use windows::Win32::{
     Foundation::GetLastError,
@@ -7,9 +9,8 @@ use windows::Win32::{
             INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
             KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
             MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-            MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_RIGHTDOWN,
-            MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP,
-            MOUSEINPUT, SendInput, VIRTUAL_KEY,
+            MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+            MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
             GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -23,16 +24,29 @@ use crate::kernel::{
         InputState, KeyboardInput, KeyboardKey, MouseButton, MouseButtonInput, NormalizedPosition,
         RelativePointerMove, RemoteInputEvent, RemoteInputInjector,
     },
-    screen_manager::Screen,
+    screen_manager::{Screen, ScreenId},
 };
 
 use super::screen_layout::screen_monitor;
 
-pub(crate) struct WindowsRemoteInputInjector;
+pub(crate) struct WindowsRemoteInputInjector {
+    pointer_geometries: HashMap<ScreenId, WindowsPointerGeometry>,
+}
 
 impl WindowsRemoteInputInjector {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            pointer_geometries: HashMap::new(),
+        }
+    }
+
+    fn pointer_geometry(&mut self, screen_id: ScreenId) -> eros::Result<WindowsPointerGeometry> {
+        if let Some(geometry) = self.pointer_geometries.get(&screen_id) {
+            return Ok(*geometry);
+        }
+        let geometry = query_pointer_geometry(screen_id)?;
+        self.pointer_geometries.insert(screen_id, geometry);
+        Ok(geometry)
     }
 }
 
@@ -45,7 +59,8 @@ impl RemoteInputInjector for WindowsRemoteInputInjector {
     ) -> eros::Result<()> {
         match input {
             RemoteInputEvent::AbsolutePointerMove(movement) => {
-                move_absolute(movement.position, movement.screen_id)
+                let geometry = self.pointer_geometry(movement.screen_id)?;
+                move_absolute(movement.position, geometry)
             }
             RemoteInputEvent::Keyboard(input) => keyboard(input),
             RemoteInputEvent::MouseButton(input) => mouse_button(input),
@@ -54,10 +69,19 @@ impl RemoteInputInjector for WindowsRemoteInputInjector {
     }
 }
 
-fn move_absolute(
-    position: NormalizedPosition,
-    screen_id: crate::kernel::screen_manager::ScreenId,
-) -> eros::Result<()> {
+#[derive(Debug, Clone, Copy)]
+struct WindowsPointerGeometry {
+    monitor_left: i32,
+    monitor_top: i32,
+    monitor_width: i32,
+    monitor_height: i32,
+    desktop_left: i32,
+    desktop_top: i32,
+    desktop_width: i32,
+    desktop_height: i32,
+}
+
+fn query_pointer_geometry(screen_id: ScreenId) -> eros::Result<WindowsPointerGeometry> {
     let monitor = screen_monitor(screen_id)?;
     let mut monitor_info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
@@ -85,51 +109,62 @@ fn move_absolute(
     }
 
     let rect = monitor_info.rcMonitor;
+    Ok(WindowsPointerGeometry {
+        monitor_left: rect.left,
+        monitor_top: rect.top,
+        monitor_width: rect.right - rect.left,
+        monitor_height: rect.bottom - rect.top,
+        desktop_left: virtual_left,
+        desktop_top: virtual_top,
+        desktop_width: virtual_width,
+        desktop_height: virtual_height,
+    })
+}
+
+fn move_absolute(
+    position: NormalizedPosition,
+    geometry: WindowsPointerGeometry,
+) -> eros::Result<()> {
     let desktop_position = NormalizedPosition {
         x: normalize_windows_axis(
             position.x,
-            rect.left,
-            rect.right - rect.left,
-            virtual_left,
-            virtual_width,
+            geometry.monitor_left,
+            geometry.monitor_width,
+            geometry.desktop_left,
+            geometry.desktop_width,
         ),
         y: normalize_windows_axis(
             position.y,
-            rect.top,
-            rect.bottom - rect.top,
-            virtual_top,
-            virtual_height,
+            geometry.monitor_top,
+            geometry.monitor_height,
+            geometry.desktop_top,
+            geometry.desktop_height,
         ),
     };
-    let input = INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: i32::from(desktop_position.x),
-                dy: i32::from(desktop_position.y),
-                mouseData: 0,
-                dwFlags: MOUSEEVENTF_MOVE
-                    | MOUSEEVENTF_ABSOLUTE
-                    | MOUSEEVENTF_VIRTUALDESK
-                    | MOUSEEVENTF_MOVE_NOCOALESCE,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    send_input(input, "absolute pointer movement")
+    send_input(
+        mouse_input(
+            i32::from(desktop_position.x),
+            i32::from(desktop_position.y),
+            0,
+            absolute_move_flags(),
+        ),
+        "absolute pointer movement",
+    )
 }
 
 fn move_relative(movement: RelativePointerMove) -> eros::Result<()> {
     send_input(
-        mouse_input(
-            movement.delta_x,
-            movement.delta_y,
-            0,
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
-        ),
+        mouse_input(movement.delta_x, movement.delta_y, 0, relative_move_flags()),
         "relative pointer movement",
     )
+}
+
+fn absolute_move_flags() -> MOUSE_EVENT_FLAGS {
+    MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+}
+
+fn relative_move_flags() -> MOUSE_EVENT_FLAGS {
+    MOUSEEVENTF_MOVE
 }
 
 fn keyboard(input: KeyboardInput) -> eros::Result<()> {
@@ -323,4 +358,23 @@ fn normalize_windows_axis(
     (desktop_position / desktop_max * f64::from(u16::MAX))
         .round()
         .clamp(0.0, f64::from(u16::MAX)) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_MOVE_NOCOALESCE;
+
+    use super::{absolute_move_flags, normalize_windows_axis, relative_move_flags};
+
+    #[test]
+    fn injected_pointer_moves_allow_windows_to_coalesce_messages() {
+        assert!(!absolute_move_flags().contains(MOUSEEVENTF_MOVE_NOCOALESCE));
+        assert!(!relative_move_flags().contains(MOUSEEVENTF_MOVE_NOCOALESCE));
+    }
+
+    #[test]
+    fn absolute_axis_maps_monitor_edges_into_the_virtual_desktop() {
+        assert_eq!(normalize_windows_axis(0, 100, 100, 0, 200), 32_932);
+        assert_eq!(normalize_windows_axis(u16::MAX, 100, 100, 0, 200), u16::MAX);
+    }
 }

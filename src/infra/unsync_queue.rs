@@ -39,11 +39,20 @@ impl<T> Default for UnsyncQueue<T> {
 
 impl<T> UnsyncQueue<T> {
     pub(crate) fn push(&self, item: T) {
+        self.push_or_replace_back(item, |_| false);
+    }
+
+    pub(crate) fn push_or_replace_back(&self, item: T, replace_back: impl FnOnce(&T) -> bool) {
         let receiver_waker = {
             let mut inner = self.inner.borrow();
 
-            inner.items.push_back(item);
-            inner.receiver_waker.take()
+            if inner.items.back().is_some_and(replace_back) {
+                *inner.items.back_mut().expect("queue back disappeared") = item;
+                None
+            } else {
+                inner.items.push_back(item);
+                inner.receiver_waker.take()
+            }
         };
 
         if let Some(receiver_waker) = receiver_waker {
@@ -81,5 +90,26 @@ impl<T> Future for UnsyncQueuePop<'_, T> {
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UnsyncQueue;
+
+    #[test]
+    fn replaces_only_a_matching_tail_item() {
+        let queue = UnsyncQueue::default();
+        queue.push(1);
+        queue.push_or_replace_back(2, |back| *back == 1);
+        assert_eq!(queue.try_pop(), Some(2));
+        assert_eq!(queue.try_pop(), None);
+
+        queue.push(1);
+        queue.push(9);
+        queue.push_or_replace_back(2, |back| *back == 1);
+        assert_eq!(queue.try_pop(), Some(1));
+        assert_eq!(queue.try_pop(), Some(9));
+        assert_eq!(queue.try_pop(), Some(2));
     }
 }

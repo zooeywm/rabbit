@@ -16,7 +16,10 @@ use crate::{
         model::{ApplicationModel, RunningSession, SessionKey},
         platform::{ApplicationStack, RunnableApp},
         runtime::{
-            host_control::{HostControlEffect, apply_host_session_message},
+            host_control::{
+                HostControlEffect, absolute_pointer_queue_key, apply_host_session_message,
+                can_replace_queued_absolute_pointer,
+            },
             host_stream_launch::launch_host_stream,
             host_stream_lifecycle::{ScreenStreamFinishEffect, apply_screen_stream_finished},
             session_lifecycle::{ReconnectEligibility, SessionTimeoutPolicy, evaluate_reconnect},
@@ -428,7 +431,7 @@ where
     let id = session.id();
     loop {
         match session.recv().await {
-            Ok(Some(message)) => sender.push(HeadlessMessage::SessionMessage(id, message)),
+            Ok(Some(message)) => push_headless_session_message(&sender, id, message),
             Ok(None) => {
                 sender.push(HeadlessMessage::SessionClosed(id));
                 return;
@@ -439,4 +442,21 @@ where
             }
         }
     }
+}
+
+fn push_headless_session_message(
+    sender: &UnsyncQueue<HeadlessMessage>,
+    session_id: SessionId,
+    message: SessionMessage,
+) {
+    let incoming_key = absolute_pointer_queue_key(session_id, &message);
+    sender.push_or_replace_back(
+        HeadlessMessage::SessionMessage(session_id, message),
+        |queued| {
+            let HeadlessMessage::SessionMessage(queued_session_id, queued_message) = queued else {
+                return false;
+            };
+            can_replace_queued_absolute_pointer(incoming_key, *queued_session_id, queued_message)
+        },
+    );
 }
