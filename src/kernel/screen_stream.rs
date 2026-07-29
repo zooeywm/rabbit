@@ -130,6 +130,7 @@ mod tests {
                 frame_rate: FrameRate::new(120, 1).expect("Test frame rate should be valid"),
                 frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 bitrate: VideoBitrate::new(100_000_000).expect("Test bitrate should be valid"),
+                fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
             },
             1_200,
             |packet| {

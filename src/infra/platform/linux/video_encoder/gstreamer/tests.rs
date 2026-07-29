@@ -341,6 +341,7 @@ fn streams_several_host_video_frames() {
                 frame_rate: target_frame_rate,
                 frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 bitrate: test_bitrate(),
+                fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
             },
             MAX_RTP_PACKET_SIZE,
             move |packets| {

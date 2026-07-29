@@ -127,6 +127,7 @@ pub(super) struct WireScreenStreamRequest {
     frame_rate_mode: WireVideoFrameRateMode,
     codec: u8,
     bitrate_bps: u32,
+    fec_percentage: u8,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -424,6 +425,15 @@ impl TryFrom<WireScreenStreamRequest> for ScreenStreamRequest {
                         request.screen_id
                     )
                 })?,
+            fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::new(
+                request.fec_percentage,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to decode SetScreenStreams FEC percentage for screen {}",
+                    request.screen_id
+                )
+            })?,
         })
     }
 }
@@ -438,6 +448,7 @@ impl From<ScreenStreamRequest> for WireScreenStreamRequest {
             frame_rate_mode: request.frame_rate_mode.into(),
             codec: request.codec.as_u8(),
             bitrate_bps: request.bitrate.bits_per_second(),
+            fec_percentage: request.fec_percentage.get(),
         }
     }
 }

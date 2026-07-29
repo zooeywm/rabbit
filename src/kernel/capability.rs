@@ -137,6 +137,7 @@ mod tests {
                     frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                     codec: VideoCodec::H264,
                     bitrate: VideoBitrate::new(21_000_000).expect("bitrate"),
+                    fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
                 })
                 .collect(),
         }

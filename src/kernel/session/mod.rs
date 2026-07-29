@@ -22,9 +22,11 @@ use crate::kernel::{
     },
 };
 
+pub(crate) mod fec;
 mod role;
 pub(crate) mod rtp;
 
+use fec::FecVideoReceiver;
 use role::{require_role, validate_received_control};
 use rtp::{RtpVideoStream, assemble_video_frame};
 
@@ -83,6 +85,7 @@ where
     role: SessionRole,
     recv: R,
     video_streams: HashMap<ScreenId, RtpVideoStream>,
+    video_fec: HashMap<ScreenId, FecVideoReceiver>,
 }
 
 impl<T> Session<T>
@@ -119,6 +122,7 @@ where
                 role: self.role,
                 recv: self.recv,
                 video_streams: HashMap::new(),
+                video_fec: HashMap::new(),
             },
         )
     }
@@ -267,13 +271,22 @@ where
                         );
                     }
 
-                    let assembled =
-                        assemble_video_frame(&mut self.video_streams, screen_id, message.payload)?;
-                    if assembled.request_key_frame {
-                        return Ok(Some(SessionMessage::KeyFrameRequired(screen_id)));
-                    }
-                    if let Some(frame) = assembled.frame {
-                        return Ok(Some(SessionMessage::Video(frame)));
+                    let packets = self
+                        .video_fec
+                        .entry(screen_id)
+                        .or_default()
+                        .receive(message.payload)?;
+                    if let Some(packets) = packets {
+                        for packet in packets {
+                            let assembled =
+                                assemble_video_frame(&mut self.video_streams, screen_id, packet)?;
+                            if assembled.request_key_frame {
+                                return Ok(Some(SessionMessage::KeyFrameRequired(screen_id)));
+                            }
+                            if let Some(frame) = assembled.frame {
+                                return Ok(Some(SessionMessage::Video(frame)));
+                            }
+                        }
                     }
                 }
             }
@@ -480,6 +493,7 @@ mod tests {
                 payload: rtp_packet(1, 1, true),
             })),
             video_streams: HashMap::new(),
+            video_fec: HashMap::new(),
         };
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 

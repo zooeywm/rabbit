@@ -215,6 +215,7 @@ mod tests {
             frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
             codec: VideoCodec::H264,
             bitrate: VideoBitrate::new(20_500_000).expect("Test bitrate should be valid"),
+            fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
         };
         let message = TransportMessage::try_from(SetScreenStreams {
             request_id: ScreenStreamRequestId(9),

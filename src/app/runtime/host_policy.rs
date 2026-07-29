@@ -87,6 +87,7 @@ mod tests {
                 frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 codec: VideoCodec::H264,
                 bitrate: VideoBitrate::new(21_000_000).expect("bitrate"),
+                fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
             }],
         };
         let err = evaluate_set_screen_streams(
@@ -118,6 +119,7 @@ mod tests {
                 frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 codec: VideoCodec::H264,
                 bitrate: VideoBitrate::new(5_000_000).expect("bitrate"),
+                fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
             }],
         };
         let evaluation = evaluate_set_screen_streams(

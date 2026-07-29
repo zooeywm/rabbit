@@ -68,6 +68,7 @@ fn resolve_desired_stream(
                         frame_rate: desired.frame_rate,
                         frame_rate_mode: desired.frame_rate_mode,
                         bitrate: desired.bitrate,
+                        fec_percentage: desired.fec_percentage,
                     },
                 });
                 ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
@@ -134,6 +135,7 @@ mod tests {
                     frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                     codec: VideoCodec::H264,
                     bitrate: VideoBitrate::new(24_000_000).expect("bitrate"),
+                    fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
                 },
                 ScreenStreamRequest {
                     screen_id: ScreenId(9),
@@ -146,6 +148,7 @@ mod tests {
                     frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                     codec: VideoCodec::H264,
                     bitrate: VideoBitrate::new(5_000_000).expect("bitrate"),
+                    fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
                 },
             ],
         };

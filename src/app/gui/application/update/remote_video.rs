@@ -541,6 +541,8 @@ where
                             },
                             codec: VideoCodec::H264,
                             bitrate,
+                            fec_percentage:
+                                crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
                         }],
                     };
                     if let Err(error) = evaluate_controller_set_screen_streams(

@@ -61,6 +61,32 @@ pub struct VideoEncoderParameters {
     pub frame_rate: FrameRate,
     pub frame_rate_mode: VideoFrameRateMode,
     pub bitrate: VideoBitrate,
+    pub fec_percentage: VideoFecPercentage,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VideoFecPercentage(u8);
+
+impl VideoFecPercentage {
+    pub const DEFAULT: Self = Self(15);
+    pub const MINIMUM: u8 = 10;
+    pub const MAXIMUM: u8 = 20;
+
+    pub fn new(percentage: u8) -> eros::Result<Self> {
+        if !(Self::MINIMUM..=Self::MAXIMUM).contains(&percentage) {
+            eros::bail!(
+                "Video FEC percentage must be between {} and {}, got {}",
+                Self::MINIMUM,
+                Self::MAXIMUM,
+                percentage
+            );
+        }
+        Ok(Self(percentage))
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -195,6 +221,7 @@ mod tests {
                     frame_rate: FrameRate::new(120, 1).expect("Test frame rate should be valid"),
                     frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                     bitrate: VideoBitrate::new(100_000_000).expect("Test bitrate should be valid"),
+                    fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
                 },
                 1_200,
                 |packet| {

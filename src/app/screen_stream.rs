@@ -15,7 +15,10 @@ use crate::{
     kernel::{
         screen_manager::ScreenId,
         screen_stream::ScreenStream,
-        session::SessionSend,
+        session::{
+            SessionSend,
+            fec::{encode_access_unit, fec_rtp_packet_size},
+        },
         transport::TransportSend,
         video_encoder::{VideoEncoder, VideoEncoderCommand, VideoEncoderParameters},
     },
@@ -35,12 +38,13 @@ where
     Frames: futures_core::Stream<Item = eros::Result<Rc<Encoder::Input>>> + Unpin,
     Send: TransportSend,
 {
-    let Some(max_packet_size) = session.max_video_packet_size() else {
+    let Some(max_datagram_size) = session.max_video_packet_size() else {
         eros::bail!(
             "Session transport does not support video datagrams for screen {}",
             screen_id.0
         );
     };
+    let max_packet_size = fec_rtp_packet_size(max_datagram_size, parameters.fec_percentage)?;
 
     info!(
         event = "host_screen_stream_started",
@@ -50,6 +54,8 @@ where
         frame_rate_denominator = parameters.frame_rate.denominator(),
         frame_rate_mode = ?parameters.frame_rate_mode,
         bitrate_bps = parameters.bitrate.bits_per_second(),
+        fec_percentage = parameters.fec_percentage.get(),
+        max_datagram_size,
         max_packet_size,
         "Host screen stream started"
     );
@@ -74,8 +80,9 @@ where
                 .into_iter()
                 .map(Into::into)
                 .collect::<Vec<bytes::Bytes>>();
-            let scheduled = scheduler.schedule_access_unit(payloads);
-            async move { scheduled.send(&session, screen_id).await }
+            let scheduled = encode_access_unit(payloads, parameters.fec_percentage)
+                .map(|payloads| scheduler.schedule_access_unit(payloads));
+            async move { scheduled?.send(&session, screen_id).await }
         },
     )
     .run()

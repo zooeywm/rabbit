@@ -370,6 +370,7 @@ mod tests {
                 frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 codec: VideoCodec::H264,
                 bitrate: VideoBitrate::new(1_000_000).expect("bitrate"),
+                fec_percentage: crate::kernel::video_encoder::VideoFecPercentage::DEFAULT,
             }],
         };
         let decision = classify_host_session_message(

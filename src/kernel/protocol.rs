@@ -18,7 +18,7 @@
 //! [`crate::kernel::capability`].
 
 /// Incompatible protocol generation.
-pub const PROTOCOL_MAJOR: u16 = 3;
+pub const PROTOCOL_MAJOR: u16 = 4;
 
 /// Compatible extension level within [`PROTOCOL_MAJOR`].
 pub const PROTOCOL_MINOR: u16 = 0;

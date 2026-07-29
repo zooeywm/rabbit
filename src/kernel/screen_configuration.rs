@@ -1,7 +1,7 @@
 use crate::kernel::{
     geometry::{FrameRate, PixelSize},
     screen_manager::ScreenId,
-    video_encoder::{VideoBitrate, VideoCodec, VideoFrameRateMode},
+    video_encoder::{VideoBitrate, VideoCodec, VideoFecPercentage, VideoFrameRateMode},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,6 +22,7 @@ pub struct ScreenStreamRequest {
     pub frame_rate_mode: VideoFrameRateMode,
     pub codec: VideoCodec,
     pub bitrate: VideoBitrate,
+    pub fec_percentage: VideoFecPercentage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

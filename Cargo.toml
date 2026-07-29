@@ -21,6 +21,7 @@ thiserror = "2.0"
 thin-cell = "0.2"
 kudi = "0.1"
 rcgen = "0.14"
+reed-solomon-erasure = "6.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
