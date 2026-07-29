@@ -27,9 +27,12 @@ use windows::{
             },
         },
         Media::MediaFoundation::{
-            CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer,
-            IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
-            METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
+            CODECAPI_AVEncCommonBufferSize, CODECAPI_AVEncCommonLowLatency,
+            CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
+            CODECAPI_AVEncCommonRealTime, CODECAPI_AVEncMPVDefaultBPictureCount,
+            CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI,
+            IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample,
+            IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
             MF_E_NO_EVENTS_AVAILABLE, MF_E_NO_MORE_TYPES, MF_E_TRANSFORM_NEED_MORE_INPUT,
             MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
             MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
@@ -46,7 +49,7 @@ use windows::{
             MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
             MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
             MFVideoPrimaries_BT709, MFVideoTransFunc_709, MFVideoTransferMatrix_BT709,
-            eAVEncH264VProfile_Base,
+            eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_Base,
         },
         System::{
             Com::CoTaskMemFree,
@@ -986,9 +989,10 @@ fn configure_transform(
     size: PixelSize,
     frame_rate: FrameRate,
 ) -> eros::Result<()> {
+    let mut attribute_low_latency = false;
     unsafe {
         if let Ok(attributes) = transform.GetAttributes() {
-            let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
+            attribute_low_latency = attributes.SetUINT32(&MF_LOW_LATENCY, 1).is_ok();
             let _ = attributes.SetUINT32(&MF_SA_D3D11_AWARE, 1);
             let _ = attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
         }
@@ -999,6 +1003,8 @@ fn configure_transform(
             )
             .with_context(|| "Failed to attach DXGI device manager to H.264 encoder")?;
     }
+    let bitrate = target_bitrate(size, frame_rate);
+    configure_codec_low_latency(transform, attribute_low_latency, bitrate)?;
 
     let output_type = create_h264_output_type(size, frame_rate)?;
     unsafe { transform.SetOutputType(0, &output_type, 0) }
@@ -1015,6 +1021,81 @@ fn configure_transform(
             .with_context(|| "Failed to start H.264 encoder stream")?;
     }
     Ok(())
+}
+
+fn configure_codec_low_latency(
+    transform: &IMFTransform,
+    attribute_low_latency: bool,
+    bitrate: u32,
+) -> eros::Result<()> {
+    let codec_api: ICodecAPI = transform
+        .cast()
+        .with_context(|| "Windows H.264 encoder does not expose ICodecAPI")?;
+    let enabled = variant_bool(true);
+    let codec_low_latency =
+        set_optional_codec_property(&codec_api, &CODECAPI_AVLowLatencyMode, &enabled);
+    let common_low_latency =
+        set_optional_codec_property(&codec_api, &CODECAPI_AVEncCommonLowLatency, &enabled);
+    if !attribute_low_latency && !codec_low_latency && !common_low_latency {
+        eros::bail!("Windows H.264 encoder does not support any low-latency mode");
+    }
+    let real_time =
+        set_optional_codec_property(&codec_api, &CODECAPI_AVEncCommonRealTime, &enabled);
+    let no_b_frames = set_optional_codec_property(
+        &codec_api,
+        &CODECAPI_AVEncMPVDefaultBPictureCount,
+        &VARIANT::from(0u32),
+    );
+    let constant_bitrate = set_optional_codec_property(
+        &codec_api,
+        &CODECAPI_AVEncCommonRateControlMode,
+        &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
+    );
+    let mean_bitrate = set_optional_codec_property(
+        &codec_api,
+        &CODECAPI_AVEncCommonMeanBitRate,
+        &VARIANT::from(bitrate),
+    );
+    let buffer_size_bytes = bitrate / 8 / 10;
+    let bounded_buffer = set_optional_codec_property(
+        &codec_api,
+        &CODECAPI_AVEncCommonBufferSize,
+        &VARIANT::from(buffer_size_bytes),
+    );
+    info!(
+        event = "windows_h264_encoder_low_latency_configured",
+        attribute_low_latency,
+        codec_low_latency,
+        common_low_latency,
+        real_time,
+        no_b_frames,
+        constant_bitrate,
+        mean_bitrate,
+        bounded_buffer,
+        bitrate,
+        buffer_size_bytes,
+        "Configured Windows H.264 encoder for bounded real-time output without frame reordering"
+    );
+    Ok(())
+}
+
+fn set_optional_codec_property(
+    codec_api: &ICodecAPI,
+    property: &windows::core::GUID,
+    value: &VARIANT,
+) -> bool {
+    match unsafe { codec_api.SetValue(property, value) } {
+        Ok(()) => true,
+        Err(error) => {
+            debug!(
+                event = "windows_h264_encoder_optional_property_unsupported",
+                property = ?property,
+                error = ?error,
+                "Windows H.264 encoder rejected an optional encoder property"
+            );
+            false
+        }
+    }
 }
 
 fn create_nv12_input_type(size: PixelSize, frame_rate: FrameRate) -> eros::Result<IMFMediaType> {

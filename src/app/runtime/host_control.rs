@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use tracing::{info, trace, warn};
+use tracing::{info, warn};
 
 use crate::{
     app::{
@@ -146,7 +146,7 @@ where
             };
 
             stream.request_key_frame();
-            trace!(
+            info!(
                 event = "key_frame_requested",
                 session_id = session_id.0,
                 screen_id = screen_id.0,

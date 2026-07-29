@@ -405,6 +405,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retries_key_frame_requests_while_waiting_for_recovery() {
+        let screen_id = ScreenId(8);
+        let mut streams = HashMap::new();
+        assert!(
+            assemble_video_frame(&mut streams, screen_id, rtp_packet(1, 1, true))
+                .expect("Initial IDR should be accepted")
+                .frame
+                .is_some()
+        );
+        let gap = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
+            .expect("Sequence gap should be handled");
+        assert!(gap.request_key_frame);
+
+        for offset in 0..14u16 {
+            let dependent = assemble_video_frame(
+                &mut streams,
+                screen_id,
+                rtp_delta_packet(4 + offset, u32::from(3 + offset), true),
+            )
+            .expect("Dependent frame should be discarded");
+            assert!(!dependent.request_key_frame);
+        }
+        let retry = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(18, 17, true))
+            .expect("Key-frame recovery request should be retried");
+        assert!(retry.frame.is_none());
+        assert!(retry.request_key_frame);
+    }
+
     struct TestTransportSend {
         messages: RefCell<Vec<TransportMessage>>,
         closed: Cell<bool>,

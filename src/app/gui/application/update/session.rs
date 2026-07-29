@@ -117,6 +117,12 @@ where
                         eros::bail!("Video frame bypassed the latest-frame session queue")
                     }
                     SessionMessage::KeyFrameRequired(screen_id) => {
+                        warn!(
+                            event = "video_recovery_key_frame_requested",
+                            session_id = id.0,
+                            screen_id = screen_id.0,
+                            "Requesting a recovery key frame after incomplete RTP video"
+                        );
                         let Some(session) = self
                             .model
                             .sessions
