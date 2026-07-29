@@ -30,7 +30,7 @@ pub const PROTOCOL_NAME: &str = "rabbit-session";
 pub const fn protocol_version_string() -> &'static str {
     // Keep this a const so it can appear in static diagnostics without format!.
     // Update both the constants above and this string together.
-    "3.0"
+    "4.0"
 }
 
 /// Control-plane channel id on the session transport.
