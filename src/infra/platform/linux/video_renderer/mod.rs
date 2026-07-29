@@ -70,12 +70,23 @@ void main() {
 }
 "#;
 
+const BLACK_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+out vec4 output_color;
+
+void main() {
+    output_color = vec4(0.0, 0.0, 0.0, 1.0);
+}
+"#;
+
 pub(crate) struct OpenGlVideoRenderer {
     egl: egl::DynamicInstance<egl::EGL1_5>,
     display: egl::Display,
     gl: glow::Context,
     image_target_texture: ImageTargetTexture,
     program: glow::Program,
+    black_program: glow::Program,
     texture_uniform: glow::UniformLocation,
     vertex_array: glow::VertexArray,
     viewport: Option<VideoViewport>,
@@ -137,18 +148,31 @@ impl OpenGlVideoRenderer {
                 eros::bail!("Slint OpenGL context does not support {}", extension);
             }
         }
-        let program = create_program(&gl)?;
+        let program = create_program(&gl, FRAGMENT_SHADER, "video")?;
+        let black_program = match create_program(&gl, BLACK_FRAGMENT_SHADER, "black background") {
+            Ok(program) => program,
+            Err(error) => {
+                unsafe { gl.delete_program(program) };
+                return Err(error);
+            }
+        };
         let texture_uniform = match unsafe { gl.get_uniform_location(program, "video_texture") } {
             Some(uniform) => uniform,
             None => {
-                unsafe { gl.delete_program(program) };
+                unsafe {
+                    gl.delete_program(black_program);
+                    gl.delete_program(program);
+                }
                 eros::bail!("Video renderer program does not expose video_texture");
             }
         };
         let vertex_array = match unsafe { gl.create_vertex_array() } {
             Ok(vertex_array) => vertex_array,
             Err(error) => {
-                unsafe { gl.delete_program(program) };
+                unsafe {
+                    gl.delete_program(black_program);
+                    gl.delete_program(program);
+                }
                 eros::bail!("Failed to create video renderer vertex array: {}", error);
             }
         };
@@ -159,6 +183,7 @@ impl OpenGlVideoRenderer {
             gl,
             image_target_texture,
             program,
+            black_program,
             texture_uniform,
             vertex_array,
             viewport: None,
@@ -173,6 +198,7 @@ impl OpenGlVideoRenderer {
         self.clear()?;
         unsafe {
             self.gl.delete_vertex_array(self.vertex_array);
+            self.gl.delete_program(self.black_program);
             self.gl.delete_program(self.program);
         }
         Ok(())
@@ -354,17 +380,8 @@ impl OpenGlVideoRenderer {
         }
         let state = GlState::capture(&self.gl);
         let fitted = fit_viewport(viewport, current.frame.buffer.size)?;
-        let window_height = state.viewport[3];
-        let x = i32::try_from(fitted.x).with_context(|| "Video viewport x exceeds i32")?;
-        let top = fitted
-            .y
-            .checked_add(fitted.height)
-            .with_context(|| "Video viewport vertical extent overflows u32")?;
-        let y = window_height
-            .checked_sub(i32::try_from(top).with_context(|| "Video viewport y exceeds i32")?)
-            .with_context(|| "Video viewport lies outside the window framebuffer")?;
-        let width = i32::try_from(fitted.width).with_context(|| "Video width exceeds i32")?;
-        let height = i32::try_from(fitted.height).with_context(|| "Video height exceeds i32")?;
+        let background_viewport = to_gl_viewport(viewport, state.viewport[3])?;
+        let video_viewport = to_gl_viewport(fitted, state.viewport[3])?;
         let texture = current.texture;
 
         if let Some(probe) = self
@@ -380,9 +397,22 @@ impl OpenGlVideoRenderer {
             self.gl.disable(glow::CULL_FACE);
             self.gl.disable(glow::DEPTH_TEST);
             self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(x, y, width, height);
-            self.gl.use_program(Some(self.program));
+            self.gl.viewport(
+                background_viewport[0],
+                background_viewport[1],
+                background_viewport[2],
+                background_viewport[3],
+            );
+            self.gl.use_program(Some(self.black_program));
             self.gl.bind_vertex_array(Some(self.vertex_array));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.viewport(
+                video_viewport[0],
+                video_viewport[1],
+                video_viewport[2],
+                video_viewport[3],
+            );
+            self.gl.use_program(Some(self.program));
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(TEXTURE_EXTERNAL, Some(texture));
             self.gl.uniform_1_i32(Some(&self.texture_uniform), 0);
@@ -509,6 +539,20 @@ fn fit_viewport(
     })
 }
 
+fn to_gl_viewport(viewport: VideoViewport, framebuffer_height: i32) -> eros::Result<[i32; 4]> {
+    let x = i32::try_from(viewport.x).with_context(|| "Video viewport x exceeds i32")?;
+    let top = viewport
+        .y
+        .checked_add(viewport.height)
+        .with_context(|| "Video viewport vertical extent overflows u32")?;
+    let y = framebuffer_height
+        .checked_sub(i32::try_from(top).with_context(|| "Video viewport y exceeds i32")?)
+        .with_context(|| "Video viewport lies outside the window framebuffer")?;
+    let width = i32::try_from(viewport.width).with_context(|| "Video width exceeds i32")?;
+    let height = i32::try_from(viewport.height).with_context(|| "Video height exceeds i32")?;
+    Ok([x, y, width, height])
+}
+
 unsafe fn set_enabled(gl: &glow::Context, capability: u32, enabled: bool) {
     if enabled {
         unsafe { gl.enable(capability) };
@@ -517,16 +561,24 @@ unsafe fn set_enabled(gl: &glow::Context, capability: u32, enabled: bool) {
     }
 }
 
-fn create_program(gl: &glow::Context) -> eros::Result<glow::Program> {
+fn create_program(
+    gl: &glow::Context,
+    fragment_source: &str,
+    description: &str,
+) -> eros::Result<glow::Program> {
     let vertex = compile_shader(gl, glow::VERTEX_SHADER, VERTEX_SHADER, "video vertex")?;
-    let fragment =
-        match compile_shader(gl, glow::FRAGMENT_SHADER, FRAGMENT_SHADER, "video fragment") {
-            Ok(fragment) => fragment,
-            Err(error) => {
-                unsafe { gl.delete_shader(vertex) };
-                return Err(error);
-            }
-        };
+    let fragment = match compile_shader(
+        gl,
+        glow::FRAGMENT_SHADER,
+        fragment_source,
+        &format!("{description} fragment"),
+    ) {
+        Ok(fragment) => fragment,
+        Err(error) => {
+            unsafe { gl.delete_shader(vertex) };
+            return Err(error);
+        }
+    };
     let program = match unsafe { gl.create_program() } {
         Ok(program) => program,
         Err(error) => {
@@ -534,7 +586,11 @@ fn create_program(gl: &glow::Context) -> eros::Result<glow::Program> {
                 gl.delete_shader(vertex);
                 gl.delete_shader(fragment);
             }
-            eros::bail!("Failed to create video renderer program: {}", error);
+            eros::bail!(
+                "Failed to create {} renderer program: {}",
+                description,
+                error
+            );
         }
     };
     unsafe {
@@ -549,7 +605,7 @@ fn create_program(gl: &glow::Context) -> eros::Result<glow::Program> {
     if !unsafe { gl.get_program_link_status(program) } {
         let log = unsafe { gl.get_program_info_log(program) };
         unsafe { gl.delete_program(program) };
-        eros::bail!("Failed to link video renderer program: {}", log);
+        eros::bail!("Failed to link {} renderer program: {}", description, log);
     }
     Ok(program)
 }
@@ -587,7 +643,7 @@ fn has_extension(extensions: &CStr, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::{
-        infra::platform::video_renderer::fit_viewport,
+        infra::platform::video_renderer::{fit_viewport, to_gl_viewport},
         kernel::{geometry::PixelSize, video_renderer::VideoViewport},
     };
 
@@ -616,5 +672,21 @@ mod tests {
                 height: 1080,
             }
         );
+    }
+
+    #[test]
+    fn maps_top_left_video_coordinates_into_opengl_coordinates() {
+        let viewport = to_gl_viewport(
+            VideoViewport {
+                x: 10,
+                y: 20,
+                width: 1920,
+                height: 1080,
+            },
+            1200,
+        )
+        .expect("Video viewport should map into the framebuffer");
+
+        assert_eq!(viewport, [10, 100, 1920, 1080]);
     }
 }
