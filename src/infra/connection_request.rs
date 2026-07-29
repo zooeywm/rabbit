@@ -21,6 +21,7 @@ use crate::{
             PeerCapabilities,
         },
         protocol::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
+        video_encoder::VideoCodec,
     },
 };
 
@@ -29,6 +30,9 @@ const PROTOCOL_VERSION_SIZE: usize = size_of::<u16>() * 2;
 const CAPABILITY_HEADER_SIZE: usize = size_of::<u8>() * 2;
 const CAPABILITY_TAG_ABSOLUTE_POINTER: u8 = 0x80;
 const CAPABILITY_TAG_RELIABLE_INPUT: u8 = 0x81;
+const CAPABILITY_TAG_DECODER_H264: u8 = 0x40;
+const CAPABILITY_TAG_DECODER_HEVC: u8 = 0x41;
+const CAPABILITY_TAG_DECODER_AV1: u8 = 0x42;
 const RESPONSE_SIZE: usize = size_of::<u8>();
 /// TCP handshake preface for protocol-aware connection requests.
 const TCP_REQUEST_MAGIC: &[u8; 5] = b"RBTC\x02";
@@ -492,6 +496,7 @@ fn warn_protocol_mismatch(remote_address: SocketAddr, request: &ConnectionReques
 
 fn encode_peer_capabilities(capabilities: &PeerCapabilities) -> eros::Result<BytesMut> {
     let tag_count = capabilities.encoder_profiles.len()
+        + capabilities.decoder_codecs.len()
         + usize::from(capabilities.absolute_pointer)
         + usize::from(capabilities.reliable_input);
     if tag_count > MAX_CAPABILITY_TAGS {
@@ -507,6 +512,13 @@ fn encode_peer_capabilities(capabilities: &PeerCapabilities) -> eros::Result<Byt
     body.put_u8(profile_count);
     for profile in &capabilities.encoder_profiles {
         body.put_u8(profile.as_u8());
+    }
+    for codec in &capabilities.decoder_codecs {
+        body.put_u8(match codec {
+            VideoCodec::H264 => CAPABILITY_TAG_DECODER_H264,
+            VideoCodec::Hevc => CAPABILITY_TAG_DECODER_HEVC,
+            VideoCodec::Av1 => CAPABILITY_TAG_DECODER_AV1,
+        });
     }
     if capabilities.absolute_pointer {
         body.put_u8(CAPABILITY_TAG_ABSOLUTE_POINTER);
@@ -531,6 +543,7 @@ fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, 
         eros::bail!("Truncated while reading capability tags");
     }
     let mut encoder_profiles = Vec::with_capacity(profile_count);
+    let mut decoder_codecs = Vec::new();
     let mut absolute_pointer = false;
     let mut reliable_input = false;
     for tag in body.split_to(profile_count) {
@@ -538,6 +551,13 @@ fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, 
             absolute_pointer = true;
         } else if tag == CAPABILITY_TAG_RELIABLE_INPUT {
             reliable_input = true;
+        } else if let Some(codec) = match tag {
+            CAPABILITY_TAG_DECODER_H264 => Some(VideoCodec::H264),
+            CAPABILITY_TAG_DECODER_HEVC => Some(VideoCodec::Hevc),
+            CAPABILITY_TAG_DECODER_AV1 => Some(VideoCodec::Av1),
+            _ => None,
+        } {
+            decoder_codecs.push(codec);
         } else if let Ok(profile) = EncoderProfileTag::try_from(tag) {
             encoder_profiles.push(profile);
         }
@@ -546,6 +566,7 @@ fn decode_peer_capabilities(mut body: Bytes) -> eros::Result<(PeerCapabilities, 
         PeerCapabilities {
             max_screens,
             encoder_profiles,
+            decoder_codecs,
             absolute_pointer,
             reliable_input,
         },

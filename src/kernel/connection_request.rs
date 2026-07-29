@@ -25,6 +25,8 @@ pub struct PeerCapabilities {
     pub max_screens: u8,
     /// Encoder profiles the peer can host (empty for pure controllers is OK).
     pub encoder_profiles: Vec<EncoderProfileTag>,
+    /// Video codecs this peer can consume and decode.
+    pub decoder_codecs: Vec<VideoCodec>,
     /// Host accepts absolute pointer movements from a controller.
     pub absolute_pointer: bool,
     /// Host accepts Rabbit reliable keyboard, mouse-button, and relative-pointer input.
@@ -36,6 +38,7 @@ impl Default for PeerCapabilities {
         Self {
             max_screens: ScreenId::MAX.saturating_add(1),
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+            decoder_codecs: vec![VideoCodec::H264],
             absolute_pointer: true,
             reliable_input: true,
         }
@@ -51,6 +54,7 @@ impl PeerCapabilities {
         Self {
             max_screens,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+            decoder_codecs: vec![VideoCodec::H264],
             absolute_pointer: true,
             reliable_input: true,
         }
@@ -63,6 +67,10 @@ impl PeerCapabilities {
 pub enum EncoderProfileTag {
     H264Hardware = 1,
     H264Software = 2,
+    HevcHardware = 3,
+    HevcSoftware = 4,
+    Av1Hardware = 5,
+    Av1Software = 6,
 }
 
 impl EncoderProfileTag {
@@ -73,6 +81,8 @@ impl EncoderProfileTag {
     pub const fn codec(self) -> VideoCodec {
         match self {
             Self::H264Hardware | Self::H264Software => VideoCodec::H264,
+            Self::HevcHardware | Self::HevcSoftware => VideoCodec::Hevc,
+            Self::Av1Hardware | Self::Av1Software => VideoCodec::Av1,
         }
     }
 }
@@ -84,6 +94,10 @@ impl TryFrom<u8> for EncoderProfileTag {
         match value {
             1 => Ok(Self::H264Hardware),
             2 => Ok(Self::H264Software),
+            3 => Ok(Self::HevcHardware),
+            4 => Ok(Self::HevcSoftware),
+            5 => Ok(Self::Av1Hardware),
+            6 => Ok(Self::Av1Software),
             other => Err(UnknownEncoderProfile(other)),
         }
     }
@@ -200,6 +214,10 @@ mod tests {
         for tag in [
             EncoderProfileTag::H264Hardware,
             EncoderProfileTag::H264Software,
+            EncoderProfileTag::HevcHardware,
+            EncoderProfileTag::HevcSoftware,
+            EncoderProfileTag::Av1Hardware,
+            EncoderProfileTag::Av1Software,
         ] {
             assert_eq!(
                 EncoderProfileTag::try_from(tag.as_u8()).expect("profile"),

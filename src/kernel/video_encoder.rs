@@ -6,6 +6,8 @@ use crate::kernel::geometry::{FrameRate, PixelSize};
 #[repr(u8)]
 pub enum VideoCodec {
     H264 = 1,
+    Hevc = 2,
+    Av1 = 3,
 }
 
 impl VideoCodec {
@@ -16,6 +18,12 @@ impl VideoCodec {
     pub fn recommended_bitrate(self, frame_size: PixelSize, frame_rate: FrameRate) -> VideoBitrate {
         match self {
             Self::H264 => recommended_h264_bitrate(frame_size, frame_rate),
+            Self::Hevc => {
+                scale_recommended_bitrate(recommended_h264_bitrate(frame_size, frame_rate), 3, 4)
+            }
+            Self::Av1 => {
+                scale_recommended_bitrate(recommended_h264_bitrate(frame_size, frame_rate), 11, 20)
+            }
         }
     }
 }
@@ -26,6 +34,8 @@ impl TryFrom<u8> for VideoCodec {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             1 => Ok(Self::H264),
+            2 => Ok(Self::Hevc),
+            3 => Ok(Self::Av1),
             other => Err(UnknownVideoCodec(other)),
         }
     }
@@ -117,6 +127,21 @@ fn recommended_h264_bitrate(frame_size: PixelSize, frame_rate: FrameRate) -> Vid
         u128::from(MAX_RECOMMENDED_BITRATE_BPS),
     ) as u32;
     VideoBitrate(bits_per_second)
+}
+
+fn scale_recommended_bitrate(
+    reference: VideoBitrate,
+    numerator: u32,
+    denominator: u32,
+) -> VideoBitrate {
+    let scaled = u128::from(reference.bits_per_second())
+        .saturating_mul(u128::from(numerator))
+        .div_ceil(u128::from(denominator.max(1)));
+    let rounded = scaled.div_ceil(BITS_PER_MEGABIT) * BITS_PER_MEGABIT;
+    VideoBitrate(rounded.clamp(
+        u128::from(MIN_RECOMMENDED_BITRATE_BPS),
+        u128::from(MAX_RECOMMENDED_BITRATE_BPS),
+    ) as u32)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +295,28 @@ mod tests {
                 )
                 .bits_per_second(),
             80_000_000
+        );
+    }
+
+    #[test]
+    fn newer_codecs_use_independent_bitrate_models() {
+        let size = crate::kernel::geometry::PixelSize {
+            width: 1920,
+            height: 1080,
+        };
+        let rate = FrameRate::new(60, 1).expect("fps");
+
+        assert_eq!(
+            VideoCodec::Hevc
+                .recommended_bitrate(size, rate)
+                .bits_per_second(),
+            9_000_000
+        );
+        assert_eq!(
+            VideoCodec::Av1
+                .recommended_bitrate(size, rate)
+                .bits_per_second(),
+            7_000_000
         );
     }
 }

@@ -58,6 +58,15 @@ pub fn validate_set_screen_streams(
                 stream.codec
             )));
         }
+        let peer_can_decode = peer.decoder_codecs.contains(&stream.codec)
+            || (peer.decoder_codecs.is_empty()
+                && stream.codec == crate::kernel::video_encoder::VideoCodec::H264);
+        if !peer_can_decode {
+            return Err(DomainError::capability(format!(
+                "peer cannot decode requested codec {:?}",
+                stream.codec
+            )));
+        }
     }
 
     let requested = request.desired_streams.len();
@@ -78,19 +87,6 @@ pub fn validate_set_screen_streams(
             "requested {requested} streams exceeds peer max_screens {}",
             peer.max_screens
         )));
-    }
-
-    // Controllers may omit encoder profiles; hosts must still encode.
-    // If the peer advertised profiles, require intersection with local host encode path.
-    if !peer.encoder_profiles.is_empty() {
-        let overlap = local_host_encode_requirements()
-            .iter()
-            .any(|required| peer.encoder_profiles.contains(required));
-        if !overlap {
-            return Err(DomainError::capability(
-                "peer encoder profiles do not intersect local host encode requirements",
-            ));
-        }
     }
 
     Ok(())
@@ -163,6 +159,7 @@ mod tests {
         let peer = PeerCapabilities {
             max_screens: 1,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+            decoder_codecs: vec![VideoCodec::H264],
             absolute_pointer: false,
             reliable_input: false,
         };
@@ -195,6 +192,7 @@ mod tests {
         let host = PeerCapabilities {
             max_screens: 0,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+            decoder_codecs: vec![VideoCodec::H264],
             absolute_pointer: false,
             reliable_input: false,
         };

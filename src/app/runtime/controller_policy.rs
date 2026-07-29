@@ -33,6 +33,7 @@ mod tests {
         let host = PeerCapabilities {
             max_screens: 0,
             encoder_profiles: vec![EncoderProfileTag::H264Hardware],
+            decoder_codecs: vec![VideoCodec::H264],
             absolute_pointer: false,
             reliable_input: false,
         };
