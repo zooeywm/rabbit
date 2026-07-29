@@ -6,7 +6,7 @@ use std::{
 };
 
 use eros::Context as _;
-use tracing::{debug, trace};
+use tracing::{info, trace};
 
 use crate::{
     infra::unsync_queue::UnsyncQueue,
@@ -40,7 +40,7 @@ where
         );
     };
 
-    debug!(
+    info!(
         event = "host_screen_stream_started",
         screen_id = screen_id.0,
         codec = ?parameters.codec,

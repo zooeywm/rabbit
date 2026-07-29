@@ -8,8 +8,11 @@ use crate::app::{
         message::{MessageSender, RootMessage},
     },
     platform::ApplicationStack,
-    runtime::host_stream_lifecycle::{
-        ScreenStreamFinishEffect, apply_host_stop_screen_stream, apply_screen_stream_finished,
+    runtime::{
+        host_stream_launch::notify_failed_host_stream,
+        host_stream_lifecycle::{
+            ScreenStreamFinishEffect, apply_host_stop_screen_stream, apply_screen_stream_finished,
+        },
     },
 };
 
@@ -98,19 +101,31 @@ where
                     {
                         continue;
                     }
-                    if let Err(error) = self.replace_screen_stream(
-                        session_id,
-                        plan.screen_id,
-                        plan.parameters,
-                        plan.encoding,
-                        sender,
-                    ) {
+                    if let Err(error) = self
+                        .replace_screen_stream(
+                            session_id,
+                            plan.screen_id,
+                            plan.parameters,
+                            plan.encoding,
+                            sender,
+                        )
+                        .await
+                    {
                         error!(
                             session_id = session_id.0,
                             screen_id = plan.screen_id.0,
                             error = ?error,
                             "Failed to start screen stream"
                         );
+                        if let Some(session_send) = self
+                            .model
+                            .sessions
+                            .iter()
+                            .find(|session| session.send.id() == session_id)
+                            .map(|session| Rc::clone(&session.send))
+                        {
+                            notify_failed_host_stream(session_send, session_id, plan.screen_id);
+                        }
                     } else {
                         changed = true;
                     }
@@ -138,6 +153,7 @@ where
                 if effect == ScreenStreamFinishEffect::Stale {
                     return Ok(false);
                 }
+                let session_send = Rc::clone(&session.send);
 
                 match result {
                     Ok(()) => info!(
@@ -164,6 +180,7 @@ where
                             "Session {} screen {} failed: {error}",
                             id.0, screen_id.0
                         ));
+                        notify_failed_host_stream(session_send, id, screen_id);
                     }
                 }
 

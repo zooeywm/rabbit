@@ -213,12 +213,25 @@ impl Drop for WgcCaptureLease {
 #[derive(Debug)]
 struct DesktopDuplicationCaptureLease {
     commands: flume::Sender<DesktopDuplicationCommand>,
-    _thread: JoinHandle<()>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl Drop for DesktopDuplicationCaptureLease {
     fn drop(&mut self) {
         let _ = self.commands.try_send(DesktopDuplicationCommand::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            match thread.join() {
+                Ok(()) => info!(
+                    event = "windows_desktop_duplication_released",
+                    "Released Windows Desktop Duplication before returning from stream shutdown"
+                ),
+                Err(payload) => warn!(
+                    event = "windows_desktop_duplication_thread_panicked",
+                    panic = ?payload,
+                    "Windows Desktop Duplication capture thread panicked during shutdown"
+                ),
+            }
+        }
     }
 }
 
@@ -388,7 +401,7 @@ fn acquire_desktop_duplication(
             _inner: WindowsCaptureLeaseInner::DesktopDuplication {
                 _lease: DesktopDuplicationCaptureLease {
                     commands,
-                    _thread: thread,
+                    thread: Some(thread),
                 },
             },
         },
@@ -536,6 +549,11 @@ fn run_desktop_duplication_capture(
         }
 
         if !capture.acquire_latest(SHUTDOWN_POLL_INTERVAL_MS)? {
+            // AcquireNextFrame holds the D3D11 device's unfair multithread lock
+            // for the entire timeout. Yield it while the desktop is idle so an
+            // on-demand IDR or encoder teardown is not starved by the capture
+            // thread immediately entering another blocking acquire.
+            thread::sleep(Duration::from_millis(10));
             continue;
         }
         let Some(texture) = capture.texture.as_ref().cloned() else {
@@ -563,7 +581,20 @@ fn run_desktop_duplication_capture(
             return Ok(());
         }
 
-        let _ = released.recv();
+        loop {
+            match released.recv_timeout(Duration::from_millis(10)) {
+                Ok(()) | Err(flume::RecvTimeoutError::Disconnected) => break,
+                Err(flume::RecvTimeoutError::Timeout) => {
+                    if matches!(
+                        commands.try_recv(),
+                        Ok(DesktopDuplicationCommand::Shutdown)
+                            | Err(flume::TryRecvError::Disconnected)
+                    ) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -626,10 +657,24 @@ fn create_output_duplication(
     device: &ID3D11Device,
 ) -> eros::Result<IDXGIOutputDuplication> {
     if let Ok(output5) = output.cast::<IDXGIOutput5>() {
-        return Ok(
-            unsafe { output5.DuplicateOutput1(device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]) }
-                .with_context(|| "IDXGIOutput5::DuplicateOutput1 failed")?,
-        );
+        for attempt in 1..=2 {
+            match unsafe { output5.DuplicateOutput1(device, 0, &[DXGI_FORMAT_B8G8R8A8_UNORM]) } {
+                Ok(duplication) => return Ok(duplication),
+                Err(error) if attempt == 1 => {
+                    warn!(
+                        event = "windows_desktop_duplication_create_retry",
+                        attempt,
+                        error = ?error,
+                        "Retrying Desktop Duplication creation after the previous stream released it"
+                    );
+                    thread::sleep(Duration::from_millis(200));
+                }
+                Err(error) => {
+                    Err(error).with_context(|| "IDXGIOutput5::DuplicateOutput1 failed")?;
+                }
+            }
+        }
+        unreachable!("Desktop Duplication creation loop must return")
     }
 
     warn!(

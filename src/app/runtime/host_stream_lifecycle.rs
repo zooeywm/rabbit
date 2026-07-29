@@ -45,6 +45,17 @@ pub fn apply_host_stop_screen_stream(
     streams.remove(&screen_id).is_some()
 }
 
+/// Removes the current stream and returns its cancellation-aware task so the
+/// caller can join it before acquiring replacement platform resources.
+pub fn begin_host_screen_stream_replacement(
+    streams: &mut HashMap<ScreenId, RunningScreenStream>,
+    screen_id: ScreenId,
+) -> Option<compio::runtime::JoinHandle<()>> {
+    streams
+        .remove(&screen_id)
+        .and_then(|mut stream| stream.begin_shutdown())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +98,39 @@ mod tests {
         streams.insert(ScreenId(3), stream(1));
         assert!(apply_host_stop_screen_stream(&mut streams, ScreenId(3)));
         assert!(!apply_host_stop_screen_stream(&mut streams, ScreenId(3)));
+    }
+
+    #[test]
+    fn replacement_cancels_and_joins_the_previous_stream() {
+        use std::{cell::Cell, rc::Rc};
+
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+        runtime.block_on(async {
+            let cancellation = UnsyncQueue::default();
+            let task_cancellation = cancellation.clone();
+            let stopped = Rc::new(Cell::new(false));
+            let task_stopped = Rc::clone(&stopped);
+            let mut streams = HashMap::new();
+            streams.insert(
+                ScreenId(4),
+                RunningScreenStream {
+                    id: 9,
+                    cancellation,
+                    encoder_commands: UnsyncQueue::default(),
+                    task: Some(compio::runtime::spawn(async move {
+                        task_cancellation.pop().await;
+                        task_stopped.set(true);
+                    })),
+                },
+            );
+
+            let task = begin_host_screen_stream_replacement(&mut streams, ScreenId(4))
+                .expect("Replacement should return the previous task");
+            task.await
+                .expect("Previous stream task should finish after cancellation");
+
+            assert!(streams.is_empty());
+            assert!(stopped.get());
+        });
     }
 }

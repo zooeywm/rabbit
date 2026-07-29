@@ -20,7 +20,7 @@ use crate::{
                 HostControlEffect, absolute_pointer_queue_key, apply_host_session_message,
                 can_replace_queued_absolute_pointer,
             },
-            host_stream_launch::launch_host_stream,
+            host_stream_launch::{launch_host_stream, notify_failed_host_stream},
             host_stream_lifecycle::{ScreenStreamFinishEffect, apply_screen_stream_finished},
             session_lifecycle::{ReconnectEligibility, SessionTimeoutPolicy, evaluate_reconnect},
         },
@@ -193,18 +193,22 @@ where
                         closed_normally,
                     );
                     if effect != ScreenStreamFinishEffect::Stale {
+                        let session_send = Rc::clone(&session.send);
                         match result {
                             Ok(()) => info!(
                                 session_id = id.0,
                                 screen_id = screen_id.0,
                                 "Headless screen stream finished"
                             ),
-                            Err(error) => error!(
-                                session_id = id.0,
-                                screen_id = screen_id.0,
-                                error = ?error,
-                                "Headless screen stream failed"
-                            ),
+                            Err(error) => {
+                                error!(
+                                    session_id = id.0,
+                                    screen_id = screen_id.0,
+                                    error = ?error,
+                                    "Headless screen stream failed"
+                                );
+                                notify_failed_host_stream(session_send, id, screen_id);
+                            }
                         }
                     }
                 }
@@ -222,7 +226,7 @@ where
                 for plan in plans {
                     let screen_id = plan.screen_id;
                     if let Err(error) =
-                        start_host_stream::<Stack>(&mut model, session_id, plan, &sender)
+                        start_host_stream::<Stack>(&mut model, session_id, plan, &sender).await
                     {
                         error!(
                             session_id = session_id.0,
@@ -230,6 +234,14 @@ where
                             error = ?error,
                             "Failed to start headless host stream"
                         );
+                        if let Some(session_send) = model
+                            .sessions
+                            .iter()
+                            .find(|session| session.send.id() == session_id)
+                            .map(|session| Rc::clone(&session.send))
+                        {
+                            notify_failed_host_stream(session_send, session_id, screen_id);
+                        }
                     }
                 }
             }
@@ -392,7 +404,7 @@ where
     Ok(())
 }
 
-fn start_host_stream<Stack>(
+async fn start_host_stream<Stack>(
     model: &mut ApplicationModel<Stack>,
     session_id: SessionId,
     plan: HostStreamPlan,
@@ -414,7 +426,8 @@ where
                 session_id, screen_id, stream_id, result,
             ));
         },
-    )?;
+    )
+    .await?;
     info!(
         event = "headless_stream_started",
         session_id = session_id.0,

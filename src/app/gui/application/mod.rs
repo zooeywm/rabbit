@@ -319,7 +319,7 @@ where
         true
     }
 
-    pub(super) fn replace_screen_stream(
+    pub(super) async fn replace_screen_stream(
         &mut self,
         session_id: SessionId,
         screen_id: ScreenId,
@@ -343,6 +343,7 @@ where
                 ));
             },
         )
+        .await
     }
 
     pub(super) fn remove_session(&mut self, id: SessionId) {
