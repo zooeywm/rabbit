@@ -31,7 +31,7 @@ use windows::{
             CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonQualityVsSpeed,
             CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncCommonRealTime,
             CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
-            CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI,
+            CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFActivate,
             IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample,
             IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
             MF_E_NO_EVENTS_AVAILABLE, MF_E_NO_MORE_TYPES, MF_E_TRANSFORM_NEED_MORE_INPUT,
@@ -43,12 +43,14 @@ use windows::{
             MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
             MFMediaType_Video, MFSTARTUP_FULL, MFStartup, MFT_CATEGORY_VIDEO_ENCODER,
             MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
-            MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-            MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-            MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
-            MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-            MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
-            eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_Base,
+            MFT_ENUM_HARDWARE_URL_Attribute, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
+            MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN,
+            MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+            MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+            MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+            MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
+            MFT_TRANSFORM_CLSID_Attribute, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12,
+            MFVideoInterlace_Progressive, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_Base,
         },
         System::{
             Com::CoTaskMemFree,
@@ -1060,8 +1062,35 @@ fn activate_h264_encoder() -> eros::Result<IMFTransform> {
     let activate = unsafe { (*activates).clone() }
         .with_context(|| "Media Foundation returned a null encoder activation object")?;
     unsafe { CoTaskMemFree(Some(activates.cast())) };
-    Ok(unsafe { activate.ActivateObject::<IMFTransform>() }
-        .with_context(|| "Failed to activate the hardware H.264 Media Foundation encoder")?)
+    let encoder_name = media_foundation_activation_string(&activate, &MFT_FRIENDLY_NAME_Attribute);
+    let hardware_url =
+        media_foundation_activation_string(&activate, &MFT_ENUM_HARDWARE_URL_Attribute);
+    let vendor_id =
+        media_foundation_activation_string(&activate, &MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
+    let transform_clsid = unsafe { activate.GetGUID(&MFT_TRANSFORM_CLSID_Attribute) }.ok();
+    let transform = unsafe { activate.ActivateObject::<IMFTransform>() }
+        .with_context(|| "Failed to activate the hardware H.264 Media Foundation encoder")?;
+    info!(
+        event = "windows_h264_encoder_selected",
+        encoder_name = encoder_name.as_deref().unwrap_or("<unavailable>"),
+        transform_clsid = ?transform_clsid,
+        hardware_url = hardware_url.as_deref().unwrap_or("<unavailable>"),
+        vendor_id = vendor_id.as_deref().unwrap_or("<unavailable>"),
+        hardware = true,
+        candidate_count = count,
+        "Selected Media Foundation H.264 encoder"
+    );
+    Ok(transform)
+}
+
+fn media_foundation_activation_string(
+    activate: &IMFActivate,
+    key: &windows::core::GUID,
+) -> Option<String> {
+    let length = unsafe { activate.GetStringLength(key) }.ok()? as usize;
+    let mut value = vec![0; length + 1];
+    unsafe { activate.GetString(key, &mut value, None) }.ok()?;
+    Some(String::from_utf16_lossy(&value[..length]))
 }
 
 fn configure_transform(
