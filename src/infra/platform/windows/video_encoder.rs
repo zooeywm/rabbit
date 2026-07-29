@@ -56,7 +56,7 @@ use windows::{
 
 use crate::{
     infra::platform::{
-        frame_pipeline::WgcFramePipelineFrame,
+        frame_pipeline::WindowsFramePipelineFrame,
         host_video_probe::{HostVideoFrameProbe, HostVideoProbeReporter},
     },
     kernel::{
@@ -84,7 +84,7 @@ impl From<WindowsVideoPacket> for Bytes {
 pub(crate) struct WindowsVideoEncoder;
 
 impl VideoEncoder for WindowsVideoEncoder {
-    type Input = WgcFramePipelineFrame;
+    type Input = WindowsFramePipelineFrame;
     type Packet = WindowsVideoPacket;
 
     fn run<Frames, Commands, SendPacket, SendFuture>(
@@ -112,7 +112,7 @@ async fn run_windows_encoder<Frames, Commands, SendPacket, SendFuture>(
     mut send_packet: SendPacket,
 ) -> eros::Result<()>
 where
-    Frames: futures_core::Stream<Item = eros::Result<Rc<WgcFramePipelineFrame>>> + Unpin,
+    Frames: futures_core::Stream<Item = eros::Result<Rc<WindowsFramePipelineFrame>>> + Unpin,
     Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
     SendPacket: FnMut(WindowsVideoPacket) -> SendFuture,
     SendFuture: Future<Output = eros::Result<()>>,
@@ -205,7 +205,7 @@ enum AsyncEncoderEvent {
 
 impl MfH264Encoder {
     fn new(
-        first_frame: &WgcFramePipelineFrame,
+        first_frame: &WindowsFramePipelineFrame,
         frame_rate: FrameRate,
         bitrate: VideoBitrate,
         max_packet_size: usize,
@@ -222,7 +222,7 @@ impl MfH264Encoder {
             .with_context(|| "Failed to start Media Foundation")?;
 
         let d3d = unsafe { first_frame.texture().GetDevice() }
-            .with_context(|| "Failed to get the WGC frame D3D11 device")?;
+            .with_context(|| "Failed to get the Windows capture D3D11 device")?;
         let video: ID3D11VideoDevice = d3d
             .cast()
             .with_context(|| "D3D11 device does not expose ID3D11VideoDevice")?;
@@ -278,7 +278,7 @@ impl MfH264Encoder {
 
     async fn encode_frame<SendPacket, SendFuture>(
         &mut self,
-        frame: &WgcFramePipelineFrame,
+        frame: &WindowsFramePipelineFrame,
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
     where
@@ -680,7 +680,10 @@ impl MfH264Encoder {
         )
     }
 
-    fn create_input_sample(&mut self, frame: &WgcFramePipelineFrame) -> eros::Result<IMFSample> {
+    fn create_input_sample(
+        &mut self,
+        frame: &WindowsFramePipelineFrame,
+    ) -> eros::Result<IMFSample> {
         let nv12 = self.convert_to_nv12(frame.texture())?;
         let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &nv12, 0, false) }
             .with_context(|| "Failed to wrap NV12 D3D11 texture for Media Foundation")?;
@@ -701,7 +704,10 @@ impl MfH264Encoder {
             return Ok(texture.clone());
         }
         if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
-            eros::bail!("WGC frame has unsupported D3D11 format {:?}", desc.Format);
+            eros::bail!(
+                "Windows capture frame has unsupported D3D11 format {:?}",
+                desc.Format
+            );
         }
         let source_size = PixelSize {
             width: desc.Width,
@@ -890,7 +896,7 @@ impl BgraToNv12Converter {
             self.video_context
                 .VideoProcessorBlt(&self.processor, &self.output_view, 0, &streams)
         }
-        .with_context(|| "Failed to convert BGRA WGC texture to NV12")?;
+        .with_context(|| "Failed to convert BGRA capture texture to NV12")?;
         Ok(self.output.clone())
     }
 }

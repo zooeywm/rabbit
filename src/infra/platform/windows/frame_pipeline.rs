@@ -14,45 +14,47 @@ use crate::kernel::{
     screen_manager::ScreenId,
 };
 
-use super::screen_capture::{WgcCaptureLease, WgcCapturedSurface, WgcFrameReceiver};
+use super::screen_capture::{WindowsCaptureLease, WindowsCapturedSurface, WindowsFrameReceiver};
 
 #[derive(Debug, Default, kudi::DepInj)]
-#[target(WgcFramePipelineManager)]
-pub(crate) struct WgcFramePipelineManagerState;
+#[target(WindowsFramePipelineManager)]
+pub(crate) struct WindowsFramePipelineManagerState;
 
-impl WgcFramePipelineManagerState {
+impl WindowsFramePipelineManagerState {
     pub(crate) fn new() -> Self {
         Self
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct WgcFramePipelineFrame {
+pub(crate) struct WindowsFramePipelineFrame {
     pub(crate) screen_id: ScreenId,
     pub(crate) size: PixelSize,
     pub(crate) source_frame_rate: FrameRate,
     pub(crate) frame_rate: FrameRate,
     pub(crate) probe: Option<super::host_video_probe::HostVideoFrameProbe>,
-    surface: WgcCapturedSurface,
+    surface: WindowsCapturedSurface,
 }
 
-impl WgcFramePipelineFrame {
+impl WindowsFramePipelineFrame {
     pub(crate) fn texture(&self) -> &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D {
         self.surface.texture()
     }
 }
 
-pub(crate) struct WgcFramePipelineSubscription {
-    _lease: WgcCaptureLease,
-    receiver:
-        flume::r#async::RecvStream<'static, eros::Result<super::screen_capture::WgcCapturedFrame>>,
+pub(crate) struct WindowsFramePipelineSubscription {
+    _lease: WindowsCaptureLease,
+    receiver: flume::r#async::RecvStream<
+        'static,
+        eros::Result<super::screen_capture::WindowsCapturedFrame>,
+    >,
     frame_size: PixelSize,
     frame_rate: FrameRate,
     frame_rate_gate: FrameRateGate,
 }
 
-impl futures_core::Stream for WgcFramePipelineSubscription {
-    type Item = eros::Result<Rc<WgcFramePipelineFrame>>;
+impl futures_core::Stream for WindowsFramePipelineSubscription {
+    type Item = eros::Result<Rc<WindowsFramePipelineFrame>>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
@@ -61,13 +63,13 @@ impl futures_core::Stream for WgcFramePipelineSubscription {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(frame))) => {
                     debug!(
-                        event = "wgc_frame_received",
+                        event = "windows_capture_frame_received",
                         screen_id = frame.screen_id.0,
                         width = frame.content_size.width,
                         height = frame.content_size.height,
                         source_frame_rate_numerator = frame.frame_rate.numerator(),
                         source_frame_rate_denominator = frame.frame_rate.denominator(),
-                        "Received WGC frame"
+                        "Received Windows capture frame"
                     );
                     if !this
                         .frame_rate_gate
@@ -79,7 +81,7 @@ impl futures_core::Stream for WgcFramePipelineSubscription {
                     if let Some(probe) = &mut probe {
                         probe.mark_pipeline_ready();
                     }
-                    let emitted = WgcFramePipelineFrame {
+                    let emitted = WindowsFramePipelineFrame {
                         screen_id: frame.screen_id,
                         size: if this.frame_size.width == 0 || this.frame_size.height == 0 {
                             frame.content_size
@@ -100,13 +102,13 @@ impl futures_core::Stream for WgcFramePipelineSubscription {
     }
 }
 
-impl<Deps> FramePipelineManager for WgcFramePipelineManager<Deps>
+impl<Deps> FramePipelineManager for WindowsFramePipelineManager<Deps>
 where
-    Deps: AsRef<WgcFramePipelineManagerState>
-        + ScreenCaptureManager<Lease = WgcCaptureLease, Receiver = WgcFrameReceiver>,
+    Deps: AsRef<WindowsFramePipelineManagerState>
+        + ScreenCaptureManager<Lease = WindowsCaptureLease, Receiver = WindowsFrameReceiver>,
 {
-    type Frame = WgcFramePipelineFrame;
-    type Subscription = WgcFramePipelineSubscription;
+    type Frame = WindowsFramePipelineFrame;
+    type Subscription = WindowsFramePipelineSubscription;
 
     fn subscribe(
         &mut self,
@@ -115,15 +117,15 @@ where
         frame_rate: FrameRate,
         _delivery: crate::kernel::frame_pipeline::FrameDelivery,
     ) -> eros::Result<Self::Subscription> {
-        let _ = <Deps as AsRef<WgcFramePipelineManagerState>>::as_ref(self.prj_ref());
+        let _ = <Deps as AsRef<WindowsFramePipelineManagerState>>::as_ref(self.prj_ref());
         let ScreenCaptureSource { lease, receiver } =
             ScreenCaptureManager::acquire(self.prj_ref_mut(), screen_id).with_context(|| {
                 format!(
-                    "Failed to acquire WGC capture for screen {}",
+                    "Failed to acquire Windows capture for screen {}",
                     screen_id.get()
                 )
             })?;
-        Ok(WgcFramePipelineSubscription {
+        Ok(WindowsFramePipelineSubscription {
             _lease: lease,
             receiver: receiver.into_stream(),
             frame_size: parameters.frame_size,

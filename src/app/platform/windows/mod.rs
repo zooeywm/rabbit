@@ -8,14 +8,14 @@ mod record;
 use crate::{
     app::{
         App,
-        config::Config,
+        config::{Config, WindowsCaptureBackend as WindowsCaptureBackendConfig},
         gui::{RabbitWindow, VideoViewStack},
     },
     infra::{
-        ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, WgcFramePipelineManagerState,
-        WgcScreenCaptureManagerState, WindowsDecodedFrame, WindowsRemoteInputInjector,
-        WindowsScreenLayoutManagerState, WindowsVideoDecoder, WindowsVideoEncoder, WorkerReaper,
-        WorkerReaperHandle,
+        ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, WindowsCaptureBackend,
+        WindowsDecodedFrame, WindowsFramePipelineManagerState, WindowsRemoteInputInjector,
+        WindowsScreenCaptureManagerState, WindowsScreenLayoutManagerState, WindowsVideoDecoder,
+        WindowsVideoEncoder, WorkerReaper, WorkerReaperHandle,
     },
     kernel::{session::ReceivedVideoFrame, video_renderer::VideoRenderer as _},
 };
@@ -23,28 +23,28 @@ use crate::{
 pub(crate) use crate::app::stack::{ApplicationStack, RemoteVideoStack, RunnableApp};
 
 enum WindowsApplicationStack {
-    WgcD3d11,
+    D3d11Mf,
 }
 
-pub(crate) struct WgcD3d11ApplicationStack;
+pub(crate) struct WindowsD3d11MfApplicationStack;
 
 #[cfg(test)]
-pub(crate) use WgcD3d11ApplicationStack as TestApplicationStack;
+pub(crate) use WindowsD3d11MfApplicationStack as TestApplicationStack;
 
 pub(crate) fn run(config: Config) -> eros::Result<()> {
     match select_application_stack(&config) {
-        WindowsApplicationStack::WgcD3d11 => {
-            crate::app::gui::run::<WgcD3d11ApplicationStack>(config)
+        WindowsApplicationStack::D3d11Mf => {
+            crate::app::gui::run::<WindowsD3d11MfApplicationStack>(config)
         }
     }
 }
 
 pub(crate) fn run_headless(config: Config) -> eros::Result<()> {
     match select_application_stack(&config) {
-        WindowsApplicationStack::WgcD3d11 => {
+        WindowsApplicationStack::D3d11Mf => {
             let runtime =
                 compio::runtime::Runtime::new().expect("Headless Compio runtime should start");
-            runtime.block_on(crate::app::headless::run::<WgcD3d11ApplicationStack>(
+            runtime.block_on(crate::app::headless::run::<WindowsD3d11MfApplicationStack>(
                 config,
             ))
         }
@@ -63,23 +63,23 @@ pub(crate) fn install_shutdown_handlers() {}
 
 /// Selects the Windows media backend.
 ///
-/// The WGC + D3D11 + Media Foundation stack is the only wired option and trails
+/// The Desktop Duplication + D3D11 + Media Foundation stack is the default and trails
 /// the Linux product path in feature completeness. Keep parity work behind this
 /// stack boundary.
 fn select_application_stack(_config: &Config) -> WindowsApplicationStack {
     info!(
         event = "app_platform_stack_selected",
-        stack = WgcD3d11ApplicationStack::name(),
+        stack = WindowsD3d11MfApplicationStack::name(),
         "Selected Windows application backend stack"
     );
-    WindowsApplicationStack::WgcD3d11
+    WindowsApplicationStack::D3d11Mf
 }
 
-impl ApplicationStack for WgcD3d11ApplicationStack {
+impl ApplicationStack for WindowsD3d11MfApplicationStack {
     type App = App<
         WindowsScreenLayoutManagerState,
-        WgcScreenCaptureManagerState,
-        WgcFramePipelineManagerState,
+        WindowsScreenCaptureManagerState,
+        WindowsFramePipelineManagerState,
     >;
     type RemoteVideo = RemoteVideo;
     type RemoteVideoViewStack = RemoteVideoViewStack;
@@ -87,7 +87,7 @@ impl ApplicationStack for WgcD3d11ApplicationStack {
     type RemoteInputInjector = WindowsRemoteInputInjector;
 
     fn name() -> &'static str {
-        "windows-wgc-d3d11-mf"
+        "windows-d3d11-mf"
     }
 
     fn create_app(
@@ -97,7 +97,14 @@ impl ApplicationStack for WgcD3d11ApplicationStack {
         worker_reaper_handle: WorkerReaperHandle,
     ) -> eros::Result<Self::App> {
         let screen_layout_manager_state = crate::infra::create_screen_layout_manager_state()?;
+        let capture_backend = match config.video.windows_capture_backend {
+            WindowsCaptureBackendConfig::DesktopDuplication => {
+                WindowsCaptureBackend::DesktopDuplication
+            }
+            WindowsCaptureBackendConfig::Wgc => WindowsCaptureBackend::Wgc,
+        };
         let screen_capture_manager_state = crate::infra::create_screen_capture_manager_state(
+            capture_backend,
             config.video.enable_host_probing,
             Duration::from_millis(config.video.probe_interval_ms),
             worker_reaper_handle.clone(),

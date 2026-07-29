@@ -1,8 +1,9 @@
 use crate::{
     app::App,
     infra::{
-        WgcFramePipelineManager, WgcFramePipelineManagerState, WgcScreenCaptureManager,
-        WgcScreenCaptureManagerState, WindowsScreenLayoutManager, WindowsScreenLayoutManagerState,
+        WindowsFramePipelineManager, WindowsFramePipelineManagerState, WindowsScreenCaptureManager,
+        WindowsScreenCaptureManagerState, WindowsScreenLayoutManager,
+        WindowsScreenLayoutManagerState,
     },
     kernel::{
         frame_pipeline::FramePipelineManager,
@@ -47,18 +48,18 @@ impl<ScreenCaptureManagerState, FramePipelineManagerState> ScreenLayoutManager
     }
 }
 
-impl<ScreenLayoutManagerState, FramePipelineManagerState> AsRef<WgcScreenCaptureManagerState>
-    for App<ScreenLayoutManagerState, WgcScreenCaptureManagerState, FramePipelineManagerState>
+impl<ScreenLayoutManagerState, FramePipelineManagerState> AsRef<WindowsScreenCaptureManagerState>
+    for App<ScreenLayoutManagerState, WindowsScreenCaptureManagerState, FramePipelineManagerState>
 {
-    fn as_ref(&self) -> &WgcScreenCaptureManagerState {
+    fn as_ref(&self) -> &WindowsScreenCaptureManagerState {
         &self.screen_capture_manager_state
     }
 }
 
-impl<ScreenLayoutManagerState, FramePipelineManagerState> AsMut<WgcScreenCaptureManagerState>
-    for App<ScreenLayoutManagerState, WgcScreenCaptureManagerState, FramePipelineManagerState>
+impl<ScreenLayoutManagerState, FramePipelineManagerState> AsMut<WindowsScreenCaptureManagerState>
+    for App<ScreenLayoutManagerState, WindowsScreenCaptureManagerState, FramePipelineManagerState>
 {
-    fn as_mut(&mut self) -> &mut WgcScreenCaptureManagerState {
+    fn as_mut(&mut self) -> &mut WindowsScreenCaptureManagerState {
         &mut self.screen_capture_manager_state
     }
 }
@@ -66,34 +67,34 @@ impl<ScreenLayoutManagerState, FramePipelineManagerState> AsMut<WgcScreenCapture
 impl<FramePipelineManagerState> ScreenCaptureManager
     for App<
         WindowsScreenLayoutManagerState,
-        WgcScreenCaptureManagerState,
+        WindowsScreenCaptureManagerState,
         FramePipelineManagerState,
     >
 {
-    type Lease = <WgcScreenCaptureManager<Self> as ScreenCaptureManager>::Lease;
-    type Receiver = <WgcScreenCaptureManager<Self> as ScreenCaptureManager>::Receiver;
+    type Lease = <WindowsScreenCaptureManager<Self> as ScreenCaptureManager>::Lease;
+    type Receiver = <WindowsScreenCaptureManager<Self> as ScreenCaptureManager>::Receiver;
 
     fn acquire(
         &mut self,
         screen_id: &ScreenId,
     ) -> eros::Result<crate::kernel::screen_capture::ScreenCaptureSource<Self::Lease, Self::Receiver>>
     {
-        WgcScreenCaptureManager::inj_ref_mut(self).acquire(screen_id)
+        WindowsScreenCaptureManager::inj_ref_mut(self).acquire(screen_id)
     }
 }
 
-impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsRef<WgcFramePipelineManagerState>
-    for App<ScreenLayoutManagerState, ScreenCaptureManagerState, WgcFramePipelineManagerState>
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsRef<WindowsFramePipelineManagerState>
+    for App<ScreenLayoutManagerState, ScreenCaptureManagerState, WindowsFramePipelineManagerState>
 {
-    fn as_ref(&self) -> &WgcFramePipelineManagerState {
+    fn as_ref(&self) -> &WindowsFramePipelineManagerState {
         &self.frame_pipeline_manager_state
     }
 }
 
-impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsMut<WgcFramePipelineManagerState>
-    for App<ScreenLayoutManagerState, ScreenCaptureManagerState, WgcFramePipelineManagerState>
+impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsMut<WindowsFramePipelineManagerState>
+    for App<ScreenLayoutManagerState, ScreenCaptureManagerState, WindowsFramePipelineManagerState>
 {
-    fn as_mut(&mut self) -> &mut WgcFramePipelineManagerState {
+    fn as_mut(&mut self) -> &mut WindowsFramePipelineManagerState {
         &mut self.frame_pipeline_manager_state
     }
 }
@@ -101,12 +102,12 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsMut<WgcFramePipeline
 impl FramePipelineManager
     for App<
         WindowsScreenLayoutManagerState,
-        WgcScreenCaptureManagerState,
-        WgcFramePipelineManagerState,
+        WindowsScreenCaptureManagerState,
+        WindowsFramePipelineManagerState,
     >
 {
-    type Frame = <WgcFramePipelineManager<Self> as FramePipelineManager>::Frame;
-    type Subscription = <WgcFramePipelineManager<Self> as FramePipelineManager>::Subscription;
+    type Frame = <WindowsFramePipelineManager<Self> as FramePipelineManager>::Frame;
+    type Subscription = <WindowsFramePipelineManager<Self> as FramePipelineManager>::Subscription;
 
     fn subscribe(
         &mut self,
@@ -115,7 +116,7 @@ impl FramePipelineManager
         frame_rate: crate::kernel::geometry::FrameRate,
         delivery: crate::kernel::frame_pipeline::FrameDelivery,
     ) -> eros::Result<Self::Subscription> {
-        WgcFramePipelineManager::inj_ref_mut(self)
+        WindowsFramePipelineManager::inj_ref_mut(self)
             .subscribe(screen_id, parameters, frame_rate, delivery)
     }
 }

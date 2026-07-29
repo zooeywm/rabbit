@@ -62,6 +62,15 @@ pub struct VideoConfig {
     pub enable_host_probing: bool,
     pub enable_client_probing: bool,
     pub probe_interval_ms: u64,
+    pub windows_capture_backend: WindowsCaptureBackend,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsCaptureBackend {
+    #[default]
+    DesktopDuplication,
+    Wgc,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -84,6 +93,7 @@ impl Default for VideoConfig {
             enable_host_probing: false,
             enable_client_probing: false,
             probe_interval_ms: 2_000,
+            windows_capture_backend: WindowsCaptureBackend::DesktopDuplication,
         }
     }
 }
@@ -192,7 +202,9 @@ const fn default_app_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::config::{Config, NetworkTransport, PointerMode, RecordingConfig};
+    use crate::app::config::{
+        Config, NetworkTransport, PointerMode, RecordingConfig, WindowsCaptureBackend,
+    };
 
     #[test]
     fn network_transport_defaults_to_quic() {
@@ -253,6 +265,21 @@ mod tests {
             .expect("Video probe interval configuration should deserialize");
 
         assert_eq!(config.video.probe_interval_ms, 750);
+    }
+
+    #[test]
+    fn windows_capture_defaults_to_desktop_duplication_and_keeps_wgc_explicit() {
+        assert_eq!(
+            Config::default().video.windows_capture_backend,
+            WindowsCaptureBackend::DesktopDuplication
+        );
+
+        let config = toml::from_str::<Config>("[video]\nwindows_capture_backend = \"wgc\"")
+            .expect("WGC capture backend should deserialize");
+        assert_eq!(
+            config.video.windows_capture_backend,
+            WindowsCaptureBackend::Wgc
+        );
     }
 
     #[test]
