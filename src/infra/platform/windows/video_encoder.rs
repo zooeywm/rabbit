@@ -1252,11 +1252,12 @@ fn configure_codec_low_latency(
         &CODECAPI_AVEncCommonQualityVsSpeed,
         &VARIANT::from(0u32),
     );
-    let bounded_gop = set_optional_codec_property(
+    set_required_codec_property(
         &codec_api,
         &CODECAPI_AVEncMPVGOPSize,
-        &VARIANT::from(H264_KEY_FRAME_INTERVAL),
-    );
+        &VARIANT::from(H264_INFINITE_GOP_LENGTH),
+        "infinite H.264 GOP",
+    )?;
     let constant_bitrate = set_optional_codec_property(
         &codec_api,
         &CODECAPI_AVEncCommonRateControlMode,
@@ -1281,8 +1282,9 @@ fn configure_codec_low_latency(
         real_time,
         no_b_frames,
         fastest_encoding,
-        bounded_gop,
-        key_frame_interval = H264_KEY_FRAME_INTERVAL,
+        infinite_gop = true,
+        gop_length = H264_INFINITE_GOP_LENGTH,
+        key_frame_policy = "on-demand-idr-only",
         constant_bitrate,
         mean_bitrate,
         bounded_buffer,
@@ -1312,6 +1314,18 @@ fn set_optional_codec_property(
     }
 }
 
+fn set_required_codec_property(
+    codec_api: &ICodecAPI,
+    property: &windows::core::GUID,
+    value: &VARIANT,
+    description: &str,
+) -> eros::Result<()> {
+    unsafe { codec_api.SetValue(property, value) }.with_context(|| {
+        format!("Windows H.264 encoder does not support required {description}")
+    })?;
+    Ok(())
+}
+
 fn create_nv12_input_type(size: PixelSize, frame_rate: FrameRate) -> eros::Result<IMFMediaType> {
     let media_type =
         unsafe { MFCreateMediaType() }.with_context(|| "Failed to create NV12 input media type")?;
@@ -1339,7 +1353,7 @@ fn create_h264_output_type(
     set_video_type_common(&media_type, size, frame_rate, MFVideoFormat_H264)?;
     unsafe {
         media_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate.bits_per_second())?;
-        media_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, H264_KEY_FRAME_INTERVAL)?;
+        media_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, H264_INFINITE_GOP_LENGTH)?;
         media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
         media_type.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 0)?;
     }
@@ -1655,7 +1669,7 @@ const H264_RTP_PAYLOAD_TYPE: u8 = 96;
 const RTP_SSRC: u32 = 0x5242_4954;
 const MAX_ENCODER_OUTPUT_SAMPLE_SIZE: u32 = 4 * 1024 * 1024;
 const MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT: usize = 8;
-const H264_KEY_FRAME_INTERVAL: u32 = 1_024;
+const H264_INFINITE_GOP_LENGTH: u32 = u32::MAX;
 const H264_CPB_INTERVALS_PER_SECOND: u32 = 10;
 
 #[cfg(test)]
@@ -1664,7 +1678,12 @@ mod tests {
 
     use crate::kernel::geometry::FrameRate;
 
-    use super::FixedFrameClock;
+    use super::{FixedFrameClock, H264_INFINITE_GOP_LENGTH};
+
+    #[test]
+    fn windows_h264_policy_disables_periodic_key_frames() {
+        assert_eq!(H264_INFINITE_GOP_LENGTH, u32::MAX);
+    }
 
     #[test]
     fn fixed_frame_clock_keeps_its_deadline_when_content_arrives() {
