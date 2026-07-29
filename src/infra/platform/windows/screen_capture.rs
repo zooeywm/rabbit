@@ -469,6 +469,7 @@ fn acquire_desktop_duplication(
 struct DesktopDuplicationCapture {
     monitor: WindowsMonitorHandle,
     frame_rate_mode: VideoFrameRateMode,
+    refresh_rate: Option<FrameRate>,
     factory: IDXGIFactory1,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
@@ -499,6 +500,10 @@ impl DesktopDuplicationCapture {
             width: description.ModeDesc.Width,
             height: description.ModeDesc.Height,
         };
+        let refresh_rate = FrameRate::new(
+            description.ModeDesc.RefreshRate.Numerator,
+            description.ModeDesc.RefreshRate.Denominator,
+        );
         if size.width == 0 || size.height == 0 {
             eros::bail!("Desktop Duplication returned an empty desktop mode");
         }
@@ -518,6 +523,8 @@ impl DesktopDuplicationCapture {
             width = size.width,
             height = size.height,
             format = ?description.ModeDesc.Format,
+            refresh_rate_numerator = refresh_rate.map(FrameRate::numerator),
+            refresh_rate_denominator = refresh_rate.map(FrameRate::denominator),
             texture_pool_size,
             snapshot_texture = fixed_snapshot.is_some(),
             total_capture_textures = TEXTURE_COUNT,
@@ -526,6 +533,7 @@ impl DesktopDuplicationCapture {
         Ok(Self {
             monitor,
             frame_rate_mode,
+            refresh_rate,
             factory,
             context,
             duplication,
@@ -866,17 +874,21 @@ fn reinitialize_desktop_duplication_capture(
 
 fn run_fixed_desktop_duplication_capture(
     capture: &mut DesktopDuplicationCapture,
-    frame_rate: FrameRate,
+    requested_frame_rate: FrameRate,
     output: &DesktopDuplicationCaptureOutput,
 ) -> eros::Result<()> {
     let timer = HighResolutionWaitableTimer::new()?;
-    let mut clock = FixedCaptureClock::new(frame_rate);
+    let mut frame_rate = matched_fixed_capture_rate(capture, requested_frame_rate);
+    let mut clock = None;
     let mut snapshot_valid = false;
     info!(
         event = "windows_desktop_duplication_fixed_rate_configured",
         screen_id = output.screen_id.get(),
+        requested_frame_rate_numerator = requested_frame_rate.numerator(),
+        requested_frame_rate_denominator = requested_frame_rate.denominator(),
         frame_rate_numerator = frame_rate.numerator(),
         frame_rate_denominator = frame_rate.denominator(),
+        clock_epoch = "first-dxgi-presentation",
         timer = "waitable-timer",
         high_resolution = timer.high_resolution,
         acquire_timeout_ms = 0,
@@ -886,17 +898,48 @@ fn run_fixed_desktop_duplication_capture(
         if output.shutdown_requested() {
             return Ok(());
         }
-        timer.wait(clock.delay())?;
-        clock.advance();
-        if output.shutdown_requested() {
-            return Ok(());
-        }
 
         let snapshot = capture
             .fixed_snapshot
             .as_ref()
             .cloned()
             .with_context(|| "Fixed Desktop Duplication snapshot texture is unavailable")?;
+        if clock.is_none() {
+            match capture.acquire_latest_into(100, Some(&snapshot))? {
+                DesktopDuplicationAcquire::Frame(captured_at) => {
+                    snapshot_valid = true;
+                    clock = Some(FixedCaptureClock::new_at(frame_rate, captured_at));
+                    if !publish_fixed_snapshot(capture, output, &snapshot, frame_rate, captured_at)
+                    {
+                        return Ok(());
+                    }
+                }
+                DesktopDuplicationAcquire::NoFrame => continue,
+                DesktopDuplicationAcquire::Reinitialize(reason) => {
+                    if !reinitialize_desktop_duplication_capture(capture, output, reason) {
+                        return Ok(());
+                    }
+                    frame_rate = matched_fixed_capture_rate(capture, requested_frame_rate);
+                    snapshot_valid = false;
+                    continue;
+                }
+            }
+            continue;
+        }
+
+        let clock_ref = clock
+            .as_ref()
+            .expect("Fixed capture clock is initialized from a DXGI presentation");
+        timer.wait(clock_ref.delay())?;
+        let captured_at = clock_ref.next_frame_at();
+        clock
+            .as_mut()
+            .expect("Fixed capture clock is initialized from a DXGI presentation")
+            .advance();
+        if output.shutdown_requested() {
+            return Ok(());
+        }
+
         match capture.acquire_latest_into(0, Some(&snapshot))? {
             DesktopDuplicationAcquire::Frame(_) => snapshot_valid = true,
             DesktopDuplicationAcquire::NoFrame => {}
@@ -904,25 +947,64 @@ fn run_fixed_desktop_duplication_capture(
                 if !reinitialize_desktop_duplication_capture(capture, output, reason) {
                     return Ok(());
                 }
+                frame_rate = matched_fixed_capture_rate(capture, requested_frame_rate);
                 snapshot_valid = false;
+                clock = None;
                 continue;
             }
         }
         if !snapshot_valid {
             continue;
         }
-        let Some(texture) = capture.take_output_texture(output) else {
-            trace!(
-                event = "windows_desktop_duplication_frame_dropped",
-                reason = "capture-texture-pool-exhausted",
-                "Dropped an unencoded fixed-rate Desktop Duplication frame"
-            );
-            continue;
-        };
-        unsafe { capture.context.CopyResource(&texture, &snapshot) };
-        if !output.publish(texture, capture, frame_rate, true, Instant::now()) {
+        if !publish_fixed_snapshot(capture, output, &snapshot, frame_rate, captured_at) {
             return Ok(());
         }
+    }
+}
+
+fn matched_fixed_capture_rate(
+    capture: &DesktopDuplicationCapture,
+    requested: FrameRate,
+) -> FrameRate {
+    capture
+        .refresh_rate
+        .map(|refresh| match_fixed_rate_to_refresh(requested, refresh))
+        .unwrap_or(requested)
+}
+
+fn publish_fixed_snapshot(
+    capture: &DesktopDuplicationCapture,
+    output: &DesktopDuplicationCaptureOutput,
+    snapshot: &ID3D11Texture2D,
+    frame_rate: FrameRate,
+    captured_at: Instant,
+) -> bool {
+    let Some(texture) = capture.take_output_texture(output) else {
+        trace!(
+            event = "windows_desktop_duplication_frame_dropped",
+            reason = "capture-texture-pool-exhausted",
+            "Dropped an unencoded fixed-rate Desktop Duplication frame"
+        );
+        return true;
+    };
+    unsafe { capture.context.CopyResource(&texture, snapshot) };
+    output.publish(texture, capture, frame_rate, true, captured_at)
+}
+
+fn match_fixed_rate_to_refresh(requested: FrameRate, refresh: FrameRate) -> FrameRate {
+    const MATCH_TOLERANCE_PER_MILLE: u128 = 5;
+
+    let requested_scaled = u128::from(requested.numerator()) * u128::from(refresh.denominator());
+    let refresh_scaled = u128::from(refresh.numerator()) * u128::from(requested.denominator());
+    if requested_scaled < refresh_scaled {
+        return requested;
+    }
+    let difference = requested_scaled - refresh_scaled;
+    if difference.saturating_mul(1_000) <= refresh_scaled.saturating_mul(MATCH_TOLERANCE_PER_MILLE)
+    {
+        refresh
+    } else {
+        requested
     }
 }
 
@@ -1054,10 +1136,6 @@ struct FixedCaptureClock {
 }
 
 impl FixedCaptureClock {
-    fn new(frame_rate: FrameRate) -> Self {
-        Self::new_at(frame_rate, Instant::now())
-    }
-
     fn new_at(frame_rate: FrameRate, now: Instant) -> Self {
         let numerator = u128::from(frame_rate.numerator().max(1));
         let denominator = u128::from(frame_rate.denominator().max(1));
@@ -1078,6 +1156,10 @@ impl FixedCaptureClock {
 
     fn delay_at(&self, now: Instant) -> Duration {
         self.next_frame_at.saturating_duration_since(now)
+    }
+
+    fn next_frame_at(&self) -> Instant {
+        self.next_frame_at
     }
 
     fn advance(&mut self) {
@@ -1259,7 +1341,7 @@ mod tests {
 
     use super::{
         FixedCaptureClock, WindowsCaptureBackend, WindowsScreenCaptureManagerState,
-        desktop_duplication_reinitialize_error,
+        desktop_duplication_reinitialize_error, match_fixed_rate_to_refresh,
     };
 
     #[test]
@@ -1291,6 +1373,22 @@ mod tests {
             clock.delay_at(start + Duration::from_millis(35)),
             Duration::from_millis(10)
         );
+    }
+
+    #[test]
+    fn fixed_capture_rate_matches_a_nearby_display_refresh_rational() {
+        let requested = FrameRate::new(120, 1).expect("requested frame rate");
+        let refresh = FrameRate::new(120_000, 1_001).expect("refresh rate");
+
+        assert_eq!(match_fixed_rate_to_refresh(requested, refresh), refresh);
+    }
+
+    #[test]
+    fn fixed_capture_rate_preserves_an_intentionally_different_target() {
+        let requested = FrameRate::new(60, 1).expect("requested frame rate");
+        let refresh = FrameRate::new(120, 1).expect("refresh rate");
+
+        assert_eq!(match_fixed_rate_to_refresh(requested, refresh), requested);
     }
 
     #[test]
