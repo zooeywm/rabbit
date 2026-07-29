@@ -8,31 +8,20 @@ use std::{
     time::Duration,
 };
 
-mod backend;
-
 use eros::Context as _;
-use slint::{ComponentHandle as _, GraphicsAPI, RenderingState};
-use tracing::info;
+use slint::{ComponentHandle as _, RenderingState};
 
 use crate::{
-    app::{
-        config::VideoDisplayPreference,
-        gui::view::{GuiIntent, RabbitWindow},
-    },
+    app::gui::view::{GuiIntent, RabbitWindow},
     kernel::{
-        screen_manager::ScreenId,
-        session::SessionId,
+        screen_manager::ScreenId, session::SessionId,
         video_decoder::DecodedVideoFrame as DecodedVideoFrameTrait,
-        video_renderer::{VideoRenderer as _, VideoViewport},
     },
 };
-
-use crate::app::gui::video_view::backend::{VideoDisplayBackend, select_video_display_backend};
 
 pub(crate) trait VideoViewStack: 'static {
     type Frame: DecodedVideoFrameTrait + 'static;
     type NativeRenderer: 'static;
-    type OpenGlRenderer: crate::kernel::video_renderer::VideoRenderer<Frame = Self::Frame> + 'static;
     type NativeViewport;
 
     fn select_slint_backend() -> eros::Result<()>;
@@ -41,11 +30,6 @@ pub(crate) trait VideoViewStack: 'static {
         window: &slint::Window,
         probe_interval: Duration,
     ) -> eros::Result<Self::NativeRenderer>;
-
-    fn create_opengl_renderer(
-        get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
-        probe_interval: Duration,
-    ) -> eros::Result<Self::OpenGlRenderer>;
 
     fn set_native_viewport(
         renderer: &mut Self::NativeRenderer,
@@ -61,7 +45,6 @@ pub(crate) trait VideoViewStack: 'static {
     fn render_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()>;
     fn clear_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()>;
     fn teardown_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()>;
-    fn teardown_opengl_renderer(renderer: &mut Self::OpenGlRenderer) -> eros::Result<()>;
     fn native_viewport(window: &RabbitWindow, visible: bool) -> eros::Result<Self::NativeViewport>;
 }
 
@@ -75,33 +58,6 @@ where
         frame: Box<Stack::Frame>,
     },
     Clear,
-}
-
-enum ActiveVideoDisplay<Stack>
-where
-    Stack: VideoViewStack,
-{
-    Native(Box<Stack::NativeRenderer>),
-    Slint(Box<Stack::OpenGlRenderer>),
-}
-
-impl<Stack> ActiveVideoDisplay<Stack>
-where
-    Stack: VideoViewStack,
-{
-    fn clear(&mut self) -> eros::Result<()> {
-        match self {
-            Self::Native(renderer) => Stack::clear_native_renderer(renderer),
-            Self::Slint(renderer) => renderer.clear(),
-        }
-    }
-
-    fn teardown(&mut self) -> eros::Result<()> {
-        match self {
-            Self::Native(renderer) => Stack::teardown_native_renderer(renderer),
-            Self::Slint(renderer) => Stack::teardown_opengl_renderer(renderer),
-        }
-    }
 }
 
 pub(crate) struct VideoViewPublisher<Stack>
@@ -132,16 +88,14 @@ struct VideoViewState<Stack>
 where
     Stack: VideoViewStack,
 {
-    display: Option<ActiveVideoDisplay<Stack>>,
+    display: Option<Box<Stack::NativeRenderer>>,
     active_stream: Option<(SessionId, ScreenId)>,
-    slint_clear_pending: bool,
     failed: bool,
 }
 
 pub(crate) fn install<Stack>(
     window: &RabbitWindow,
     errors: flume::Sender<GuiIntent>,
-    preference: VideoDisplayPreference,
     probe_interval: Duration,
 ) -> eros::Result<VideoViewPublisher<Stack>>
 where
@@ -155,10 +109,9 @@ where
         delivery_scheduled: Arc::new(AtomicBool::new(false)),
     };
     let weak_window = window.as_weak();
-    let view_state = Rc::new(RefCell::new(VideoViewState {
+    let view_state = Rc::new(RefCell::new(VideoViewState::<Stack> {
         display: None,
         active_stream: None,
-        slint_clear_pending: false,
         failed: false,
     }));
 
@@ -174,31 +127,15 @@ where
         let VideoViewState {
             display,
             active_stream,
-            slint_clear_pending,
             ..
         } = &mut *state;
-        let result = match display {
-            Some(ActiveVideoDisplay::Native(_)) => {
-                render_native_frame(&direct_commands, &direct_window, display, active_stream)
+        let result = if display.is_some() {
+            render_native_frame(&direct_commands, &direct_window, display, active_stream)
+        } else {
+            if let Some(window) = direct_window.upgrade() {
+                window.window().request_redraw();
             }
-            Some(ActiveVideoDisplay::Slint(_)) => {
-                let result = stage_slint_frame(
-                    &direct_commands,
-                    display,
-                    active_stream,
-                    slint_clear_pending,
-                );
-                if let Some(window) = direct_window.upgrade() {
-                    window.window().request_redraw();
-                }
-                result
-            }
-            None => {
-                if let Some(window) = direct_window.upgrade() {
-                    window.window().request_redraw();
-                }
-                Ok(None)
-            }
+            Ok(None)
         };
         match result {
             Ok(Some((session_id, screen_id))) => {
@@ -215,7 +152,7 @@ where
     let rendering_state = Rc::clone(&view_state);
     window
         .window()
-        .set_rendering_notifier(move |state, graphics_api| {
+        .set_rendering_notifier(move |state, _graphics_api| {
             let mut video = rendering_state.borrow_mut();
             if video.failed {
                 return;
@@ -223,34 +160,18 @@ where
             let result = match state {
                 RenderingState::RenderingSetup => Ok(()),
                 RenderingState::AfterRendering => {
-                    let get_proc_address = match graphics_api {
-                        GraphicsAPI::NativeOpenGL { get_proc_address } => Some(
-                            get_proc_address as &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
-                        ),
-                        _ => None,
-                    };
                     let VideoViewState {
                         display,
                         active_stream,
-                        slint_clear_pending,
                         ..
                     } = &mut *video;
-                    let result = if std::mem::take(slint_clear_pending) {
-                        clear_slint_renderer(display)
-                    } else {
-                        Ok(())
-                    }
-                    .and_then(|()| {
-                        render_video_frame(
-                            &receiver,
-                            &weak_window,
-                            display,
-                            active_stream,
-                            preference,
-                            probe_interval,
-                            get_proc_address,
-                        )
-                    });
+                    let result = render_video_frame(
+                        &receiver,
+                        &weak_window,
+                        display,
+                        active_stream,
+                        probe_interval,
+                    );
                     match result {
                         Ok(Some((session_id, screen_id))) => {
                             if errors
@@ -269,7 +190,7 @@ where
                     }
                 }
                 RenderingState::RenderingTeardown => match video.display.take() {
-                    Some(mut display) => display.teardown(),
+                    Some(mut display) => Stack::teardown_native_renderer(&mut display),
                     None => Ok(()),
                 },
                 RenderingState::BeforeRendering => Ok(()),
@@ -280,7 +201,7 @@ where
                 fail_video_display(&mut video, &errors, error);
             }
         })
-        .context("Failed to install the Slint DMA-BUF video rendering bridge")?;
+        .context("Failed to install the native video surface rendering bridge")?;
 
     Ok(publisher)
 }
@@ -358,11 +279,9 @@ where
 fn render_video_frame<Stack>(
     commands: &flume::Receiver<VideoViewCommand<Stack>>,
     weak_window: &slint::Weak<RabbitWindow>,
-    display: &mut Option<ActiveVideoDisplay<Stack>>,
+    display: &mut Option<Box<Stack::NativeRenderer>>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
-    preference: VideoDisplayPreference,
     probe_interval: Duration,
-    get_proc_address: Option<&dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
 ) -> eros::Result<Option<(SessionId, ScreenId)>>
 where
     Stack: VideoViewStack,
@@ -380,21 +299,17 @@ where
                     .with_context(|| "Slint window closed before video display initialization")?;
                 let initialized_display = display.is_none();
                 if display.is_none() {
-                    *display = Some(create_video_display(
-                        preference,
+                    *display = Some(Box::new(Stack::create_native_renderer(
                         window.window(),
-                        get_proc_address,
                         probe_interval,
-                    )?);
+                    )?));
                 }
-                present_video_frame(
-                    display,
-                    preference,
-                    get_proc_address,
-                    probe_interval,
-                    *frame,
-                )?;
-                if initialized_display && matches!(display, Some(ActiveVideoDisplay::Native(_))) {
+                let renderer = display
+                    .as_mut()
+                    .with_context(|| "Native video display disappeared during initialization")?;
+                Stack::validate_native_frame(renderer, &frame)?;
+                Stack::present_native_frame(renderer, *frame);
+                if initialized_display {
                     // Wayland subsurface stacking is latched by the parent
                     // surface's next commit. Schedule exactly one Slint redraw
                     // after native display initialization to apply place_below.
@@ -407,7 +322,7 @@ where
             VideoViewCommand::Clear => {
                 *active_stream = None;
                 if let Some(display) = display.as_mut() {
-                    display.clear()?;
+                    Stack::clear_native_renderer(display)?;
                 }
             }
         }
@@ -420,85 +335,25 @@ where
         return Ok(None);
     };
     if !window.get_video_viewport_visible() || active_stream.is_none() {
-        if let ActiveVideoDisplay::Native(renderer) = display {
-            Stack::set_native_viewport(renderer, Stack::native_viewport(&window, false)?)?;
-            Stack::render_native_renderer(renderer)?;
-        }
+        Stack::set_native_viewport(display, Stack::native_viewport(&window, false)?)?;
+        Stack::render_native_renderer(display)?;
         return Ok(presented);
     }
-    match display {
-        ActiveVideoDisplay::Native(renderer) => {
-            Stack::set_native_viewport(renderer, Stack::native_viewport(&window, true)?)?;
-            Stack::render_native_renderer(renderer)?;
-        }
-        ActiveVideoDisplay::Slint(renderer) => {
-            let scale = window.window().scale_factor();
-            renderer.set_viewport(VideoViewport {
-                x: physical_pixels(window.get_video_viewport_x(), scale)?,
-                y: physical_pixels(window.get_video_viewport_y(), scale)?,
-                width: physical_pixels(window.get_video_viewport_width(), scale)?,
-                height: physical_pixels(window.get_video_viewport_height(), scale)?,
-            });
-            renderer.render()?;
-        }
-    }
+    Stack::set_native_viewport(display, Stack::native_viewport(&window, true)?)?;
+    Stack::render_native_renderer(display)?;
     Ok(presented)
-}
-
-fn clear_slint_renderer<Stack>(display: &mut Option<ActiveVideoDisplay<Stack>>) -> eros::Result<()>
-where
-    Stack: VideoViewStack,
-{
-    match display.as_mut() {
-        Some(ActiveVideoDisplay::Slint(renderer)) => renderer.clear(),
-        Some(ActiveVideoDisplay::Native(_)) | None => Ok(()),
-    }
-}
-
-fn stage_slint_frame<Stack>(
-    commands: &flume::Receiver<VideoViewCommand<Stack>>,
-    display: &mut Option<ActiveVideoDisplay<Stack>>,
-    active_stream: &mut Option<(SessionId, ScreenId)>,
-    clear_pending: &mut bool,
-) -> eros::Result<Option<(SessionId, ScreenId)>>
-where
-    Stack: VideoViewStack,
-{
-    let Some(ActiveVideoDisplay::Slint(renderer)) = display.as_mut() else {
-        return Ok(None);
-    };
-    let Ok(command) = commands.try_recv() else {
-        return Ok(None);
-    };
-
-    match command {
-        VideoViewCommand::Present {
-            session_id,
-            screen_id,
-            frame,
-        } => {
-            renderer.present(*frame);
-            Ok(activate_stream(active_stream, session_id, screen_id)
-                .then_some((session_id, screen_id)))
-        }
-        VideoViewCommand::Clear => {
-            *active_stream = None;
-            *clear_pending = true;
-            Ok(None)
-        }
-    }
 }
 
 fn render_native_frame<Stack>(
     commands: &flume::Receiver<VideoViewCommand<Stack>>,
     weak_window: &slint::Weak<RabbitWindow>,
-    display: &mut Option<ActiveVideoDisplay<Stack>>,
+    display: &mut Option<Box<Stack::NativeRenderer>>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
 ) -> eros::Result<Option<(SessionId, ScreenId)>>
 where
     Stack: VideoViewStack,
 {
-    let Some(ActiveVideoDisplay::Native(renderer)) = display.as_mut() else {
+    let Some(renderer) = display.as_mut() else {
         return Ok(None);
     };
     let mut presented = None;
@@ -544,130 +399,6 @@ where
     Stack::render_native_renderer(renderer)
 }
 
-fn create_video_display<Stack>(
-    preference: VideoDisplayPreference,
-    window: &slint::Window,
-    get_proc_address: Option<&dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
-    probe_interval: Duration,
-) -> eros::Result<ActiveVideoDisplay<Stack>>
-where
-    Stack: VideoViewStack,
-{
-    if preference == VideoDisplayPreference::Slint {
-        let get_proc_address = get_proc_address
-            .with_context(|| "Slint video display requires a native OpenGL renderer")?;
-        let selection = select_video_display_backend(preference, None)?;
-        let display = ActiveVideoDisplay::Slint(Box::new(Stack::create_opengl_renderer(
-            get_proc_address,
-            probe_interval,
-        )?));
-        log_video_display_selection(preference, selection.backend, None);
-        return Ok(display);
-    }
-
-    match Stack::create_native_renderer(window, probe_interval) {
-        Ok(renderer) => {
-            let selection = select_video_display_backend(preference, None)?;
-            log_video_display_selection(preference, selection.backend, None);
-            Ok(ActiveVideoDisplay::Native(Box::new(renderer)))
-        }
-        Err(error) => {
-            let reason = format!("{error:?}");
-            let selection = select_video_display_backend(preference, Some(reason.clone()))?;
-            let get_proc_address = get_proc_address.with_context(|| {
-                format!(
-                    "Native video display failed ({reason}); Slint fallback requires native OpenGL"
-                )
-            })?;
-            let display = ActiveVideoDisplay::Slint(Box::new(Stack::create_opengl_renderer(
-                get_proc_address,
-                probe_interval,
-            )?));
-            log_video_display_selection(
-                preference,
-                selection.backend,
-                selection.fallback_reason.as_deref(),
-            );
-            Ok(display)
-        }
-    }
-}
-
-fn present_video_frame<Stack>(
-    display: &mut Option<ActiveVideoDisplay<Stack>>,
-    preference: VideoDisplayPreference,
-    get_proc_address: Option<&dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void>,
-    probe_interval: Duration,
-    frame: Stack::Frame,
-) -> eros::Result<()>
-where
-    Stack: VideoViewStack,
-{
-    let error = match display.as_mut() {
-        Some(ActiveVideoDisplay::Native(renderer)) => {
-            match Stack::validate_native_frame(renderer, &frame) {
-                Ok(()) => {
-                    Stack::present_native_frame(renderer, frame);
-                    return Ok(());
-                }
-                Err(error) => error,
-            }
-        }
-        Some(ActiveVideoDisplay::Slint(renderer)) => {
-            renderer.present(frame);
-            return Ok(());
-        }
-        None => eros::bail!("Video display disappeared before presenting a decoded frame"),
-    };
-
-    if preference != VideoDisplayPreference::Auto {
-        return Err(error);
-    }
-    let reason = format!("{error:?}");
-    if let Some(mut previous) = display.take() {
-        previous
-            .teardown()
-            .with_context(|| "Failed to tear down rejected native video display")?;
-    }
-    let get_proc_address = get_proc_address.with_context(
-        || "Native video frame was rejected; Slint fallback requires native OpenGL",
-    )?;
-    let mut fallback = Stack::create_opengl_renderer(get_proc_address, probe_interval)
-        .with_context(|| "Failed to create Slint video display fallback")?;
-    fallback.present(frame);
-    *display = Some(ActiveVideoDisplay::Slint(Box::new(fallback)));
-    let selection = select_video_display_backend(preference, Some(reason))?;
-    log_video_display_selection(
-        preference,
-        selection.backend,
-        selection.fallback_reason.as_deref(),
-    );
-    Ok(())
-}
-
-fn log_video_display_selection(
-    preference: VideoDisplayPreference,
-    backend: VideoDisplayBackend,
-    fallback_reason: Option<&str>,
-) {
-    info!(
-        target: "rabbit::video_display",
-        event = "video_display_selected",
-        requested = ?preference,
-        backend = backend.name(),
-        fallback_reason,
-        "Selected client video display backend"
-    );
-}
-
-fn physical_pixels(logical: f32, scale: f32) -> eros::Result<u32> {
-    let physical = logical * scale;
-    if !physical.is_finite() || physical < 0.0 || physical > u32::MAX as f32 {
-        eros::bail!("Invalid physical video viewport coordinate {}", physical);
-    }
-    Ok(physical.round() as u32)
-}
-
 fn activate_stream(
     active_stream: &mut Option<(SessionId, ScreenId)>,
     session_id: SessionId,
@@ -700,7 +431,7 @@ fn fail_video_display<Stack>(
     let cleanup_error = state
         .display
         .as_mut()
-        .and_then(|display| display.teardown().err());
+        .and_then(|display| Stack::teardown_native_renderer(display).err());
     state.display = None;
     let mut error = format!("{error:?}");
     if let Some(cleanup_error) = cleanup_error {
@@ -711,188 +442,9 @@ fn fail_video_display<Stack>(
     report_error_once(errors, &mut state.failed, error);
 }
 
-// Focused hardware test: scripts/test-client-video [positive-seconds]
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, pin::Pin, rc::Rc, time::Duration};
-
-    use super::{ActiveVideoDisplay, VideoViewCommand, VideoViewStack, stage_slint_frame};
-    use crate::{
-        app::{
-            gui::{
-                state::{ViewPage, ViewState},
-                view::{Gui, GuiIntent, RabbitWindow, ViewPublisher},
-            },
-            platform::{ApplicationStack, RemoteVideoStack, TestApplicationStack},
-        },
-        kernel::{
-            screen_manager::ScreenId,
-            session::{ReceivedVideoFrame, SessionId},
-            video_decoder::DecodedVideoFrame,
-            video_renderer::{VideoRenderer, VideoViewport},
-        },
-    };
-    use gstreamer::glib::prelude::{Cast as _, ObjectExt as _};
-    use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _};
-
-    struct StagedFrame(ScreenId);
-
-    impl DecodedVideoFrame for StagedFrame {
-        fn screen_id(&self) -> ScreenId {
-            self.0
-        }
-    }
-
-    #[derive(Default)]
-    struct StagedRenderer {
-        presented: usize,
-    }
-
-    impl VideoRenderer for StagedRenderer {
-        type Frame = StagedFrame;
-
-        fn set_viewport(&mut self, _viewport: VideoViewport) {}
-
-        fn present(&mut self, _frame: Self::Frame) {
-            self.presented += 1;
-        }
-
-        fn render(&mut self) -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn clear(&mut self) -> eros::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct StagedVideoStack;
-
-    impl VideoViewStack for StagedVideoStack {
-        type Frame = StagedFrame;
-        type NativeRenderer = ();
-        type OpenGlRenderer = StagedRenderer;
-        type NativeViewport = ();
-
-        fn select_slint_backend() -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn create_native_renderer(
-            _window: &slint::Window,
-            _probe_interval: Duration,
-        ) -> eros::Result<Self::NativeRenderer> {
-            Ok(())
-        }
-
-        fn create_opengl_renderer(
-            _get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
-            _probe_interval: Duration,
-        ) -> eros::Result<Self::OpenGlRenderer> {
-            Ok(StagedRenderer::default())
-        }
-
-        fn set_native_viewport(
-            _renderer: &mut Self::NativeRenderer,
-            _viewport: Self::NativeViewport,
-        ) -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn validate_native_frame(
-            _renderer: &Self::NativeRenderer,
-            _frame: &Self::Frame,
-        ) -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn present_native_frame(_renderer: &mut Self::NativeRenderer, _frame: Self::Frame) {}
-
-        fn render_native_renderer(_renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn clear_native_renderer(_renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn teardown_native_renderer(_renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn teardown_opengl_renderer(_renderer: &mut Self::OpenGlRenderer) -> eros::Result<()> {
-            Ok(())
-        }
-
-        fn native_viewport(
-            _window: &RabbitWindow,
-            _visible: bool,
-        ) -> eros::Result<Self::NativeViewport> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn stages_slint_frames_before_the_next_render_notification() {
-        let session_id = SessionId(4);
-        let screen_id = ScreenId(2);
-        let (sender, commands) = flume::bounded(1);
-        sender
-            .send(VideoViewCommand::<StagedVideoStack>::Present {
-                session_id,
-                screen_id,
-                frame: Box::new(StagedFrame(screen_id)),
-            })
-            .expect("Staged frame should enter the video command queue");
-        let mut display = Some(ActiveVideoDisplay::<StagedVideoStack>::Slint(Box::new(
-            StagedRenderer::default(),
-        )));
-        let mut active_stream = None;
-
-        let mut clear_pending = false;
-        let activated = stage_slint_frame(
-            &commands,
-            &mut display,
-            &mut active_stream,
-            &mut clear_pending,
-        )
-        .expect("Slint frame staging should succeed");
-
-        assert_eq!(activated, Some((session_id, screen_id)));
-        assert_eq!(active_stream, Some((session_id, screen_id)));
-        assert!(!clear_pending);
-        assert!(commands.is_empty());
-        let Some(ActiveVideoDisplay::Slint(renderer)) = display else {
-            panic!("Slint renderer should remain active");
-        };
-        assert_eq!(renderer.presented, 1);
-    }
-
-    #[test]
-    fn defers_slint_clear_until_the_render_notification() {
-        let (sender, commands) = flume::bounded(1);
-        sender
-            .send(VideoViewCommand::<StagedVideoStack>::Clear)
-            .expect("Clear should enter the video command queue");
-        let mut display = Some(ActiveVideoDisplay::<StagedVideoStack>::Slint(Box::new(
-            StagedRenderer::default(),
-        )));
-        let mut active_stream = Some((SessionId(4), ScreenId(2)));
-        let mut clear_pending = false;
-
-        let activated = stage_slint_frame(
-            &commands,
-            &mut display,
-            &mut active_stream,
-            &mut clear_pending,
-        )
-        .expect("Slint clear staging should succeed");
-
-        assert_eq!(activated, None);
-        assert_eq!(active_stream, None);
-        assert!(clear_pending);
-        assert!(commands.is_empty());
-    }
+    use crate::kernel::{screen_manager::ScreenId, session::SessionId};
 
     #[test]
     fn only_the_first_frame_of_an_active_stream_notifies_the_app() {
@@ -913,237 +465,5 @@ mod tests {
             SessionId(4),
             ScreenId(1)
         ));
-    }
-
-    #[test]
-    #[ignore = "run through scripts/test-client-video"]
-    fn renders_hardware_decoded_dma_bufs_through_the_slint_bridge() {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_test_writer()
-            .try_init();
-        let seconds = std::env::var("RABBIT_CLIENT_VIDEO_TEST_SECONDS")
-            .expect("RABBIT_CLIENT_VIDEO_TEST_SECONDS should specify the run duration")
-            .parse::<u32>()
-            .expect("RABBIT_CLIENT_VIDEO_TEST_SECONDS should be a positive integer");
-        assert!(seconds > 0, "Client video test duration should be positive");
-
-        let (gui, publisher, intents) =
-            Gui::<<TestApplicationStack as ApplicationStack>::RemoteVideoViewStack>::new(
-                crate::app::config::VideoDisplayPreference::Slint,
-                Duration::from_secs(2),
-                crate::app::config::PointerMode::Absolute,
-            )
-            .expect("Slint video test window should be created");
-        publisher
-            .publish(ViewState {
-                page: ViewPage::StreamRequest,
-                page_title: "DMA-BUF decode and render test".to_string(),
-                page_subtitle: "Waiting for the first decoded frame".to_string(),
-                status_text: "Waiting for the first video frame".to_string(),
-                stream_title: "Synthetic test stream".to_string(),
-                stream_resolution: "1280 × 720".to_string(),
-                local_server_online: true,
-                ..ViewState::default()
-            })
-            .expect("Waiting-for-video test state should reach Slint");
-
-        let first_frame_presented = Rc::new(Cell::new(false));
-        let renderer_failed = Rc::new(Cell::new(false));
-        let event_first_frame_presented = Rc::clone(&first_frame_presented);
-        let event_renderer_failed = Rc::clone(&renderer_failed);
-        let event_publisher = publisher.clone();
-        let event_timer = slint::Timer::default();
-        event_timer.start(
-            slint::TimerMode::Repeated,
-            Duration::from_millis(10),
-            move || {
-                while let Ok(intent) = intents.try_recv() {
-                    match intent {
-                        GuiIntent::VideoFrameReady { .. }
-                            if !event_first_frame_presented.replace(true) =>
-                        {
-                            event_publisher
-                                .publish(ViewState {
-                                    page: ViewPage::Streaming,
-                                    page_title: "DMA-BUF decode and render test".to_string(),
-                                    page_subtitle:
-                                        "Hardware H.264 decoder → EGLImage → Slint OpenGL"
-                                            .to_string(),
-                                    stream_title: "Synthetic test stream".to_string(),
-                                    stream_resolution: "1280 × 720".to_string(),
-                                    local_server_online: true,
-                                    ..ViewState::default()
-                                })
-                                .expect("First decoded frame should open the streaming view");
-                        }
-                        GuiIntent::VideoRendererFailed(_) => event_renderer_failed.set(true),
-                        _ => {}
-                    }
-                }
-            },
-        );
-
-        let test_publisher = publisher.clone();
-        let test_thread = std::thread::Builder::new()
-            .name("rabbit-client-video-test".to_string())
-            .spawn(move || {
-                let runtime = compio::runtime::Runtime::new()
-                    .expect("Compio client video test runtime should start");
-                let decoded_frames =
-                    runtime.block_on(run_test_stream(test_publisher.clone(), seconds));
-                test_publisher
-                    .quit()
-                    .expect("Client video test should stop the Slint event loop");
-                decoded_frames
-            })
-            .expect("Client video test thread should start");
-
-        slint::Timer::single_shot(Duration::from_secs(u64::from(seconds) + 10), || {
-            slint::quit_event_loop().expect("Client video test timeout should stop Slint");
-        });
-        gui.run().expect("Slint client video test should run");
-        let decoded_frames = test_thread
-            .join()
-            .expect("Client video test thread should not panic");
-
-        assert!(
-            decoded_frames > 0,
-            "Hardware decoder should produce at least one DMA-BUF frame"
-        );
-        assert!(
-            first_frame_presented.get(),
-            "The first decoded DMA-BUF should open the streaming view"
-        );
-        assert!(
-            !renderer_failed.get(),
-            "Slint bridge should not report a renderer failure"
-        );
-    }
-
-    async fn run_test_stream(
-        publisher: ViewPublisher<<TestApplicationStack as ApplicationStack>::RemoteVideoViewStack>,
-        seconds: u32,
-    ) -> usize {
-        let (pipeline, output) = create_test_rtp_source(seconds);
-        pipeline
-            .set_state(gstreamer::State::Playing)
-            .expect("Synthetic RTP source should start");
-        let inputs = TestRtpInputs {
-            output,
-            screen_id: ScreenId(0),
-        };
-        let decoded_frames = Rc::new(Cell::new(0_usize));
-        let callback_frames = Rc::clone(&decoded_frames);
-        let result = <TestApplicationStack as ApplicationStack>::RemoteVideo::run_decoder(
-            inputs,
-            move |frame| {
-                callback_frames.set(callback_frames.get() + 1);
-                std::future::ready(publisher.present_video(SessionId(0), ScreenId(0), frame))
-            },
-            true,
-        )
-        .await;
-        pipeline
-            .set_state(gstreamer::State::Null)
-            .expect("Synthetic RTP source should stop");
-        result.expect("Client video decode and render chain should complete");
-        decoded_frames.get()
-    }
-
-    struct TestRtpInputs {
-        output: gstreamer_app::app_sink::AppSinkStream,
-        screen_id: ScreenId,
-    }
-
-    impl futures_core::Stream for TestRtpInputs {
-        type Item = eros::Result<ReceivedVideoFrame>;
-
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            context: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Self::Item>> {
-            match Pin::new(&mut self.output).poll_next(context) {
-                std::task::Poll::Ready(Some(sample)) => {
-                    std::task::Poll::Ready(Some(sample_to_video_input(self.screen_id, sample)))
-                }
-                std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-                std::task::Poll::Pending => std::task::Poll::Pending,
-            }
-        }
-    }
-
-    fn sample_to_video_input(
-        screen_id: ScreenId,
-        sample: gstreamer::Sample,
-    ) -> eros::Result<ReceivedVideoFrame> {
-        let buffer = sample
-            .buffer_owned()
-            .expect("Synthetic RTP sample should contain a buffer");
-        let buffer = buffer
-            .into_mapped_buffer_readable()
-            .expect("Synthetic RTP packet should be readable");
-        Ok(ReceivedVideoFrame {
-            screen_id,
-            packets: vec![bytes::Bytes::from_owner(buffer)],
-        })
-    }
-
-    fn create_test_rtp_source(
-        seconds: u32,
-    ) -> (gstreamer::Pipeline, gstreamer_app::app_sink::AppSinkStream) {
-        gstreamer::init().expect("GStreamer should initialize for the Slint video test");
-        let source = test_element("videotestsrc", "test-video-source");
-        source.set_property("is-live", true);
-        source.set_property(
-            "num-buffers",
-            i32::try_from(seconds.saturating_mul(30))
-                .expect("Client video test duration should fit GStreamer num-buffers"),
-        );
-        let filter = test_element("capsfilter", "test-video-caps");
-        filter.set_property(
-            "caps",
-            gstreamer::Caps::builder("video/x-raw")
-                .field("format", "I420")
-                .field("width", 1_280_i32)
-                .field("height", 720_i32)
-                .field("framerate", gstreamer::Fraction::new(30, 1))
-                .build(),
-        );
-        let encoder = test_element("openh264enc", "test-h264-encoder");
-        let parser = test_element("h264parse", "test-h264-parser");
-        let payloader = test_element("rtph264pay", "test-rtp-payloader");
-        payloader.set_property("mtu", 1_200_u32);
-        let sink = test_element("appsink", "test-rtp-output");
-        let sink = sink
-            .downcast::<gstreamer_app::AppSink>()
-            .expect("GStreamer appsink factory should return AppSink");
-        sink.set_sync(false);
-        sink.set_async(false);
-        sink.set_max_buffers(0);
-        sink.set_drop(false);
-        let output = sink.stream();
-
-        let pipeline = gstreamer::Pipeline::new();
-        let elements = [
-            &source,
-            &filter,
-            &encoder,
-            &parser,
-            &payloader,
-            sink.upcast_ref(),
-        ];
-        pipeline
-            .add_many(elements)
-            .expect("Synthetic RTP source elements should join one pipeline");
-        gstreamer::Element::link_many(elements).expect("Synthetic RTP source elements should link");
-        (pipeline, output)
-    }
-
-    fn test_element(factory: &str, name: &str) -> gstreamer::Element {
-        gstreamer::ElementFactory::make(factory)
-            .name(name)
-            .build()
-            .expect("Required synthetic test GStreamer element should be installed")
     }
 }

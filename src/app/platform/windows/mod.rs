@@ -12,10 +12,10 @@ use crate::{
         gui::{RabbitWindow, VideoViewStack},
     },
     infra::{
-        ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer,
-        WgcFramePipelineManagerState, WgcScreenCaptureManagerState, WindowsDecodedFrame,
-        WindowsRemoteInputInjector, WindowsScreenLayoutManagerState, WindowsVideoDecoder,
-        WindowsVideoEncoder, WorkerReaper, WorkerReaperHandle,
+        ConnectionEndpoint, NativeVideoRenderer, NativeVideoViewport, WgcFramePipelineManagerState,
+        WgcScreenCaptureManagerState, WindowsDecodedFrame, WindowsRemoteInputInjector,
+        WindowsScreenLayoutManagerState, WindowsVideoDecoder, WindowsVideoEncoder, WorkerReaper,
+        WorkerReaperHandle,
     },
     kernel::{session::ReceivedVideoFrame, video_renderer::VideoRenderer as _},
 };
@@ -125,7 +125,6 @@ pub(crate) struct RemoteVideoViewStack;
 impl VideoViewStack for RemoteVideoViewStack {
     type Frame = WindowsDecodedFrame;
     type NativeRenderer = NativeVideoRenderer;
-    type OpenGlRenderer = OpenGlVideoRenderer;
     type NativeViewport = NativeVideoViewport;
 
     fn select_slint_backend() -> eros::Result<()> {
@@ -143,13 +142,6 @@ impl VideoViewStack for RemoteVideoViewStack {
         probe_interval: Duration,
     ) -> eros::Result<Self::NativeRenderer> {
         NativeVideoRenderer::new(window, probe_interval)
-    }
-
-    fn create_opengl_renderer(
-        get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
-        probe_interval: Duration,
-    ) -> eros::Result<Self::OpenGlRenderer> {
-        OpenGlVideoRenderer::new(get_proc_address, probe_interval)
     }
 
     fn set_native_viewport(
@@ -179,10 +171,6 @@ impl VideoViewStack for RemoteVideoViewStack {
     }
 
     fn teardown_native_renderer(renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
-        renderer.teardown()
-    }
-
-    fn teardown_opengl_renderer(renderer: &mut Self::OpenGlRenderer) -> eros::Result<()> {
         renderer.teardown()
     }
 

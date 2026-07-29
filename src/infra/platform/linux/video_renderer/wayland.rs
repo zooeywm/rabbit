@@ -267,9 +267,7 @@ impl WaylandVideoRenderer {
                 1..=1,
                 (),
             )
-            .with_context(|| {
-                "Wayland compositor does not expose color-representation-v1, so native NV12 display cannot guarantee BT.709 limited-range color"
-            })?;
+            .ok();
         let dmabuf = DmabufState::new(&globals, &queue_handle);
         let dmabuf_version = dmabuf
             .version()
@@ -283,12 +281,6 @@ impl WaylandVideoRenderer {
         event_queue
             .roundtrip(&mut state)
             .with_context(|| "Failed to receive Wayland color-representation capabilities")?;
-        if !state.supports_bt709_limited {
-            color_representation_manager.destroy();
-            eros::bail!(
-                "Wayland compositor does not support BT.709 limited-range surface metadata, so native NV12 display cannot guarantee correct color"
-            );
-        }
 
         let surface = compositor.create_surface(&queue_handle, ());
         let subsurface = subcompositor.get_subsurface(&surface, &parent, &queue_handle, ());
@@ -334,19 +326,37 @@ impl WaylandVideoRenderer {
         if state.supported_formats.0.is_empty() {
             eros::bail!("Wayland compositor advertised no usable DMA-BUF formats");
         }
-        let color_representation =
-            color_representation_manager.get_surface(&surface, &queue_handle, ());
-        color_representation.set_coefficients_and_range(
-            wp_color_representation_surface_v1::Coefficients::Bt709,
-            wp_color_representation_surface_v1::Range::Limited,
-        );
-        color_representation_manager.destroy();
-        tracing::info!(
-            event = "wayland_video_color_representation_configured",
-            coefficients = "bt709",
-            range = "limited",
-            "Configured Wayland zero-copy video surface color representation"
-        );
+        let has_color_representation_manager = color_representation_manager.is_some();
+        let color_representation = color_representation_manager.and_then(|manager| {
+            let representation = if state.supports_bt709_limited {
+                let representation = manager.get_surface(&surface, &queue_handle, ());
+                representation.set_coefficients_and_range(
+                    wp_color_representation_surface_v1::Coefficients::Bt709,
+                    wp_color_representation_surface_v1::Range::Limited,
+                );
+                tracing::info!(
+                    event = "wayland_video_color_representation_configured",
+                    coefficients = "bt709",
+                    range = "limited",
+                    "Configured Wayland zero-copy video surface color representation"
+                );
+                Some(representation)
+            } else {
+                tracing::warn!(
+                    event = "wayland_video_color_representation_unsupported",
+                    "Wayland compositor does not support BT.709 limited-range surface metadata; keeping the independent desynchronized video subsurface"
+                );
+                None
+            };
+            manager.destroy();
+            representation
+        });
+        if !has_color_representation_manager {
+            tracing::warn!(
+                event = "wayland_video_color_representation_unavailable",
+                "Wayland compositor does not expose usable color-representation-v1 metadata; keeping the independent desynchronized video subsurface"
+            );
+        }
 
         Ok(Self {
             connection,
@@ -357,7 +367,7 @@ impl WaylandVideoRenderer {
             surface,
             subsurface,
             viewport,
-            color_representation: Some(color_representation),
+            color_representation,
             background_surface,
             background_subsurface,
             background_viewport,

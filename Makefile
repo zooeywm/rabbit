@@ -92,7 +92,6 @@ help:
 	@printf '%s\n' '  make test-kms                      Run scripts/test-kms'
 	@printf '%s\n' '  make test-gstreamer                Run scripts/test-gstreamer'
 	@printf '%s\n' '  make test-host-video               Run scripts/test-host-video'
-	@printf '%s\n' '  make test-client-video             Run scripts/test-client-video'
 	@printf '%s\n' ''
 	@printf '%s\n' '  make xwin-build                    Build Windows executable'
 	@printf '%s\n' '  make xwin-check                    Check Windows target'
@@ -196,8 +195,7 @@ format-slint slint-format:
 	test-gpu \
 	test-kms \
 	test-gstreamer \
-	test-host-video \
-	test-client-video
+	test-host-video
 
 test-gpu:
 	./scripts/test-gpu $(ARGS)
@@ -210,9 +208,6 @@ test-gstreamer:
 
 test-host-video:
 	./scripts/test-host-video $(ARGS)
-
-test-client-video:
-	./scripts/test-client-video $(ARGS)
 
 
 # -----------------------------------------------------------------------------

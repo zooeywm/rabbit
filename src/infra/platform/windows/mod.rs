@@ -20,7 +20,7 @@ pub(crate) use screen_layout::{
 };
 pub(crate) use video_decoder::{WindowsDecodedFrame, WindowsVideoDecoder};
 pub(crate) use video_encoder::WindowsVideoEncoder;
-pub(crate) use video_renderer::{NativeVideoRenderer, NativeVideoViewport, OpenGlVideoRenderer};
+pub(crate) use video_renderer::{NativeVideoRenderer, NativeVideoViewport};
 pub(crate) use worker_reaper::{WorkerReaper, WorkerReaperHandle};
 
 /// Creates the Windows Graphics Capture manager state.

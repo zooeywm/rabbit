@@ -26,8 +26,7 @@ pub(crate) use screen_layout::{
 pub(crate) use video_decoder::{GStreamerDecodedFrame, GStreamerVideoDecoder};
 pub(crate) use video_encoder::{GStreamerVideoEncoder, record_frames_to_mp4};
 pub(crate) use video_renderer::{
-    OpenGlVideoRenderer, WaylandVideoRenderer as NativeVideoRenderer,
-    WaylandVideoViewport as NativeVideoViewport,
+    WaylandVideoRenderer as NativeVideoRenderer, WaylandVideoViewport as NativeVideoViewport,
 };
 pub(crate) use worker_reaper::{WorkerReaper, WorkerReaperHandle};
 

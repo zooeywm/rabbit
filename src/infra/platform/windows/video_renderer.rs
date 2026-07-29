@@ -1,4 +1,4 @@
-use std::{ffi::CStr, sync::OnceLock, time::Duration};
+use std::{sync::OnceLock, time::Duration};
 
 use eros::Context as _;
 use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
@@ -639,46 +639,4 @@ unsafe extern "system" fn video_window_proc(
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
-}
-
-pub(crate) struct OpenGlVideoRenderer {
-    viewport: Option<VideoViewport>,
-    pending_frame: Option<WindowsDecodedFrame>,
-}
-
-impl OpenGlVideoRenderer {
-    pub(crate) fn new(
-        _get_proc_address: &dyn Fn(&CStr) -> *const std::ffi::c_void,
-        _probe_interval: Duration,
-    ) -> eros::Result<Self> {
-        Ok(Self {
-            viewport: None,
-            pending_frame: None,
-        })
-    }
-
-    pub(crate) fn teardown(&mut self) -> eros::Result<()> {
-        self.clear()
-    }
-}
-
-impl VideoRenderer for OpenGlVideoRenderer {
-    type Frame = WindowsDecodedFrame;
-
-    fn set_viewport(&mut self, viewport: VideoViewport) {
-        self.viewport = Some(viewport);
-    }
-
-    fn present(&mut self, frame: Self::Frame) {
-        self.pending_frame = Some(frame);
-    }
-
-    fn render(&mut self) -> eros::Result<()> {
-        Ok(())
-    }
-
-    fn clear(&mut self) -> eros::Result<()> {
-        self.pending_frame = None;
-        Ok(())
-    }
 }

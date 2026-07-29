@@ -11,7 +11,7 @@ use crate::app::gui::{
     video_view::{self, VideoViewPublisher},
 };
 use crate::app::{
-    config::{APP_ID, PointerMode, VideoDisplayPreference},
+    config::{APP_ID, PointerMode},
     gui::state::{
         ConnectedDeviceView, ConnectionRequestView, HostedScreenStreamView, RemoteScreenView,
         ViewPage, ViewState, WorkspaceSection, recommended_bitrate_text,
@@ -166,7 +166,6 @@ where
     VideoView: video_view::VideoViewStack,
 {
     pub(crate) fn new(
-        video_display: VideoDisplayPreference,
         probe_interval: Duration,
         pointer_mode: PointerMode,
     ) -> eros::Result<(Self, ViewPublisher<VideoView>, flume::Receiver<GuiIntent>)> {
@@ -335,12 +334,7 @@ where
             }
         });
 
-        let video = video_view::install::<VideoView>(
-            &window,
-            sender.clone(),
-            video_display,
-            probe_interval,
-        )?;
+        let video = video_view::install::<VideoView>(&window, sender.clone(), probe_interval)?;
         let publisher = ViewPublisher {
             window: window.as_weak(),
             video,

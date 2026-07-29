@@ -62,7 +62,6 @@ pub struct VideoConfig {
     pub enable_host_probing: bool,
     pub enable_client_probing: bool,
     pub probe_interval_ms: u64,
-    pub display_backend: VideoDisplayPreference,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -85,7 +84,6 @@ impl Default for VideoConfig {
             enable_host_probing: false,
             enable_client_probing: false,
             probe_interval_ms: 2_000,
-            display_backend: VideoDisplayPreference::default(),
         }
     }
 }
@@ -99,15 +97,6 @@ pub struct RecordingConfig {
     /// Output file path, or a directory (timestamped `.mp4` is created inside).
     /// Empty defaults to the standard Videos directory under `rabbit/`.
     pub output_path: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum VideoDisplayPreference {
-    #[default]
-    Auto,
-    Wayland,
-    Slint,
 }
 
 impl Default for LoggingConfig {
@@ -203,9 +192,7 @@ const fn default_app_name() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::config::{
-        Config, NetworkTransport, PointerMode, RecordingConfig, VideoDisplayPreference,
-    };
+    use crate::app::config::{Config, NetworkTransport, PointerMode, RecordingConfig};
 
     #[test]
     fn network_transport_defaults_to_quic() {
@@ -266,29 +253,6 @@ mod tests {
             .expect("Video probe interval configuration should deserialize");
 
         assert_eq!(config.video.probe_interval_ms, 750);
-    }
-
-    #[test]
-    fn video_display_backend_defaults_to_auto() {
-        assert_eq!(
-            Config::default().video.display_backend,
-            VideoDisplayPreference::Auto
-        );
-    }
-
-    #[test]
-    fn video_display_backend_can_be_selected_from_config() {
-        for (configured, expected) in [
-            ("auto", VideoDisplayPreference::Auto),
-            ("wayland", VideoDisplayPreference::Wayland),
-            ("slint", VideoDisplayPreference::Slint),
-        ] {
-            let config =
-                toml::from_str::<Config>(&format!("[video]\ndisplay_backend = \"{configured}\""))
-                    .expect("Video display backend configuration should deserialize");
-
-            assert_eq!(config.video.display_backend, expected);
-        }
     }
 
     #[test]
