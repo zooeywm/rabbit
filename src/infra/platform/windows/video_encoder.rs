@@ -27,13 +27,14 @@ use windows::{
             CODECAPI_AVEncCommonBufferSize, CODECAPI_AVEncCommonLowLatency,
             CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
             CODECAPI_AVEncCommonRealTime, CODECAPI_AVEncMPVDefaultBPictureCount,
-            CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI,
-            IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample,
-            IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-            MF_E_NO_EVENTS_AVAILABLE, MF_E_NO_MORE_TYPES, MF_E_TRANSFORM_NEED_MORE_INPUT,
-            MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
-            MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-            MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
+            CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode,
+            ICodecAPI, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType,
+            IMFSample, IMFTransform, METransformDrainComplete, METransformHaveOutput,
+            METransformNeedInput, MF_E_NO_EVENTS_AVAILABLE, MF_E_NO_MORE_TYPES,
+            MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY,
+            MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES,
+            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+            MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
             MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK,
             MF_VERSION, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
             MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_FULL, MFStartup,
@@ -1028,6 +1029,11 @@ fn configure_codec_low_latency(
         &CODECAPI_AVEncMPVDefaultBPictureCount,
         &VARIANT::from(0u32),
     );
+    let bounded_gop = set_optional_codec_property(
+        &codec_api,
+        &CODECAPI_AVEncMPVGOPSize,
+        &VARIANT::from(H264_KEY_FRAME_INTERVAL),
+    );
     let constant_bitrate = set_optional_codec_property(
         &codec_api,
         &CODECAPI_AVEncCommonRateControlMode,
@@ -1038,7 +1044,7 @@ fn configure_codec_low_latency(
         &CODECAPI_AVEncCommonMeanBitRate,
         &VARIANT::from(bitrate),
     );
-    let buffer_size_bytes = bitrate / 8 / 10;
+    let buffer_size_bytes = bitrate / 8 / H264_CPB_WINDOWS_PER_SECOND;
     let bounded_buffer = set_optional_codec_property(
         &codec_api,
         &CODECAPI_AVEncCommonBufferSize,
@@ -1051,6 +1057,8 @@ fn configure_codec_low_latency(
         common_low_latency,
         real_time,
         no_b_frames,
+        bounded_gop,
+        key_frame_interval = H264_KEY_FRAME_INTERVAL,
         constant_bitrate,
         mean_bitrate,
         bounded_buffer,
@@ -1103,6 +1111,7 @@ fn create_h264_output_type(size: PixelSize, frame_rate: FrameRate) -> eros::Resu
     set_video_type_common(&media_type, size, frame_rate, MFVideoFormat_H264)?;
     unsafe {
         media_type.SetUINT32(&MF_MT_AVG_BITRATE, target_bitrate(size, frame_rate))?;
+        media_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, H264_KEY_FRAME_INTERVAL)?;
         media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
         media_type.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 0)?;
     }
@@ -1339,7 +1348,7 @@ fn target_bitrate(size: PixelSize, frame_rate: FrameRate) -> u32 {
     let fps = (frame_rate.numerator() / frame_rate.denominator().max(1)).max(1);
     let pixels = u64::from(size.width) * u64::from(size.height);
     let bitrate = pixels.saturating_mul(u64::from(fps)).saturating_mul(2);
-    bitrate.clamp(1_000_000, 25_000_000) as u32
+    bitrate.clamp(H264_MIN_BITRATE_BPS, H264_MAX_BITRATE_BPS) as u32
 }
 
 fn pack_u32_pair(high: u32, low: u32) -> u64 {
@@ -1351,3 +1360,7 @@ const H264_RTP_PAYLOAD_TYPE: u8 = 96;
 const RTP_SSRC: u32 = 0x5242_4954;
 const MAX_ENCODER_OUTPUT_SAMPLE_SIZE: u32 = 4 * 1024 * 1024;
 const MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT: usize = 8;
+const H264_MIN_BITRATE_BPS: u64 = 1_000_000;
+const H264_MAX_BITRATE_BPS: u64 = 50_000_000;
+const H264_KEY_FRAME_INTERVAL: u32 = 1_024;
+const H264_CPB_WINDOWS_PER_SECOND: u32 = 10;
