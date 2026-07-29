@@ -1,8 +1,9 @@
 //! RTP video frame assembly for unreliable session video channels.
 //!
-//! Controllers reassemble H.264 RTP packets into complete frames, request
-//! keyframes after sequence gaps, and discard dependent frames until an IDR
-//! restores the stream. Hosts never receive this path.
+//! Controllers reassemble H.264 RTP packets into complete frames and discard
+//! dependent frames after packet loss until an IDR restores the stream. A
+//! recovery IDR is requested only after a subsequent frame arrives complete,
+//! which avoids adding a large keyframe to an already-congested path.
 
 use std::collections::HashMap;
 
@@ -14,8 +15,7 @@ pub(super) struct RtpVideoStream {
     pub(super) next_sequence: Option<u16>,
     pub(super) frame: Option<RtpFrameAssembly>,
     pub(super) waiting_for_keyframe: bool,
-    pub(super) keyframe_request_pending: bool,
-    frames_since_keyframe_request: u32,
+    request_keyframe_after_complete_frame: bool,
 }
 
 impl Default for RtpVideoStream {
@@ -24,8 +24,7 @@ impl Default for RtpVideoStream {
             next_sequence: None,
             frame: None,
             waiting_for_keyframe: true,
-            keyframe_request_pending: false,
-            frames_since_keyframe_request: 0,
+            request_keyframe_after_complete_frame: true,
         }
     }
 }
@@ -52,7 +51,6 @@ pub(super) struct VideoAssemblyResult {
 
 const RTP_FIXED_HEADER_SIZE: usize = 12;
 const MAX_ENCODED_VIDEO_FRAME_SIZE: usize = 16 * 1024 * 1024;
-const KEYFRAME_REQUEST_RETRY_FRAMES: u32 = 15;
 
 pub(super) fn assemble_video_frame(
     streams: &mut HashMap<ScreenId, RtpVideoStream>,
@@ -90,9 +88,7 @@ pub(super) fn assemble_video_frame(
         stream.waiting_for_keyframe = true;
         if !starts_new_frame || !metadata.keyframe {
             frame.valid = false;
-            request_key_frame = true;
-            stream.keyframe_request_pending = true;
-            stream.frames_since_keyframe_request = 0;
+            stream.request_keyframe_after_complete_frame = true;
         }
     }
     frame.keyframe |= metadata.keyframe;
@@ -128,14 +124,9 @@ pub(super) fn assemble_video_frame(
     }
     if stream.waiting_for_keyframe {
         if !frame.keyframe {
-            stream.frames_since_keyframe_request =
-                stream.frames_since_keyframe_request.saturating_add(1);
-            if !stream.keyframe_request_pending
-                || stream.frames_since_keyframe_request >= KEYFRAME_REQUEST_RETRY_FRAMES
-            {
+            if stream.request_keyframe_after_complete_frame {
                 request_key_frame = true;
-                stream.keyframe_request_pending = true;
-                stream.frames_since_keyframe_request = 0;
+                stream.request_keyframe_after_complete_frame = false;
             }
             return Ok(VideoAssemblyResult {
                 frame: None,
@@ -143,8 +134,7 @@ pub(super) fn assemble_video_frame(
             });
         }
         stream.waiting_for_keyframe = false;
-        stream.keyframe_request_pending = false;
-        stream.frames_since_keyframe_request = 0;
+        stream.request_keyframe_after_complete_frame = false;
     }
 
     Ok(VideoAssemblyResult {

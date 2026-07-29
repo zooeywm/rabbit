@@ -341,7 +341,7 @@ mod tests {
         let dropped = assemble_video_frame(&mut streams, screen_id, rtp_packet(10, 11, true))
             .expect("Sequence gap should discard the completed frame");
         assert!(dropped.frame.is_none());
-        assert!(dropped.request_key_frame);
+        assert!(!dropped.request_key_frame);
         assert!(
             streams
                 .get(&screen_id)
@@ -363,7 +363,7 @@ mod tests {
         let dropped = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(10, 12, true))
             .expect("Frame with a missing first packet should be discarded");
         assert!(dropped.frame.is_none());
-        assert!(dropped.request_key_frame);
+        assert!(!dropped.request_key_frame);
     }
 
     #[test]
@@ -392,11 +392,11 @@ mod tests {
         let gap = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
             .expect("Sequence gap should be handled");
         assert!(gap.frame.is_none());
-        assert!(gap.request_key_frame);
+        assert!(!gap.request_key_frame);
         let dependent = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(4, 3, true))
             .expect("Dependent frame should be discarded while waiting for IDR");
         assert!(dependent.frame.is_none());
-        assert!(!dependent.request_key_frame);
+        assert!(dependent.request_key_frame);
         assert!(
             assemble_video_frame(&mut streams, screen_id, rtp_packet(5, 4, true))
                 .expect("Complete IDR should restore the stream")
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn retries_key_frame_requests_while_waiting_for_recovery() {
+    fn requests_only_once_until_another_incomplete_frame() {
         let screen_id = ScreenId(8);
         let mut streams = HashMap::new();
         assert!(
@@ -417,21 +417,31 @@ mod tests {
         );
         let gap = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
             .expect("Sequence gap should be handled");
-        assert!(gap.request_key_frame);
+        assert!(!gap.request_key_frame);
 
-        for offset in 0..14u16 {
+        let recovered_network =
+            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(4, 3, true))
+                .expect("First complete dependent frame should be handled");
+        assert!(recovered_network.request_key_frame);
+
+        for offset in 0..30u16 {
             let dependent = assemble_video_frame(
                 &mut streams,
                 screen_id,
-                rtp_delta_packet(4 + offset, u32::from(3 + offset), true),
+                rtp_delta_packet(5 + offset, u32::from(4 + offset), true),
             )
             .expect("Dependent frame should be discarded");
             assert!(!dependent.request_key_frame);
         }
-        let retry = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(18, 17, true))
-            .expect("Key-frame recovery request should be retried");
-        assert!(retry.frame.is_none());
-        assert!(retry.request_key_frame);
+
+        let second_gap =
+            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(36, 34, true))
+                .expect("A new sequence gap should be handled");
+        assert!(!second_gap.request_key_frame);
+        let second_recovery =
+            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(37, 35, true))
+                .expect("A complete frame after the new loss should trigger recovery");
+        assert!(second_recovery.request_key_frame);
     }
 
     struct TestTransportSend {
