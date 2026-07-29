@@ -30,6 +30,7 @@ use windows::{
             Dxgi::Common::{
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
             },
+            Dxgi::IDXGIDevice,
         },
         Media::MediaFoundation::{
             CODECAPI_AVEncCommonBufferSize, CODECAPI_AVEncCommonLowLatency,
@@ -394,8 +395,14 @@ impl MfH264Encoder {
             .cast()
             .with_context(|| "D3D11 immediate context does not expose ID3D11VideoContext")?;
         let dxgi_manager = create_dxgi_device_manager(&d3d)?;
-        let transform = activate_h264_encoder()?;
-        configure_transform(&transform, &dxgi_manager, frame_size, frame_rate, bitrate)?;
+        let adapter_vendor_id = d3d_adapter_vendor_id(&d3d)?;
+        let transform = activate_h264_encoder(
+            &dxgi_manager,
+            frame_size,
+            frame_rate,
+            bitrate,
+            adapter_vendor_id,
+        )?;
         let output_stream_info = unsafe { transform.GetOutputStreamInfo(0) }
             .with_context(|| "Failed to query H.264 encoder output stream info")?;
         let transform_event_generator = transform.cast::<IMFMediaEventGenerator>().ok();
@@ -1356,7 +1363,81 @@ fn create_dxgi_device_manager(d3d: &ID3D11Device) -> eros::Result<IMFDXGIDeviceM
     Ok(manager)
 }
 
-fn activate_h264_encoder() -> eros::Result<IMFTransform> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsEncoderBackend {
+    Nvenc,
+    QuickSync,
+    Amf,
+    MediaFoundation,
+}
+
+impl WindowsEncoderBackend {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Nvenc => "nvenc",
+            Self::QuickSync => "quick-sync",
+            Self::Amf => "amf",
+            Self::MediaFoundation => "media-foundation",
+        }
+    }
+
+    fn from_activation(name: Option<&str>, vendor: Option<&str>) -> Self {
+        let identity = format!(
+            "{} {}",
+            name.unwrap_or_default().to_ascii_lowercase(),
+            vendor.unwrap_or_default().to_ascii_lowercase()
+        );
+        if identity.contains("nvidia") || identity.contains("nvenc") {
+            Self::Nvenc
+        } else if identity.contains("intel") || identity.contains("quick sync") {
+            Self::QuickSync
+        } else if identity.contains("amd")
+            || identity.contains("advanced micro devices")
+            || identity.contains("amf")
+        {
+            Self::Amf
+        } else {
+            Self::MediaFoundation
+        }
+    }
+
+    fn for_adapter_vendor(vendor_id: u32) -> Self {
+        match vendor_id {
+            0x10de => Self::Nvenc,
+            0x8086 => Self::QuickSync,
+            0x1002 | 0x1022 => Self::Amf,
+            _ => Self::MediaFoundation,
+        }
+    }
+}
+
+struct WindowsEncoderCandidate {
+    activate: IMFActivate,
+    backend: WindowsEncoderBackend,
+    name: Option<String>,
+    hardware_url: Option<String>,
+    vendor: Option<String>,
+    transform_clsid: Option<windows::core::GUID>,
+}
+
+fn d3d_adapter_vendor_id(d3d: &ID3D11Device) -> eros::Result<u32> {
+    let dxgi: IDXGIDevice = d3d
+        .cast()
+        .with_context(|| "Windows encoder D3D11 device is not an IDXGIDevice")?;
+    let adapter = unsafe { dxgi.GetAdapter() }
+        .with_context(|| "Failed to get the Windows encoder DXGI adapter")?;
+    let description = unsafe { adapter.GetDesc() }
+        .with_context(|| "Failed to describe the Windows encoder DXGI adapter")?;
+    Ok(description.VendorId)
+}
+
+fn activate_h264_encoder(
+    dxgi_manager: &IMFDXGIDeviceManager,
+    size: PixelSize,
+    frame_rate: FrameRate,
+    bitrate: VideoBitrate,
+    adapter_vendor_id: u32,
+) -> eros::Result<IMFTransform> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -1382,33 +1463,96 @@ fn activate_h264_encoder() -> eros::Result<IMFTransform> {
     if count == 0 || activates.is_null() {
         eros::bail!("No hardware H.264 Media Foundation encoder supports NV12 input");
     }
-    let activate = unsafe { (*activates).clone() }
-        .with_context(|| "Media Foundation returned a null encoder activation object")?;
+    let activate_objects = unsafe {
+        std::slice::from_raw_parts_mut(activates, count as usize)
+            .iter_mut()
+            .filter_map(Option::take)
+            .collect::<Vec<_>>()
+    };
     unsafe { CoTaskMemFree(Some(activates.cast())) };
-    let encoder_name = media_foundation_activation_string(&activate, &MFT_FRIENDLY_NAME_Attribute);
-    let hardware_url =
-        media_foundation_activation_string(&activate, &MFT_ENUM_HARDWARE_URL_Attribute);
-    let vendor_id =
-        media_foundation_activation_string(&activate, &MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
-    let transform_clsid = unsafe { activate.GetGUID(&MFT_TRANSFORM_CLSID_Attribute) }.ok();
-    let transform = unsafe { activate.ActivateObject::<IMFTransform>() }
-        .with_context(|| "Failed to activate the hardware H.264 Media Foundation encoder")?;
-    info!(
-        event = "windows_h264_encoder_selected",
-        framework = "media-foundation",
-        codec = "h264",
-        encoder_name = encoder_name.as_deref().unwrap_or("<unavailable>"),
-        transform_clsid = ?transform_clsid,
-        hardware_url = hardware_url.as_deref().unwrap_or("<unavailable>"),
-        vendor_id = vendor_id.as_deref().unwrap_or("<unavailable>"),
-        input_memory = "d3d11-texture",
-        input_format = "nv12",
-        packetizer = "native-rtp-h264",
-        hardware = true,
-        candidate_count = count,
-        "Selected Windows video encoder pipeline"
-    );
-    Ok(transform)
+    let mut candidates = activate_objects
+        .into_iter()
+        .map(|activate| {
+            let name = media_foundation_activation_string(&activate, &MFT_FRIENDLY_NAME_Attribute);
+            let hardware_url =
+                media_foundation_activation_string(&activate, &MFT_ENUM_HARDWARE_URL_Attribute);
+            let vendor = media_foundation_activation_string(
+                &activate,
+                &MFT_ENUM_HARDWARE_VENDOR_ID_Attribute,
+            );
+            WindowsEncoderCandidate {
+                backend: WindowsEncoderBackend::from_activation(name.as_deref(), vendor.as_deref()),
+                transform_clsid: unsafe { activate.GetGUID(&MFT_TRANSFORM_CLSID_Attribute) }.ok(),
+                activate,
+                name,
+                hardware_url,
+                vendor,
+            }
+        })
+        .collect::<Vec<_>>();
+    let preferred_backend = WindowsEncoderBackend::for_adapter_vendor(adapter_vendor_id);
+    candidates.sort_by_key(|candidate| {
+        if candidate.backend == preferred_backend {
+            0
+        } else if candidate.backend == WindowsEncoderBackend::MediaFoundation {
+            1
+        } else {
+            2
+        }
+    });
+
+    for (attempt, candidate) in candidates.iter().enumerate() {
+        let transform = match unsafe { candidate.activate.ActivateObject::<IMFTransform>() } {
+            Ok(transform) => transform,
+            Err(error) => {
+                warn!(
+                    event = "windows_h264_encoder_candidate_rejected",
+                    attempt = attempt + 1,
+                    backend = candidate.backend.name(),
+                    encoder_name = candidate.name.as_deref().unwrap_or("<unavailable>"),
+                    error = ?error,
+                    "Failed to activate a Windows hardware encoder candidate"
+                );
+                continue;
+            }
+        };
+        if let Err(error) = configure_transform(&transform, dxgi_manager, size, frame_rate, bitrate)
+        {
+            warn!(
+                event = "windows_h264_encoder_candidate_rejected",
+                attempt = attempt + 1,
+                backend = candidate.backend.name(),
+                encoder_name = candidate.name.as_deref().unwrap_or("<unavailable>"),
+                error = ?error,
+                "Windows hardware encoder candidate rejected the stream configuration"
+            );
+            continue;
+        }
+        info!(
+            event = "windows_h264_encoder_selected",
+            backend = candidate.backend.name(),
+            integration = "media-foundation-mft",
+            codec = "h264",
+            encoder_name = candidate.name.as_deref().unwrap_or("<unavailable>"),
+            transform_clsid = ?candidate.transform_clsid,
+            hardware_url = candidate.hardware_url.as_deref().unwrap_or("<unavailable>"),
+            vendor_id = candidate.vendor.as_deref().unwrap_or("<unavailable>"),
+            adapter_vendor_id = format_args!("{adapter_vendor_id:#06x}"),
+            preferred_backend = preferred_backend.name(),
+            input_memory = "d3d11-texture",
+            input_format = "nv12",
+            packetizer = "native-rtp-h264",
+            hardware = true,
+            candidate_count = count,
+            selection_attempt = attempt + 1,
+            "Selected Windows video encoder pipeline"
+        );
+        return Ok(transform);
+    }
+
+    eros::bail!(
+        "No Windows hardware H.264 encoder candidate accepted the D3D11 stream configuration"
+    )
 }
 
 fn media_foundation_activation_string(
@@ -1923,12 +2067,49 @@ mod tests {
     use crate::kernel::{geometry::FrameRate, video_encoder::VideoFrameRateMode};
 
     use super::{
-        EncoderTimeline, FixedFrameClock, H264_INFINITE_GOP_LENGTH, rtp_timestamp_from_hns,
+        EncoderTimeline, FixedFrameClock, H264_INFINITE_GOP_LENGTH, WindowsEncoderBackend,
+        rtp_timestamp_from_hns,
     };
 
     #[test]
     fn windows_h264_policy_disables_periodic_key_frames() {
         assert_eq!(H264_INFINITE_GOP_LENGTH, u32::MAX);
+    }
+
+    #[test]
+    fn windows_encoder_backend_tracks_the_capture_adapter_vendor() {
+        assert_eq!(
+            WindowsEncoderBackend::for_adapter_vendor(0x10de),
+            WindowsEncoderBackend::Nvenc
+        );
+        assert_eq!(
+            WindowsEncoderBackend::for_adapter_vendor(0x8086),
+            WindowsEncoderBackend::QuickSync
+        );
+        assert_eq!(
+            WindowsEncoderBackend::for_adapter_vendor(0x1002),
+            WindowsEncoderBackend::Amf
+        );
+        assert_eq!(
+            WindowsEncoderBackend::for_adapter_vendor(0xffff),
+            WindowsEncoderBackend::MediaFoundation
+        );
+    }
+
+    #[test]
+    fn windows_encoder_backend_classifies_hardware_mft_identity() {
+        assert_eq!(
+            WindowsEncoderBackend::from_activation(Some("NVIDIA H.264 Encoder MFT"), None),
+            WindowsEncoderBackend::Nvenc
+        );
+        assert_eq!(
+            WindowsEncoderBackend::from_activation(Some("Intel Quick Sync Video H.264"), None),
+            WindowsEncoderBackend::QuickSync
+        );
+        assert_eq!(
+            WindowsEncoderBackend::from_activation(Some("AMD AMF H.264 Encoder"), None),
+            WindowsEncoderBackend::Amf
+        );
     }
 
     #[test]
