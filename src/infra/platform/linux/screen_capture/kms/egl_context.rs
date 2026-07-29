@@ -747,12 +747,29 @@ fn initialize_context(
         .bind_api(egl::OPENGL_ES_API)
         .with_context(|| "Failed to bind the OpenGL ES API")?;
     let config = instance
-        .choose_first_config(
-            display,
-            &[egl::RENDERABLE_TYPE, egl::OPENGL_ES3_BIT, egl::NONE],
-        )
+        .choose_first_config(display, &egl_config_attributes())
         .with_context(|| "Failed to choose an OpenGL ES 3 EGL config")?
         .with_context(|| "EGL did not provide an OpenGL ES 3 config")?;
+    let red_size = instance
+        .get_config_attrib(display, config, egl::RED_SIZE)
+        .with_context(|| "Failed to query the selected EGL red channel size")?;
+    let green_size = instance
+        .get_config_attrib(display, config, egl::GREEN_SIZE)
+        .with_context(|| "Failed to query the selected EGL green channel size")?;
+    let blue_size = instance
+        .get_config_attrib(display, config, egl::BLUE_SIZE)
+        .with_context(|| "Failed to query the selected EGL blue channel size")?;
+    let alpha_size = instance
+        .get_config_attrib(display, config, egl::ALPHA_SIZE)
+        .with_context(|| "Failed to query the selected EGL alpha channel size")?;
+    tracing::info!(
+        event = "kms_egl_config_selected",
+        red_size,
+        green_size,
+        blue_size,
+        alpha_size,
+        "Selected EGL configuration with at least 8-bit RGB for KMS composition"
+    );
     let context = instance
         .create_context(
             display,
@@ -779,6 +796,28 @@ fn initialize_context(
     Ok((context, gl, dup_native_fence_fd, supports_modifiers))
 }
 
+fn egl_config_attributes() -> [egl::Int; 17] {
+    [
+        egl::COLOR_BUFFER_TYPE,
+        egl::RGB_BUFFER,
+        egl::RED_SIZE,
+        8,
+        egl::GREEN_SIZE,
+        8,
+        egl::BLUE_SIZE,
+        8,
+        egl::ALPHA_SIZE,
+        0,
+        egl::DEPTH_SIZE,
+        0,
+        egl::STENCIL_SIZE,
+        0,
+        egl::RENDERABLE_TYPE,
+        egl::OPENGL_ES3_BIT,
+        egl::NONE,
+    ]
+}
+
 fn has_extension(extensions: &CStr, expected: &str) -> bool {
     extensions
         .to_bytes()
@@ -798,5 +837,26 @@ fn sample_range_hint(range: KmsColorRange) -> egl::Attrib {
     match range {
         KmsColorRange::Limited => YUV_NARROW_RANGE_EXT,
         KmsColorRange::Full => YUV_FULL_RANGE_EXT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::egl_config_attributes;
+
+    #[test]
+    fn kms_egl_config_requires_eight_bit_rgb_channels() {
+        let attributes = egl_config_attributes();
+        let pairs = attributes[..attributes.len() - 1]
+            .chunks_exact(2)
+            .collect::<Vec<_>>();
+
+        for channel in [
+            khronos_egl::RED_SIZE,
+            khronos_egl::GREEN_SIZE,
+            khronos_egl::BLUE_SIZE,
+        ] {
+            assert!(pairs.iter().any(|pair| pair[0] == channel && pair[1] == 8));
+        }
     }
 }

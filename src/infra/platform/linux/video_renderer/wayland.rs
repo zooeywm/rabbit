@@ -15,7 +15,7 @@ use smithay_client_toolkit::{
     dmabuf::{DmabufFeedback, DmabufHandler, DmabufState},
 };
 use wayland_client::{
-    Connection, Dispatch, EventQueue, Proxy as _, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy as _, QueueHandle, WEnum,
     backend::{Backend, ObjectId},
     delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
@@ -25,6 +25,9 @@ use wayland_client::{
     },
 };
 use wayland_protocols::wp::{
+    color_representation::v1::client::{
+        wp_color_representation_manager_v1, wp_color_representation_surface_v1,
+    },
     linux_dmabuf::zv1::client::{zwp_linux_buffer_params_v1, zwp_linux_dmabuf_feedback_v1},
     viewporter::client::{wp_viewport, wp_viewporter},
 };
@@ -76,6 +79,7 @@ struct SubmittedBuffer {
 struct WaylandEventState {
     dmabuf: DmabufState,
     supported_formats: SupportedDmaBufFormats,
+    supports_bt709_limited: bool,
     released_buffers: Vec<ObjectId>,
 }
 
@@ -132,6 +136,41 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandEventState
     }
 }
 
+impl Dispatch<wp_color_representation_manager_v1::WpColorRepresentationManagerV1, ()>
+    for WaylandEventState
+{
+    fn event(
+        state: &mut Self,
+        _: &wp_color_representation_manager_v1::WpColorRepresentationManagerV1,
+        event: wp_color_representation_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_color_representation_manager_v1::Event::SupportedCoefficientsAndRanges {
+            coefficients,
+            range,
+        } = event
+            && is_bt709_limited(coefficients, range)
+        {
+            state.supports_bt709_limited = true;
+        }
+    }
+}
+
+fn is_bt709_limited(
+    coefficients: WEnum<wp_color_representation_surface_v1::Coefficients>,
+    range: WEnum<wp_color_representation_surface_v1::Range>,
+) -> bool {
+    matches!(
+        (coefficients, range),
+        (
+            WEnum::Value(wp_color_representation_surface_v1::Coefficients::Bt709),
+            WEnum::Value(wp_color_representation_surface_v1::Range::Limited)
+        )
+    )
+}
+
 impl Dispatch<wl_buffer::WlBuffer, BackgroundBufferData> for WaylandEventState {
     fn event(
         _: &mut Self,
@@ -153,6 +192,7 @@ delegate_noop!(WaylandEventState: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(WaylandEventState: ignore wl_surface::WlSurface);
 delegate_noop!(WaylandEventState: ignore wp_viewport::WpViewport);
 delegate_noop!(WaylandEventState: ignore wp_viewporter::WpViewporter);
+delegate_noop!(WaylandEventState: ignore wp_color_representation_surface_v1::WpColorRepresentationSurfaceV1);
 delegate_dmabuf!(WaylandEventState);
 
 pub(crate) struct WaylandVideoRenderer {
@@ -164,6 +204,8 @@ pub(crate) struct WaylandVideoRenderer {
     surface: wl_surface::WlSurface,
     subsurface: wl_subsurface::WlSubsurface,
     viewport: wp_viewport::WpViewport,
+    color_representation:
+        Option<wp_color_representation_surface_v1::WpColorRepresentationSurfaceV1>,
     background_surface: wl_surface::WlSurface,
     background_subsurface: wl_subsurface::WlSubsurface,
     background_viewport: wp_viewport::WpViewport,
@@ -219,6 +261,13 @@ impl WaylandVideoRenderer {
         let viewporter = globals
             .bind::<wp_viewporter::WpViewporter, _, _>(&queue_handle, 1..=1, ())
             .with_context(|| "Wayland viewporter protocol is unavailable")?;
+        let color_representation_manager = globals
+            .bind::<wp_color_representation_manager_v1::WpColorRepresentationManagerV1, _, _>(
+                &queue_handle,
+                1..=1,
+                (),
+            )
+            .ok();
         let dmabuf = DmabufState::new(&globals, &queue_handle);
         let dmabuf_version = dmabuf
             .version()
@@ -226,6 +275,7 @@ impl WaylandVideoRenderer {
         let mut state = WaylandEventState {
             dmabuf,
             supported_formats: SupportedDmaBufFormats::default(),
+            supports_bt709_limited: false,
             released_buffers: Vec::new(),
         };
 
@@ -273,6 +323,38 @@ impl WaylandVideoRenderer {
         if state.supported_formats.0.is_empty() {
             eros::bail!("Wayland compositor advertised no usable DMA-BUF formats");
         }
+        let has_color_representation_manager = color_representation_manager.is_some();
+        let color_representation = color_representation_manager.and_then(|manager| {
+            let representation = if state.supports_bt709_limited {
+                let representation =
+                    manager.get_surface(&surface, &queue_handle, ());
+                representation.set_coefficients_and_range(
+                    wp_color_representation_surface_v1::Coefficients::Bt709,
+                    wp_color_representation_surface_v1::Range::Limited,
+                );
+                tracing::info!(
+                    event = "wayland_video_color_representation_configured",
+                    coefficients = "bt709",
+                    range = "limited",
+                    "Configured Wayland zero-copy video surface color representation"
+                );
+                Some(representation)
+            } else {
+                tracing::warn!(
+                    event = "wayland_video_color_representation_unsupported",
+                    "Wayland compositor does not support BT.709 limited-range surface metadata; NV12 color conversion remains compositor-defined"
+                );
+                None
+            };
+            manager.destroy();
+            representation
+        });
+        if !has_color_representation_manager {
+            tracing::warn!(
+                event = "wayland_video_color_representation_unavailable",
+                "Wayland compositor does not expose color-representation-v1; NV12 color conversion remains compositor-defined"
+            );
+        }
 
         Ok(Self {
             connection,
@@ -283,6 +365,7 @@ impl WaylandVideoRenderer {
             surface,
             subsurface,
             viewport,
+            color_representation,
             background_surface,
             background_subsurface,
             background_viewport,
@@ -505,6 +588,9 @@ impl WaylandVideoRenderer {
         self.background_subsurface.destroy();
         self.background_surface.destroy();
         self.background_buffer.destroy();
+        if let Some(color_representation) = self.color_representation.take() {
+            color_representation.destroy();
+        }
         self.viewport.destroy();
         self.subsurface.destroy();
         self.surface.destroy();
@@ -598,9 +684,13 @@ fn fit_wayland_viewport(
 #[cfg(test)]
 mod tests {
     use crate::infra::platform::video_renderer::wayland::{
-        SupportedDmaBufFormats, WaylandVideoViewport, fit_wayland_viewport,
+        SupportedDmaBufFormats, WaylandVideoViewport, fit_wayland_viewport, is_bt709_limited,
     };
     use crate::kernel::geometry::PixelSize;
+    use wayland_client::WEnum;
+    use wayland_protocols::wp::color_representation::v1::client::wp_color_representation_surface_v1::{
+        Coefficients, Range,
+    };
 
     #[test]
     fn dma_buf_support_requires_an_exact_format_modifier_pair() {
@@ -609,6 +699,22 @@ mod tests {
         assert!(formats.supports(0x3231_564e, 7));
         assert!(!formats.supports(0x3231_564e, 8));
         assert!(!formats.supports(0x3432_5258, 7));
+    }
+
+    #[test]
+    fn recognizes_bt709_limited_wayland_color_representation() {
+        assert!(is_bt709_limited(
+            WEnum::Value(Coefficients::Bt709),
+            WEnum::Value(Range::Limited),
+        ));
+        assert!(!is_bt709_limited(
+            WEnum::Value(Coefficients::Bt601),
+            WEnum::Value(Range::Limited),
+        ));
+        assert!(!is_bt709_limited(
+            WEnum::Value(Coefficients::Bt709),
+            WEnum::Value(Range::Full),
+        ));
     }
 
     #[test]
