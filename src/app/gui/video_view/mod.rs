@@ -134,6 +134,7 @@ where
 {
     display: Option<ActiveVideoDisplay<Stack>>,
     active_stream: Option<(SessionId, ScreenId)>,
+    slint_clear_pending: bool,
     failed: bool,
 }
 
@@ -157,6 +158,7 @@ where
     let view_state = Rc::new(RefCell::new(VideoViewState {
         display: None,
         active_stream: None,
+        slint_clear_pending: false,
         failed: false,
     }));
 
@@ -169,18 +171,36 @@ where
         if state.failed {
             return;
         }
-        if !matches!(state.display, Some(ActiveVideoDisplay::Native(_))) {
-            if let Some(window) = direct_window.upgrade() {
-                window.window().request_redraw();
-            }
-            return;
-        }
         let VideoViewState {
             display,
             active_stream,
+            slint_clear_pending,
             ..
         } = &mut *state;
-        match render_native_frame(&direct_commands, &direct_window, display, active_stream) {
+        let result = match display {
+            Some(ActiveVideoDisplay::Native(_)) => {
+                render_native_frame(&direct_commands, &direct_window, display, active_stream)
+            }
+            Some(ActiveVideoDisplay::Slint(_)) => {
+                let result = stage_slint_frame(
+                    &direct_commands,
+                    display,
+                    active_stream,
+                    slint_clear_pending,
+                );
+                if let Some(window) = direct_window.upgrade() {
+                    window.window().request_redraw();
+                }
+                result
+            }
+            None => {
+                if let Some(window) = direct_window.upgrade() {
+                    window.window().request_redraw();
+                }
+                Ok(None)
+            }
+        };
+        match result {
             Ok(Some((session_id, screen_id))) => {
                 let _ = direct_errors.send(GuiIntent::VideoFrameReady {
                     session_id,
@@ -212,17 +232,25 @@ where
                     let VideoViewState {
                         display,
                         active_stream,
+                        slint_clear_pending,
                         ..
                     } = &mut *video;
-                    let result = render_video_frame(
-                        &receiver,
-                        &weak_window,
-                        display,
-                        active_stream,
-                        preference,
-                        probe_interval,
-                        get_proc_address,
-                    );
+                    let result = if std::mem::take(slint_clear_pending) {
+                        clear_slint_renderer(display)
+                    } else {
+                        Ok(())
+                    }
+                    .and_then(|()| {
+                        render_video_frame(
+                            &receiver,
+                            &weak_window,
+                            display,
+                            active_stream,
+                            preference,
+                            probe_interval,
+                            get_proc_address,
+                        )
+                    });
                     match result {
                         Ok(Some((session_id, screen_id))) => {
                             if errors
@@ -415,6 +443,50 @@ where
         }
     }
     Ok(presented)
+}
+
+fn clear_slint_renderer<Stack>(display: &mut Option<ActiveVideoDisplay<Stack>>) -> eros::Result<()>
+where
+    Stack: VideoViewStack,
+{
+    match display.as_mut() {
+        Some(ActiveVideoDisplay::Slint(renderer)) => renderer.clear(),
+        Some(ActiveVideoDisplay::Native(_)) | None => Ok(()),
+    }
+}
+
+fn stage_slint_frame<Stack>(
+    commands: &flume::Receiver<VideoViewCommand<Stack>>,
+    display: &mut Option<ActiveVideoDisplay<Stack>>,
+    active_stream: &mut Option<(SessionId, ScreenId)>,
+    clear_pending: &mut bool,
+) -> eros::Result<Option<(SessionId, ScreenId)>>
+where
+    Stack: VideoViewStack,
+{
+    let Some(ActiveVideoDisplay::Slint(renderer)) = display.as_mut() else {
+        return Ok(None);
+    };
+    let Ok(command) = commands.try_recv() else {
+        return Ok(None);
+    };
+
+    match command {
+        VideoViewCommand::Present {
+            session_id,
+            screen_id,
+            frame,
+        } => {
+            renderer.present(*frame);
+            Ok(activate_stream(active_stream, session_id, screen_id)
+                .then_some((session_id, screen_id)))
+        }
+        VideoViewCommand::Clear => {
+            *active_stream = None;
+            *clear_pending = true;
+            Ok(None)
+        }
+    }
 }
 
 fn render_native_frame<Stack>(
@@ -644,21 +716,183 @@ fn fail_video_display<Stack>(
 mod tests {
     use std::{cell::Cell, pin::Pin, rc::Rc, time::Duration};
 
+    use super::{ActiveVideoDisplay, VideoViewCommand, VideoViewStack, stage_slint_frame};
     use crate::{
         app::{
             gui::{
                 state::{ViewPage, ViewState},
-                view::{Gui, GuiIntent, ViewPublisher},
+                view::{Gui, GuiIntent, RabbitWindow, ViewPublisher},
             },
             platform::{ApplicationStack, RemoteVideoStack, TestApplicationStack},
         },
         kernel::{
             screen_manager::ScreenId,
             session::{ReceivedVideoFrame, SessionId},
+            video_decoder::DecodedVideoFrame,
+            video_renderer::{VideoRenderer, VideoViewport},
         },
     };
     use gstreamer::glib::prelude::{Cast as _, ObjectExt as _};
     use gstreamer::prelude::{ElementExt as _, GstBinExtManual as _};
+
+    struct StagedFrame(ScreenId);
+
+    impl DecodedVideoFrame for StagedFrame {
+        fn screen_id(&self) -> ScreenId {
+            self.0
+        }
+    }
+
+    #[derive(Default)]
+    struct StagedRenderer {
+        presented: usize,
+    }
+
+    impl VideoRenderer for StagedRenderer {
+        type Frame = StagedFrame;
+
+        fn set_viewport(&mut self, _viewport: VideoViewport) {}
+
+        fn present(&mut self, _frame: Self::Frame) {
+            self.presented += 1;
+        }
+
+        fn render(&mut self) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn clear(&mut self) -> eros::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StagedVideoStack;
+
+    impl VideoViewStack for StagedVideoStack {
+        type Frame = StagedFrame;
+        type NativeRenderer = ();
+        type OpenGlRenderer = StagedRenderer;
+        type NativeViewport = ();
+
+        fn select_slint_backend() -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn create_native_renderer(
+            _window: &slint::Window,
+            _probe_interval: Duration,
+        ) -> eros::Result<Self::NativeRenderer> {
+            Ok(())
+        }
+
+        fn create_opengl_renderer(
+            _get_proc_address: &dyn Fn(&std::ffi::CStr) -> *const std::ffi::c_void,
+            _probe_interval: Duration,
+        ) -> eros::Result<Self::OpenGlRenderer> {
+            Ok(StagedRenderer::default())
+        }
+
+        fn set_native_viewport(
+            _renderer: &mut Self::NativeRenderer,
+            _viewport: Self::NativeViewport,
+        ) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn validate_native_frame(
+            _renderer: &Self::NativeRenderer,
+            _frame: &Self::Frame,
+        ) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn present_native_frame(_renderer: &mut Self::NativeRenderer, _frame: Self::Frame) {}
+
+        fn render_native_renderer(_renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn clear_native_renderer(_renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn teardown_native_renderer(_renderer: &mut Self::NativeRenderer) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn teardown_opengl_renderer(_renderer: &mut Self::OpenGlRenderer) -> eros::Result<()> {
+            Ok(())
+        }
+
+        fn native_viewport(
+            _window: &RabbitWindow,
+            _visible: bool,
+        ) -> eros::Result<Self::NativeViewport> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stages_slint_frames_before_the_next_render_notification() {
+        let session_id = SessionId(4);
+        let screen_id = ScreenId(2);
+        let (sender, commands) = flume::bounded(1);
+        sender
+            .send(VideoViewCommand::<StagedVideoStack>::Present {
+                session_id,
+                screen_id,
+                frame: Box::new(StagedFrame(screen_id)),
+            })
+            .expect("Staged frame should enter the video command queue");
+        let mut display = Some(ActiveVideoDisplay::<StagedVideoStack>::Slint(Box::new(
+            StagedRenderer::default(),
+        )));
+        let mut active_stream = None;
+
+        let mut clear_pending = false;
+        let activated = stage_slint_frame(
+            &commands,
+            &mut display,
+            &mut active_stream,
+            &mut clear_pending,
+        )
+        .expect("Slint frame staging should succeed");
+
+        assert_eq!(activated, Some((session_id, screen_id)));
+        assert_eq!(active_stream, Some((session_id, screen_id)));
+        assert!(!clear_pending);
+        assert!(commands.is_empty());
+        let Some(ActiveVideoDisplay::Slint(renderer)) = display else {
+            panic!("Slint renderer should remain active");
+        };
+        assert_eq!(renderer.presented, 1);
+    }
+
+    #[test]
+    fn defers_slint_clear_until_the_render_notification() {
+        let (sender, commands) = flume::bounded(1);
+        sender
+            .send(VideoViewCommand::<StagedVideoStack>::Clear)
+            .expect("Clear should enter the video command queue");
+        let mut display = Some(ActiveVideoDisplay::<StagedVideoStack>::Slint(Box::new(
+            StagedRenderer::default(),
+        )));
+        let mut active_stream = Some((SessionId(4), ScreenId(2)));
+        let mut clear_pending = false;
+
+        let activated = stage_slint_frame(
+            &commands,
+            &mut display,
+            &mut active_stream,
+            &mut clear_pending,
+        )
+        .expect("Slint clear staging should succeed");
+
+        assert_eq!(activated, None);
+        assert_eq!(active_stream, None);
+        assert!(clear_pending);
+        assert!(commands.is_empty());
+    }
 
     #[test]
     fn only_the_first_frame_of_an_active_stream_notifies_the_app() {
