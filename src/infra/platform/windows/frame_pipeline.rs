@@ -2,6 +2,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
+    time::Instant,
 };
 
 use eros::Context as _;
@@ -36,6 +37,7 @@ pub(crate) struct WindowsFramePipelineFrame {
     pub(crate) source_frame_rate: FrameRate,
     pub(crate) frame_rate: FrameRate,
     pub(crate) fixed_rate_paced: bool,
+    pub(crate) captured_at: Instant,
     pub(crate) probe: Option<super::host_video_probe::HostVideoFrameProbe>,
     surface: WindowsCapturedSurface,
 }
@@ -95,6 +97,7 @@ impl futures_core::Stream for WindowsFramePipelineSubscription {
                         source_frame_rate: frame.frame_rate,
                         frame_rate: this.frame_rate,
                         fixed_rate_paced: frame.fixed_rate_paced,
+                        captured_at: frame.captured_at,
                         probe,
                         surface: frame.surface,
                     };

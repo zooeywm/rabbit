@@ -159,6 +159,7 @@ where
     let mut encoder = MfH264Encoder::new(
         &first_frame,
         frame_rate,
+        parameters.frame_rate_mode,
         parameters.bitrate,
         max_packet_size,
     )
@@ -269,15 +270,14 @@ struct MfH264Encoder {
     frame_rate: FrameRate,
     bitrate: VideoBitrate,
     frame_duration_hns: i64,
-    next_sample_time_hns: i64,
+    timeline: EncoderTimeline,
     sequence: u16,
-    timestamp: u32,
-    timestamp_step: u32,
     max_packet_size: usize,
     force_key_frame: bool,
     logged_output_format: bool,
     async_accepts_input: bool,
     latest_input: Option<Rc<WindowsFramePipelineFrame>>,
+    latest_capture_pending: bool,
     latest_probe: Option<HostVideoFrameProbe>,
     pending_inputs: VecDeque<PendingInput>,
     probe_reporter: Option<HostVideoProbeReporter>,
@@ -285,6 +285,7 @@ struct MfH264Encoder {
 
 struct EncodedOutput {
     sample: IMFSample,
+    sample_time_hns: i64,
     probe: Option<HostVideoFrameProbe>,
 }
 
@@ -292,6 +293,48 @@ struct PendingInput {
     sample_time_hns: i64,
     texture: Nv12InputTexture,
     probe: Option<HostVideoFrameProbe>,
+}
+
+struct EncoderTimeline {
+    mode: VideoFrameRateMode,
+    frame_duration_hns: i64,
+    capture_epoch: Option<Instant>,
+    next_fixed_sample_time_hns: i64,
+    last_sample_time_hns: Option<i64>,
+}
+
+impl EncoderTimeline {
+    fn new(mode: VideoFrameRateMode, frame_rate: FrameRate) -> Self {
+        Self {
+            mode,
+            frame_duration_hns: frame_duration_hns(frame_rate),
+            capture_epoch: None,
+            next_fixed_sample_time_hns: 0,
+            last_sample_time_hns: None,
+        }
+    }
+
+    fn next_sample_time_hns(&mut self, captured_at: Instant) -> i64 {
+        let requested = match self.mode {
+            VideoFrameRateMode::Fixed => {
+                let current = self.next_fixed_sample_time_hns;
+                self.next_fixed_sample_time_hns = self
+                    .next_fixed_sample_time_hns
+                    .saturating_add(self.frame_duration_hns);
+                current
+            }
+            VideoFrameRateMode::Dynamic => {
+                let epoch = *self.capture_epoch.get_or_insert(captured_at);
+                duration_hns(captured_at.saturating_duration_since(epoch))
+            }
+        };
+        let sample_time = match self.last_sample_time_hns {
+            Some(previous) if requested <= previous => previous.saturating_add(1),
+            _ => requested,
+        };
+        self.last_sample_time_hns = Some(sample_time);
+        sample_time
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +368,7 @@ impl MfH264Encoder {
     fn new(
         first_frame: &WindowsFramePipelineFrame,
         frame_rate: FrameRate,
+        frame_rate_mode: VideoFrameRateMode,
         bitrate: VideoBitrate,
         max_packet_size: usize,
     ) -> eros::Result<Self> {
@@ -389,15 +433,14 @@ impl MfH264Encoder {
             frame_rate,
             bitrate,
             frame_duration_hns: frame_duration_hns(frame_rate),
-            next_sample_time_hns: 0,
+            timeline: EncoderTimeline::new(frame_rate_mode, frame_rate),
             sequence: 0,
-            timestamp: 1,
-            timestamp_step: rtp_timestamp_step(frame_rate),
             max_packet_size,
             force_key_frame: false,
             logged_output_format: false,
             async_accepts_input,
             latest_input: None,
+            latest_capture_pending: false,
             latest_probe: None,
             pending_inputs: VecDeque::new(),
             probe_reporter,
@@ -441,6 +484,7 @@ impl MfH264Encoder {
         }
 
         self.latest_input = Some(frame.clone());
+        self.latest_capture_pending = true;
         self.latest_probe = probe;
         Ok(())
     }
@@ -459,6 +503,11 @@ impl MfH264Encoder {
             .cloned()
             .with_context(|| "Windows encoder has no retained frame to encode")?;
         let mut probe = self.latest_probe.take();
+        let captured_at = if self.latest_capture_pending {
+            frame.captured_at
+        } else {
+            Instant::now()
+        };
         let texture = loop {
             if let Some(probe) = &mut probe {
                 probe.mark_vpp_started();
@@ -475,13 +524,17 @@ impl MfH264Encoder {
                 }
             }
         };
-        self.encode_input(texture, probe, send_packet).await
+        self.encode_input(texture, probe, captured_at, send_packet)
+            .await?;
+        self.latest_capture_pending = false;
+        Ok(())
     }
 
     async fn encode_input<SendPacket, SendFuture>(
         &mut self,
         texture: Nv12InputTexture,
         mut probe: Option<HostVideoFrameProbe>,
+        captured_at: Instant,
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
     where
@@ -504,7 +557,7 @@ impl MfH264Encoder {
             }
         }
 
-        let sample_time_hns = self.next_sample_time_hns;
+        let sample_time_hns = self.timeline.next_sample_time_hns(captured_at);
         let sample = create_input_sample(texture.texture())?;
         unsafe {
             sample.SetSampleTime(sample_time_hns)?;
@@ -555,9 +608,6 @@ impl MfH264Encoder {
                 }
             }
         }
-        self.next_sample_time_hns = self
-            .next_sample_time_hns
-            .saturating_add(self.frame_duration_hns);
         if self.transform_event_generator.is_none() {
             self.receive_packets(send_packet).await?;
         } else if !produced_output {
@@ -657,13 +707,14 @@ impl MfH264Encoder {
             let mut rtp_packets = 0u64;
             let mut rtp_bytes = 0u64;
             let mut packet_batch = Vec::new();
+            let timestamp = rtp_timestamp_from_hns(output.sample_time_hns);
             for access_unit in split_annex_b_access_units(&access_units) {
                 let nals = split_h264_nals(access_unit);
                 for (index, nal) in nals.iter().enumerate() {
                     let marker = index + 1 == nals.len();
                     let packets = packetize_h264_nal(
                         nal,
-                        self.timestamp,
+                        timestamp,
                         &mut self.sequence,
                         self.max_packet_size,
                         marker,
@@ -675,7 +726,6 @@ impl MfH264Encoder {
                         packet_batch.push(WindowsVideoPacket(packet));
                     }
                 }
-                self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
             }
             if !packet_batch.is_empty() {
                 send_packet(packet_batch).await?;
@@ -833,7 +883,11 @@ impl MfH264Encoder {
                         pending_inputs = self.pending_inputs.len(),
                         "Released an NV12 encoder input texture"
                     );
-                    return Ok(Some(EncodedOutput { sample, probe }));
+                    return Ok(Some(EncodedOutput {
+                        sample,
+                        sample_time_hns,
+                        probe,
+                    }));
                 }
                 Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
                 Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
@@ -1771,6 +1825,10 @@ fn frame_duration_hns(frame_rate: FrameRate) -> i64 {
     ((10_000_000_i64 * denominator) / numerator).max(1)
 }
 
+fn duration_hns(duration: Duration) -> i64 {
+    (duration.as_nanos() / 100).min(i64::MAX as u128) as i64
+}
+
 fn frame_duration(frame_rate: FrameRate) -> Duration {
     let numerator = u128::from(frame_rate.numerator().max(1));
     let denominator = u128::from(frame_rate.denominator().max(1));
@@ -1838,10 +1896,12 @@ fn frame_rate_rational_from_duration(duration_hns: i64) -> DXGI_RATIONAL {
     }
 }
 
-fn rtp_timestamp_step(frame_rate: FrameRate) -> u32 {
-    let numerator = frame_rate.numerator().max(1) as u64;
-    let denominator = frame_rate.denominator().max(1) as u64;
-    ((90_000_u64 * denominator) / numerator).max(1) as u32
+fn rtp_timestamp_from_hns(sample_time_hns: i64) -> u32 {
+    let ticks = u128::try_from(sample_time_hns.max(0))
+        .unwrap_or(u128::MAX)
+        .saturating_mul(90_000)
+        / 10_000_000;
+    1_u32.wrapping_add(ticks as u32)
 }
 
 fn pack_u32_pair(high: u32, low: u32) -> u64 {
@@ -1860,13 +1920,47 @@ const H264_CPB_INTERVALS_PER_SECOND: u32 = 10;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use crate::kernel::geometry::FrameRate;
+    use crate::kernel::{geometry::FrameRate, video_encoder::VideoFrameRateMode};
 
-    use super::{FixedFrameClock, H264_INFINITE_GOP_LENGTH};
+    use super::{
+        EncoderTimeline, FixedFrameClock, H264_INFINITE_GOP_LENGTH, rtp_timestamp_from_hns,
+    };
 
     #[test]
     fn windows_h264_policy_disables_periodic_key_frames() {
         assert_eq!(H264_INFINITE_GOP_LENGTH, u32::MAX);
+    }
+
+    #[test]
+    fn dynamic_timeline_preserves_two_seconds_of_capture_idle_time() {
+        let start = Instant::now();
+        let mut timeline = EncoderTimeline::new(
+            VideoFrameRateMode::Dynamic,
+            FrameRate::new(120, 1).expect("frame rate"),
+        );
+        let first = timeline.next_sample_time_hns(start);
+        let after_idle = timeline.next_sample_time_hns(start + Duration::from_secs(2));
+
+        assert_eq!(first, 0);
+        assert_eq!(after_idle, 20_000_000);
+        assert_eq!(
+            rtp_timestamp_from_hns(after_idle).wrapping_sub(rtp_timestamp_from_hns(first)),
+            180_000
+        );
+    }
+
+    #[test]
+    fn dynamic_timeline_keeps_repeated_recovery_frames_monotonic() {
+        let start = Instant::now();
+        let mut timeline = EncoderTimeline::new(
+            VideoFrameRateMode::Dynamic,
+            FrameRate::new(120, 1).expect("frame rate"),
+        );
+        let first = timeline.next_sample_time_hns(start);
+        let repeated = timeline.next_sample_time_hns(start);
+
+        assert_eq!(first, 0);
+        assert_eq!(repeated, 1);
     }
 
     #[test]

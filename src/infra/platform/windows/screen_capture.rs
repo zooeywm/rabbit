@@ -37,6 +37,7 @@ use windows::{
                 IDXGIOutput, IDXGIOutput1, IDXGIOutput5, IDXGIOutputDuplication, IDXGIResource,
             },
         },
+        System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
         System::Threading::{
             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE,
             SetWaitableTimerEx, TIMER_ALL_ACCESS, WaitForSingleObject,
@@ -185,6 +186,7 @@ pub(crate) struct WindowsCapturedFrame {
     pub(crate) content_size: crate::kernel::geometry::PixelSize,
     pub(crate) frame_rate: crate::kernel::geometry::FrameRate,
     pub(crate) fixed_rate_paced: bool,
+    pub(crate) captured_at: Instant,
     pub(crate) probe: Option<HostVideoFrameProbe>,
 }
 
@@ -468,6 +470,7 @@ struct DesktopDuplicationCapture {
     size: crate::kernel::geometry::PixelSize,
     texture_pool: DesktopDuplicationTexturePool,
     fixed_snapshot: Option<ID3D11Texture2D>,
+    presentation_clock: QpcInstantMapper,
 }
 
 impl DesktopDuplicationCapture {
@@ -500,6 +503,7 @@ impl DesktopDuplicationCapture {
         };
         let texture_pool_size = TEXTURE_COUNT - usize::from(fixed_snapshot.is_some());
         let texture_pool = DesktopDuplicationTexturePool::new(&device, size, texture_pool_size)?;
+        let presentation_clock = QpcInstantMapper::new()?;
         info!(
             event = "windows_desktop_duplication_selected",
             backend = "dxgi-desktop-duplication",
@@ -520,6 +524,7 @@ impl DesktopDuplicationCapture {
             size,
             texture_pool,
             fixed_snapshot,
+            presentation_clock,
         })
     }
 
@@ -527,7 +532,7 @@ impl DesktopDuplicationCapture {
         &mut self,
         timeout_ms: u32,
         target: Option<&ID3D11Texture2D>,
-    ) -> eros::Result<bool> {
+    ) -> eros::Result<Option<Instant>> {
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         match unsafe {
@@ -535,7 +540,7 @@ impl DesktopDuplicationCapture {
                 .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
         } {
             Ok(()) => {}
-            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
             Err(error) => {
                 Err(error).with_context(|| "Failed to acquire a Desktop Duplication frame")?;
                 unreachable!()
@@ -543,17 +548,25 @@ impl DesktopDuplicationCapture {
         }
 
         let result = if frame_info.LastPresentTime == 0 {
-            Ok(false)
+            Ok(None)
         } else if let Some(target) = target {
-            self.copy_desktop_texture(resource, target).map(|()| true)
+            self.copy_desktop_texture(resource, target).map(|()| {
+                Some(
+                    self.presentation_clock
+                        .to_instant(frame_info.LastPresentTime),
+                )
+            })
         } else {
-            Ok(true)
+            Ok(Some(
+                self.presentation_clock
+                    .to_instant(frame_info.LastPresentTime),
+            ))
         };
         let release = unsafe { self.duplication.ReleaseFrame() }
             .with_context(|| "Failed to release a Desktop Duplication frame");
-        result?;
+        let captured_at = result?;
         release?;
-        Ok(frame_info.LastPresentTime != 0)
+        Ok(captured_at)
     }
 
     fn copy_desktop_texture(
@@ -595,6 +608,50 @@ impl DesktopDuplicationCapture {
 
     fn recycle_output_texture(&self, texture: ID3D11Texture2D) {
         self.texture_pool.recycle(texture);
+    }
+}
+
+struct QpcInstantMapper {
+    qpc_epoch: i64,
+    frequency: i64,
+    instant_epoch: Instant,
+}
+
+impl QpcInstantMapper {
+    fn new() -> eros::Result<Self> {
+        let mut frequency = 0;
+        unsafe { QueryPerformanceFrequency(&mut frequency) }
+            .with_context(|| "Failed to query the Windows performance counter frequency")?;
+        if frequency <= 0 {
+            eros::bail!("Windows performance counter returned an invalid frequency");
+        }
+        let mut qpc_epoch = 0;
+        unsafe { QueryPerformanceCounter(&mut qpc_epoch) }
+            .with_context(|| "Failed to query the Windows performance counter")?;
+        Ok(Self {
+            qpc_epoch,
+            frequency,
+            instant_epoch: Instant::now(),
+        })
+    }
+
+    fn to_instant(&self, counter: i64) -> Instant {
+        let ticks = counter.abs_diff(self.qpc_epoch);
+        let nanoseconds = u128::from(ticks)
+            .saturating_mul(1_000_000_000)
+            .checked_div(self.frequency as u128)
+            .unwrap_or(0)
+            .min(u64::MAX.into()) as u64;
+        let delta = Duration::from_nanos(nanoseconds);
+        if counter >= self.qpc_epoch {
+            self.instant_epoch
+                .checked_add(delta)
+                .unwrap_or(self.instant_epoch)
+        } else {
+            self.instant_epoch
+                .checked_sub(delta)
+                .unwrap_or(self.instant_epoch)
+        }
     }
 }
 
@@ -684,7 +741,9 @@ fn run_dynamic_desktop_duplication_capture(
         }
 
         let texture = capture.take_output_texture(output);
-        if !capture.acquire_latest_into(SHUTDOWN_POLL_INTERVAL_MS, texture.as_ref())? {
+        let Some(captured_at) =
+            capture.acquire_latest_into(SHUTDOWN_POLL_INTERVAL_MS, texture.as_ref())?
+        else {
             if let Some(texture) = texture {
                 capture.recycle_output_texture(texture);
             }
@@ -694,7 +753,7 @@ fn run_dynamic_desktop_duplication_capture(
             // thread immediately entering another blocking acquire.
             thread::sleep(Duration::from_millis(10));
             continue;
-        }
+        };
         let Some(texture) = texture else {
             trace!(
                 event = "windows_desktop_duplication_frame_dropped",
@@ -703,7 +762,7 @@ fn run_dynamic_desktop_duplication_capture(
             );
             continue;
         };
-        if !output.publish(texture, capture, frame_rate, false) {
+        if !output.publish(texture, capture, frame_rate, false, captured_at) {
             return Ok(());
         }
     }
@@ -742,7 +801,7 @@ fn run_fixed_desktop_duplication_capture(
             .as_ref()
             .cloned()
             .with_context(|| "Fixed Desktop Duplication snapshot texture is unavailable")?;
-        snapshot_valid |= capture.acquire_latest_into(0, Some(&snapshot))?;
+        snapshot_valid |= capture.acquire_latest_into(0, Some(&snapshot))?.is_some();
         if !snapshot_valid {
             continue;
         }
@@ -755,7 +814,7 @@ fn run_fixed_desktop_duplication_capture(
             continue;
         };
         unsafe { capture.context.CopyResource(&texture, &snapshot) };
-        if !output.publish(texture, capture, frame_rate, true) {
+        if !output.publish(texture, capture, frame_rate, true, Instant::now()) {
             return Ok(());
         }
     }
@@ -777,6 +836,7 @@ impl DesktopDuplicationCaptureOutput {
         capture: &DesktopDuplicationCapture,
         frame_rate: FrameRate,
         fixed_rate_paced: bool,
+        captured_at: Instant,
     ) -> bool {
         let probe = self.probe_frame_id.as_ref().map(|next_frame_id| {
             HostVideoFrameProbe::new(
@@ -795,6 +855,7 @@ impl DesktopDuplicationCaptureOutput {
             content_size: capture.size,
             frame_rate,
             fixed_rate_paced,
+            captured_at,
             probe,
         };
         let mut value = Ok(frame);
@@ -1059,6 +1120,7 @@ fn capture_frame_texture(
         },
         frame_rate,
         fixed_rate_paced: false,
+        captured_at: Instant::now(),
         probe,
     })
 }
