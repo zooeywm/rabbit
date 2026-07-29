@@ -61,7 +61,7 @@ use windows::{
         },
         System::{
             Com::CoTaskMemFree,
-            Variant::{VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL},
+            Variant::{VARIANT, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_I4, VT_I8, VT_UI4, VT_UI8},
         },
     },
     core::Interface as _,
@@ -1586,7 +1586,8 @@ fn configure_transform(
             )
             .with_context(|| "Failed to attach DXGI device manager to H.264 encoder")?;
     }
-    configure_codec_low_latency(transform, attribute_low_latency, frame_rate, bitrate)?;
+    let codec_properties =
+        configure_codec_low_latency(transform, attribute_low_latency, frame_rate, bitrate)?;
 
     let output_type = create_h264_output_type(size, frame_rate, bitrate)?;
     unsafe { transform.SetOutputType(0, &output_type, 0) }
@@ -1594,6 +1595,7 @@ fn configure_transform(
     let input_type = create_nv12_input_type(size, frame_rate)?;
     unsafe { transform.SetInputType(0, &input_type, 0) }
         .with_context(|| "Failed to configure H.264 encoder NV12 input type")?;
+    log_effective_codec_properties(transform, codec_properties)?;
     unsafe {
         transform
             .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
@@ -1605,12 +1607,18 @@ fn configure_transform(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct ConfiguredCodecProperties {
+    bitrate_bps: u32,
+    buffer_size_bytes: u32,
+}
+
 fn configure_codec_low_latency(
     transform: &IMFTransform,
     attribute_low_latency: bool,
     frame_rate: FrameRate,
     bitrate: VideoBitrate,
-) -> eros::Result<()> {
+) -> eros::Result<ConfiguredCodecProperties> {
     let bitrate_bps = bitrate.bits_per_second();
     let codec_api: ICodecAPI = transform
         .cast()
@@ -1672,7 +1680,88 @@ fn configure_codec_low_latency(
         buffer_size_bytes,
         "Configured Windows H.264 encoder for bounded real-time output without frame reordering"
     );
+    Ok(ConfiguredCodecProperties {
+        bitrate_bps,
+        buffer_size_bytes,
+    })
+}
+
+fn log_effective_codec_properties(
+    transform: &IMFTransform,
+    configured: ConfiguredCodecProperties,
+) -> eros::Result<()> {
+    let codec_api: ICodecAPI = transform
+        .cast()
+        .with_context(|| "Windows H.264 encoder does not expose ICodecAPI for property readback")?;
+    for (property_name, property, requested) in [
+        (
+            "gop_frames",
+            &CODECAPI_AVEncMPVGOPSize,
+            i64::from(H264_INFINITE_GOP_LENGTH),
+        ),
+        (
+            "cpb_bytes",
+            &CODECAPI_AVEncCommonBufferSize,
+            i64::from(configured.buffer_size_bytes),
+        ),
+        (
+            "mean_bitrate_bps",
+            &CODECAPI_AVEncCommonMeanBitRate,
+            i64::from(configured.bitrate_bps),
+        ),
+        ("b_frame_count", &CODECAPI_AVEncMPVDefaultBPictureCount, 0),
+        ("codec_low_latency", &CODECAPI_AVLowLatencyMode, 1),
+        ("common_low_latency", &CODECAPI_AVEncCommonLowLatency, 1),
+    ] {
+        log_codec_property(&codec_api, property_name, property, requested);
+    }
     Ok(())
+}
+
+fn log_codec_property(
+    codec_api: &ICodecAPI,
+    property_name: &'static str,
+    property: &windows::core::GUID,
+    requested: i64,
+) {
+    let effective = unsafe { codec_api.GetValue(property) }
+        .ok()
+        .and_then(|value| variant_numeric_value(&value));
+    let mut minimum = VARIANT::default();
+    let mut maximum = VARIANT::default();
+    let mut step = VARIANT::default();
+    let range_available =
+        unsafe { codec_api.GetParameterRange(property, &mut minimum, &mut maximum, &mut step) }
+            .is_ok();
+    info!(
+        event = "windows_h264_encoder_property_effective",
+        property_name,
+        requested,
+        effective,
+        minimum = range_available
+            .then(|| variant_numeric_value(&minimum))
+            .flatten(),
+        maximum = range_available
+            .then(|| variant_numeric_value(&maximum))
+            .flatten(),
+        step = range_available
+            .then(|| variant_numeric_value(&step))
+            .flatten(),
+        range_available,
+        "Read back a Windows H.264 encoder property"
+    );
+}
+
+fn variant_numeric_value(value: &VARIANT) -> Option<i64> {
+    let body = unsafe { &*value.Anonymous.Anonymous };
+    match body.vt {
+        VT_UI4 => Some(i64::from(unsafe { body.Anonymous.ulVal })),
+        VT_I4 => Some(i64::from(unsafe { body.Anonymous.lVal })),
+        VT_UI8 => i64::try_from(unsafe { body.Anonymous.ullVal }).ok(),
+        VT_I8 => Some(unsafe { body.Anonymous.llVal }),
+        VT_BOOL => Some(i64::from(unsafe { body.Anonymous.boolVal.0 != 0 })),
+        _ => None,
+    }
 }
 
 fn configure_cpb_buffer(
@@ -2102,7 +2191,7 @@ mod tests {
 
     use super::{
         EncoderTimeline, FixedFrameClock, H264_INFINITE_GOP_LENGTH, WindowsEncoderBackend,
-        cpb_size_bytes, rtp_timestamp_from_hns,
+        cpb_size_bytes, rtp_timestamp_from_hns, variant_bool, variant_numeric_value,
     };
 
     #[test]
@@ -2117,6 +2206,18 @@ mod tests {
         assert_eq!(cpb_size_bytes(20_000_000, frame_rate, 1), 20_834);
         assert_eq!(cpb_size_bytes(20_000_000, frame_rate, 2), 41_667);
         assert_eq!(cpb_size_bytes(20_000_000, frame_rate, 4), 83_334);
+    }
+
+    #[test]
+    fn codec_property_readback_accepts_unsigned_and_boolean_variants() {
+        assert_eq!(
+            variant_numeric_value(&windows::Win32::System::Variant::VARIANT::from(
+                74_000_000_u32
+            )),
+            Some(74_000_000)
+        );
+        assert_eq!(variant_numeric_value(&variant_bool(true)), Some(1));
+        assert_eq!(variant_numeric_value(&variant_bool(false)), Some(0));
     }
 
     #[test]
