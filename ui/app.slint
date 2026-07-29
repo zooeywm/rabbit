@@ -35,6 +35,57 @@ export {
     RemoteScreenItem,
 }from "./types.slint";
 
+component RemoteVideoInput inherits FocusScope {
+    callback pointer-moved(float, float, float, float, float, float);
+    callback mouse-button(PointerEventButton, bool);
+    callback keyboard(string, bool, bool);
+
+    key-pressed(event) => {
+        root.keyboard(event.text, true, event.repeat);
+        accept
+    }
+    key-released(event) => {
+        root.keyboard(event.text, false, false);
+        accept
+    }
+
+    TouchArea {
+        property <length> previous-x;
+        property <length> previous-y;
+        property <bool> previous-valid;
+
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.focus();
+                self.previous-x = self.mouse-x;
+                self.previous-y = self.mouse-y;
+                self.previous-valid = true;
+                root.mouse-button(event.button, true);
+            } else if event.kind == PointerEventKind.up {
+                root.mouse-button(event.button, false);
+            } else if event.kind == PointerEventKind.cancel {
+                self.previous-valid = false;
+            } else if event.kind == PointerEventKind.move {
+                root.pointer-moved(
+                    self.mouse-x / 1px,
+                    self.mouse-y / 1px,
+                    self.previous-valid
+                    ? (self.mouse-x - self.previous-x) / 1px
+                    : 0,
+                    self.previous-valid
+                    ? (self.mouse-y - self.previous-y) / 1px
+                    : 0,
+                    self.width / 1px,
+                    self.height / 1px,
+                );
+                self.previous-x = self.mouse-x;
+                self.previous-y = self.mouse-y;
+                self.previous-valid = true;
+            }
+        }
+    }
+}
+
 export component RabbitWindow inherits Window {
     title: "Rabbit";
     preferred-width: 1000px;
@@ -61,16 +112,16 @@ export component RabbitWindow inherits Window {
         root.page == AppPage.streaming && root.video-fill-window;
     out property <length> video-viewport-x: root.video-fill-window-active
         ? 0px
-        : streaming-page.absolute-position.x;
+        : video-surface.absolute-position.x;
     out property <length> video-viewport-y: root.video-fill-window-active
         ? 0px
-        : streaming-page.absolute-position.y + 44px;
+        : video-surface.absolute-position.y;
     out property <length> video-viewport-width: root.video-fill-window-active
         ? root.width
-        : streaming-page.width;
+        : video-surface.width;
     out property <length> video-viewport-height: root.video-fill-window-active
         ? root.height
-        : max(0px, streaming-page.height - 44px);
+        : video-surface.height;
     out property <bool> video-viewport-visible: root.page == AppPage.streaming;
     in property <[ConnectionRequestItem]> connection-requests;
     in property <[ConnectedDeviceItem]> connected-devices;
@@ -459,52 +510,24 @@ export component RabbitWindow inherits Window {
                             vertical-stretch: 1;
                             border-radius: root.video-fill-window-active ? 0px : 10px;
 
-                            input-focus := FocusScope {
+                            if !root.video-fill-window-active: RemoteVideoInput {
                                 width: 100%;
                                 height: 100%;
-                                key-pressed(event) => {
-                                    root.remote-keyboard(event.text, true, event.repeat);
-                                    accept
+                                pointer-moved(x, y, delta-x, delta-y, viewport-width, viewport-height, ) => {
+                                    root.remote-pointer-moved(
+                                        x,
+                                        y,
+                                        delta-x,
+                                        delta-y,
+                                        viewport-width,
+                                        viewport-height,
+                                    );
                                 }
-                                key-released(event) => {
-                                    root.remote-keyboard(event.text, false, false);
-                                    accept
+                                mouse-button(button, pressed) => {
+                                    root.remote-mouse-button(button, pressed);
                                 }
-
-                                TouchArea {
-                                    property <length> previous-x;
-                                    property <length> previous-y;
-                                    property <bool> previous-valid;
-
-                                    pointer-event(event) => {
-                                        if event.kind == PointerEventKind.down {
-                                            input-focus.focus();
-                                            self.previous-x = self.mouse-x;
-                                            self.previous-y = self.mouse-y;
-                                            self.previous-valid = true;
-                                            root.remote-mouse-button(event.button, true);
-                                        } else if event.kind == PointerEventKind.up {
-                                            root.remote-mouse-button(event.button, false);
-                                        } else if event.kind == PointerEventKind.cancel {
-                                            self.previous-valid = false;
-                                        } else if event.kind == PointerEventKind.move {
-                                            root.remote-pointer-moved(
-                                                self.mouse-x / 1px,
-                                                self.mouse-y / 1px,
-                                                self.previous-valid
-                                                ? (self.mouse-x - self.previous-x) / 1px
-                                                : 0,
-                                                self.previous-valid
-                                                ? (self.mouse-y - self.previous-y) / 1px
-                                                : 0,
-                                                self.width / 1px,
-                                                self.height / 1px,
-                                            );
-                                            self.previous-x = self.mouse-x;
-                                            self.previous-y = self.mouse-y;
-                                            self.previous-valid = true;
-                                        }
-                                    }
+                                keyboard(text, pressed, repeat) => {
+                                    root.remote-keyboard(text, pressed, repeat);
                                 }
                             }
                         }
@@ -544,6 +567,29 @@ export component RabbitWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    if root.video-fill-window-active: RemoteVideoInput {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        pointer-moved(x, y, delta-x, delta-y, viewport-width, viewport-height, ) => {
+            root.remote-pointer-moved(
+                x,
+                y,
+                delta-x,
+                delta-y,
+                viewport-width,
+                viewport-height,
+            );
+        }
+        mouse-button(button, pressed) => {
+            root.remote-mouse-button(button, pressed);
+        }
+        keyboard(text, pressed, repeat) => {
+            root.remote-keyboard(text, pressed, repeat);
         }
     }
 }

@@ -521,6 +521,23 @@ mod tests {
     }
 
     #[test]
+    fn fill_window_mapping_uses_the_whole_window_input_surface() {
+        let video = PixelSize {
+            width: 1920,
+            height: 1080,
+        };
+
+        assert_eq!(
+            map_viewport_position(500.0, 340.0, 1000.0, 680.0, video),
+            Some(NormalizedPosition { x: 32768, y: 32768 })
+        );
+        assert_eq!(
+            map_viewport_position(500.0, 40.0, 1000.0, 680.0, video),
+            None
+        );
+    }
+
+    #[test]
     fn selected_screen_maps_into_virtual_desktop() {
         let screens = [screen(0, 0, 0, 1920, 1080), screen(1, 1920, 0, 1920, 1080)];
         let mapped =
