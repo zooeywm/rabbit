@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::HashMap,
     future::Future,
     rc::Rc,
     time::{Duration, Instant},
@@ -229,6 +229,7 @@ where
                 if !encoder.uses_capture_device(&frame)? {
                     let sequence = encoder.sequence;
                     let timeline = encoder.timeline.clone();
+                    let next_frame_id = encoder.next_frame_id;
                     let mut replacement = MfH264Encoder::new(
                         &frame,
                         frame_rate,
@@ -241,6 +242,7 @@ where
                     )?;
                     replacement.sequence = sequence;
                     replacement.timeline = timeline;
+                    replacement.next_frame_id = next_frame_id;
                     replacement.request_key_frame();
                     encoder = replacement;
                     info!(
@@ -316,7 +318,8 @@ struct MfH264Encoder {
     latest_input: Option<Rc<WindowsFramePipelineFrame>>,
     latest_capture_pending: bool,
     latest_probe: Option<HostVideoFrameProbe>,
-    pending_inputs: VecDeque<PendingInput>,
+    pending_inputs: HashMap<i64, PendingInput>,
+    next_frame_id: u64,
     probe_reporter: Option<HostVideoProbeReporter>,
 }
 
@@ -327,6 +330,7 @@ struct EncodedOutput {
 }
 
 struct PendingInput {
+    frame_id: u64,
     sample_time_hns: i64,
     texture: Nv12InputTexture,
     probe: Option<HostVideoFrameProbe>,
@@ -487,7 +491,8 @@ impl MfH264Encoder {
             latest_input: None,
             latest_capture_pending: false,
             latest_probe: None,
-            pending_inputs: VecDeque::new(),
+            pending_inputs: HashMap::new(),
+            next_frame_id: 0,
             probe_reporter,
         })
     }
@@ -643,6 +648,8 @@ impl MfH264Encoder {
         }
 
         let sample_time_hns = self.timeline.next_sample_time_hns(captured_at);
+        let frame_id = self.next_frame_id;
+        self.next_frame_id = self.next_frame_id.saturating_add(1);
         let sample = create_input_sample(texture.texture())?;
         unsafe {
             sample.SetSampleTime(sample_time_hns)?;
@@ -670,15 +677,27 @@ impl MfH264Encoder {
         debug_assert!(
             !self
                 .pending_inputs
-                .iter()
+                .values()
                 .any(|pending| pending.texture.slot_id() == texture_slot_id),
             "one NV12 texture slot cannot belong to two pending encoder inputs"
         );
-        self.pending_inputs.push_back(PendingInput {
-            sample_time_hns,
-            texture,
-            probe,
-        });
+        if self
+            .pending_inputs
+            .insert(
+                sample_time_hns,
+                PendingInput {
+                    frame_id,
+                    sample_time_hns,
+                    texture,
+                    probe,
+                },
+            )
+            .is_some()
+        {
+            eros::bail!(
+                "Windows H.264 encoder reused input PTS {sample_time_hns} for frame {frame_id}"
+            );
+        }
         let mut produced_output = false;
         if self.transform_event_generator.is_some() {
             self.async_accepts_input = false;
@@ -723,11 +742,16 @@ impl MfH264Encoder {
                 match self.next_async_encoder_event().await? {
                     AsyncEncoderEvent::HaveOutput => self.receive_packets(send_packet).await?,
                     AsyncEncoderEvent::NeedInput => self.async_accepts_input = true,
-                    AsyncEncoderEvent::DrainComplete => return Ok(()),
+                    AsyncEncoderEvent::DrainComplete => {
+                        self.discard_pending_inputs("drain-complete");
+                        return Ok(());
+                    }
                 }
             }
         }
-        self.receive_packets(send_packet).await
+        self.receive_packets(send_packet).await?;
+        self.discard_pending_inputs("synchronous-drain-complete");
+        Ok(())
     }
 
     async fn wait_for_input_texture<SendPacket, SendFuture>(
@@ -928,33 +952,21 @@ impl MfH264Encoder {
                     let Some(sample) = sample else {
                         return Ok(None);
                     };
-                    let output_sample_time_hns = unsafe { sample.GetSampleTime() }.ok();
-                    let pending_index = output_sample_time_hns.and_then(|sample_time| {
-                        self.pending_inputs
-                            .iter()
-                            .position(|pending| pending.sample_time_hns == sample_time)
-                    });
-                    if output_sample_time_hns.is_some() && pending_index.is_none() {
-                        warn!(
-                            event = "windows_h264_encoder_output_pts_unmatched",
-                            output_sample_time_hns,
-                            oldest_pending_sample_time_hns = self
-                                .pending_inputs
-                                .front()
-                                .map(|pending| pending.sample_time_hns),
-                            "Falling back to input order for an unmatched encoder output PTS"
-                        );
-                    }
+                    let output_sample_time_hns = unsafe { sample.GetSampleTime() }
+                        .with_context(|| "Windows H.264 encoder output has no sample PTS")?;
                     let PendingInput {
+                        frame_id,
                         sample_time_hns,
                         texture,
                         mut probe,
                     } = self
                         .pending_inputs
-                        .remove(pending_index.unwrap_or(0))
-                        .with_context(
-                            || "Windows H.264 encoder produced output without a pending input",
-                        )?;
+                        .remove(&output_sample_time_hns)
+                        .with_context(|| {
+                            format!(
+                                "Windows H.264 encoder output PTS {output_sample_time_hns} has no matching pending input"
+                            )
+                        })?;
                     let texture_slot_id = texture.slot_id();
                     drop(texture);
                     if let Some(probe) = &mut probe {
@@ -962,6 +974,7 @@ impl MfH264Encoder {
                     }
                     trace!(
                         event = "windows_h264_encoder_input_completed",
+                        frame_id,
                         sample_time_hns,
                         output_sample_time_hns,
                         texture_slot_id,
@@ -981,6 +994,8 @@ impl MfH264Encoder {
                         output_status = output.dwStatus,
                         process_status = status,
                         attempt = stream_change_count + 1,
+                        pending_inputs = self.pending_inputs.len(),
+                        pending_policy = "retain-and-match-by-pts",
                         "Windows H.264 encoder requested output type renegotiation"
                     );
                     self.renegotiate_output_type()?;
@@ -1107,6 +1122,26 @@ impl MfH264Encoder {
         Ok(())
     }
 
+    fn discard_pending_inputs(&mut self, reason: &'static str) {
+        if self.pending_inputs.is_empty() {
+            return;
+        }
+        let mut frame_ids = self
+            .pending_inputs
+            .values()
+            .map(|pending| pending.frame_id)
+            .collect::<Vec<_>>();
+        frame_ids.sort_unstable();
+        warn!(
+            event = "windows_h264_encoder_pending_inputs_discarded",
+            reason,
+            pending_inputs = self.pending_inputs.len(),
+            frame_ids = ?frame_ids,
+            "Released Windows H.264 inputs that produced no output"
+        );
+        self.pending_inputs.clear();
+    }
+
     fn force_key_frame(&self) -> eros::Result<()> {
         let codec_api: ICodecAPI = self
             .transform
@@ -1159,6 +1194,7 @@ impl MfH264Encoder {
 
 impl Drop for MfH264Encoder {
     fn drop(&mut self) {
+        self.discard_pending_inputs("encoder-drop");
         if let Some(reporter) = &mut self.probe_reporter {
             reporter.finish();
         }
