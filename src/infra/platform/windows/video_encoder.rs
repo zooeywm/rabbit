@@ -39,7 +39,7 @@ use windows::{
             CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
             CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, IMFActivate,
             IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFDXGIDeviceManager,
-            IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
+            IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform,
             METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
             MF_E_NO_MORE_TYPES, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
             MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE,
@@ -327,6 +327,16 @@ struct EncodedOutput {
     sample: IMFSample,
     sample_time_hns: i64,
     probe: Option<HostVideoFrameProbe>,
+}
+
+struct PacketizedOutput {
+    packets: Vec<WindowsVideoPacket>,
+    rtp_packets: u64,
+    rtp_bytes: u64,
+    output_size: usize,
+    annex_b: bool,
+    first_bytes: [u8; 16],
+    first_bytes_len: usize,
 }
 
 struct PendingInput {
@@ -801,46 +811,57 @@ impl MfH264Encoder {
             let Some(mut output) = self.process_output()? else {
                 return Ok(());
             };
-            let access_units = sample_to_bytes(output.sample)?;
+            let timestamp = rtp_timestamp_from_hns(output.sample_time_hns);
+            let packetized = with_sample_bytes(&output.sample, |access_units| {
+                let mut rtp_packets = 0u64;
+                let mut rtp_bytes = 0u64;
+                let mut packets = Vec::new();
+                for access_unit in split_annex_b_access_units(access_units) {
+                    let nals = split_h264_nals(access_unit);
+                    for (index, nal) in nals.iter().enumerate() {
+                        let marker = index + 1 == nals.len();
+                        for packet in packetize_h264_nal(
+                            nal,
+                            timestamp,
+                            &mut self.sequence,
+                            self.max_packet_size,
+                            marker,
+                        )? {
+                            rtp_packets = rtp_packets.saturating_add(1);
+                            rtp_bytes = rtp_bytes
+                                .saturating_add(u64::try_from(packet.len()).unwrap_or(u64::MAX));
+                            packets.push(WindowsVideoPacket(packet));
+                        }
+                    }
+                }
+                let first_bytes_len = access_units.len().min(16);
+                let mut first_bytes = [0; 16];
+                first_bytes[..first_bytes_len].copy_from_slice(&access_units[..first_bytes_len]);
+                Ok(PacketizedOutput {
+                    packets,
+                    rtp_packets,
+                    rtp_bytes,
+                    output_size: access_units.len(),
+                    annex_b: find_start_code(access_units, 0).is_some(),
+                    first_bytes,
+                    first_bytes_len,
+                })
+            })?;
             if !self.logged_output_format {
-                let first_bytes = &access_units[..access_units.len().min(16)];
                 debug!(
                     event = "windows_h264_output_format",
-                    output_size = access_units.len(),
-                    annex_b = find_start_code(&access_units, 0).is_some(),
-                    first_bytes = ?first_bytes,
+                    output_size = packetized.output_size,
+                    annex_b = packetized.annex_b,
+                    first_bytes = ?&packetized.first_bytes[..packetized.first_bytes_len],
                     "Received first Windows H.264 encoder output"
                 );
                 self.logged_output_format = true;
             }
-            let mut rtp_packets = 0u64;
-            let mut rtp_bytes = 0u64;
-            let mut packet_batch = Vec::new();
-            let timestamp = rtp_timestamp_from_hns(output.sample_time_hns);
-            for access_unit in split_annex_b_access_units(&access_units) {
-                let nals = split_h264_nals(access_unit);
-                for (index, nal) in nals.iter().enumerate() {
-                    let marker = index + 1 == nals.len();
-                    let packets = packetize_h264_nal(
-                        nal,
-                        timestamp,
-                        &mut self.sequence,
-                        self.max_packet_size,
-                        marker,
-                    )?;
-                    for packet in packets {
-                        rtp_packets = rtp_packets.saturating_add(1);
-                        rtp_bytes = rtp_bytes
-                            .saturating_add(u64::try_from(packet.len()).unwrap_or(u64::MAX));
-                        packet_batch.push(WindowsVideoPacket(packet));
-                    }
-                }
-            }
-            if !packet_batch.is_empty() {
-                send_packet(packet_batch).await?;
+            if !packetized.packets.is_empty() {
+                send_packet(packetized.packets).await?;
             }
             if let (Some(reporter), Some(probe)) = (&mut self.probe_reporter, output.probe.take()) {
-                reporter.record_frame(probe, rtp_packets, rtp_bytes);
+                reporter.record_frame(probe, packetized.rtp_packets, packetized.rtp_bytes);
             }
             if self.transform_event_generator.is_some() {
                 return Ok(());
@@ -2107,24 +2128,28 @@ fn variant_bool(value: bool) -> VARIANT {
     variant
 }
 
-fn sample_to_bytes(sample: IMFSample) -> eros::Result<Vec<u8>> {
+fn with_sample_bytes<T>(
+    sample: &IMFSample,
+    operation: impl FnOnce(&[u8]) -> eros::Result<T>,
+) -> eros::Result<T> {
     let buffer = unsafe { sample.ConvertToContiguousBuffer() }
         .with_context(|| "Failed to get contiguous H.264 encoder output buffer")?;
-    media_buffer_to_bytes(&buffer)
-}
-
-fn media_buffer_to_bytes(buffer: &IMFMediaBuffer) -> eros::Result<Vec<u8>> {
     let mut data = std::ptr::null_mut();
     let mut length = 0;
     unsafe { buffer.Lock(&mut data, None, Some(&mut length)) }
         .with_context(|| "Failed to lock H.264 encoder output buffer")?;
     let bytes = if length == 0 {
-        Vec::new()
+        &[]
     } else {
-        unsafe { std::slice::from_raw_parts(data, length as usize) }.to_vec()
+        if data.is_null() {
+            let _ = unsafe { buffer.Unlock() };
+            eros::bail!("H.264 encoder output buffer returned a null data pointer");
+        }
+        unsafe { std::slice::from_raw_parts(data, length as usize) }
     };
+    let result = operation(bytes);
     unsafe { buffer.Unlock() }.with_context(|| "Failed to unlock H.264 encoder output buffer")?;
-    Ok(bytes)
+    result
 }
 
 fn split_annex_b_access_units(bytes: &[u8]) -> Vec<&[u8]> {
