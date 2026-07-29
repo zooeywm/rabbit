@@ -32,9 +32,11 @@ use windows::{
             },
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-                CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT,
-                DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
-                IDXGIOutput, IDXGIOutput1, IDXGIOutput5, IDXGIOutputDuplication, IDXGIResource,
+                CreateDXGIFactory1, DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST,
+                DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_NOT_FOUND,
+                DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter, IDXGIAdapter1,
+                IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput1, IDXGIOutput5,
+                IDXGIOutputDuplication, IDXGIResource,
             },
         },
         System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
@@ -465,6 +467,9 @@ fn acquire_desktop_duplication(
 }
 
 struct DesktopDuplicationCapture {
+    monitor: WindowsMonitorHandle,
+    frame_rate_mode: VideoFrameRateMode,
+    factory: IDXGIFactory1,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     size: crate::kernel::geometry::PixelSize,
@@ -480,7 +485,7 @@ impl DesktopDuplicationCapture {
     ) -> eros::Result<Self> {
         const TEXTURE_COUNT: usize = 4;
 
-        let (adapter, output) = find_dxgi_output(monitor)?;
+        let (factory, adapter, output) = find_dxgi_output(monitor)?;
         let device = create_d3d_device_for_adapter(&adapter)?;
         let context = unsafe { device.GetImmediateContext() }
             .with_context(|| "Failed to get Desktop Duplication D3D11 context")?;
@@ -519,6 +524,9 @@ impl DesktopDuplicationCapture {
             "Selected Windows screen capture pipeline"
         );
         Ok(Self {
+            monitor,
+            frame_rate_mode,
+            factory,
             context,
             duplication,
             size,
@@ -532,7 +540,12 @@ impl DesktopDuplicationCapture {
         &mut self,
         timeout_ms: u32,
         target: Option<&ID3D11Texture2D>,
-    ) -> eros::Result<Option<Instant>> {
+    ) -> eros::Result<DesktopDuplicationAcquire> {
+        if !unsafe { self.factory.IsCurrent() }.as_bool() {
+            return Ok(DesktopDuplicationAcquire::Reinitialize(
+                "dxgi-factory-stale",
+            ));
+        }
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         match unsafe {
@@ -540,7 +553,14 @@ impl DesktopDuplicationCapture {
                 .AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
         } {
             Ok(()) => {}
-            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
+            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                return Ok(DesktopDuplicationAcquire::NoFrame);
+            }
+            Err(error) if desktop_duplication_reinitialize_error(error.code()) => {
+                return Ok(DesktopDuplicationAcquire::Reinitialize(
+                    "acquire-next-frame",
+                ));
+            }
             Err(error) => {
                 Err(error).with_context(|| "Failed to acquire a Desktop Duplication frame")?;
                 unreachable!()
@@ -548,32 +568,42 @@ impl DesktopDuplicationCapture {
         }
 
         let result = if frame_info.LastPresentTime == 0 {
-            Ok(None)
+            Ok(DesktopDuplicationAcquire::NoFrame)
         } else if let Some(target) = target {
-            self.copy_desktop_texture(resource, target).map(|()| {
-                Some(
-                    self.presentation_clock
-                        .to_instant(frame_info.LastPresentTime),
-                )
+            self.copy_desktop_texture(resource, target).map(|copied| {
+                if copied {
+                    DesktopDuplicationAcquire::Frame(
+                        self.presentation_clock
+                            .to_instant(frame_info.LastPresentTime),
+                    )
+                } else {
+                    DesktopDuplicationAcquire::Reinitialize("desktop-mode-changed")
+                }
             })
         } else {
-            Ok(Some(
+            Ok(DesktopDuplicationAcquire::Frame(
                 self.presentation_clock
                     .to_instant(frame_info.LastPresentTime),
             ))
         };
-        let release = unsafe { self.duplication.ReleaseFrame() }
-            .with_context(|| "Failed to release a Desktop Duplication frame");
-        let captured_at = result?;
-        release?;
-        Ok(captured_at)
+        let result = result?;
+        match unsafe { self.duplication.ReleaseFrame() } {
+            Ok(()) => Ok(result),
+            Err(error) if desktop_duplication_reinitialize_error(error.code()) => {
+                Ok(DesktopDuplicationAcquire::Reinitialize("release-frame"))
+            }
+            Err(error) => {
+                Err(error).with_context(|| "Failed to release a Desktop Duplication frame")?;
+                unreachable!()
+            }
+        }
     }
 
     fn copy_desktop_texture(
         &self,
         resource: Option<IDXGIResource>,
         target: &ID3D11Texture2D,
-    ) -> eros::Result<()> {
+    ) -> eros::Result<bool> {
         let resource =
             resource.with_context(|| "Desktop Duplication returned no desktop resource")?;
         let source: ID3D11Texture2D = resource
@@ -585,15 +615,10 @@ impl DesktopDuplicationCapture {
             || source_desc.Height != self.size.height
             || source_desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM
         {
-            eros::bail!(
-                "Desktop Duplication texture changed to {}x{} {:?}",
-                source_desc.Width,
-                source_desc.Height,
-                source_desc.Format
-            );
+            return Ok(false);
         }
         unsafe { self.context.CopyResource(target, &source) };
-        Ok(())
+        Ok(true)
     }
 
     fn take_output_texture(
@@ -609,6 +634,29 @@ impl DesktopDuplicationCapture {
     fn recycle_output_texture(&self, texture: ID3D11Texture2D) {
         self.texture_pool.recycle(texture);
     }
+
+    fn reinitialize(&mut self) -> eros::Result<()> {
+        let replacement = Self::new(self.monitor, self.frame_rate_mode)?;
+        *self = replacement;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopDuplicationAcquire {
+    NoFrame,
+    Frame(Instant),
+    Reinitialize(&'static str),
+}
+
+fn desktop_duplication_reinitialize_error(code: windows::core::HRESULT) -> bool {
+    matches!(
+        code,
+        DXGI_ERROR_ACCESS_LOST
+            | DXGI_ERROR_ACCESS_DENIED
+            | DXGI_ERROR_DEVICE_REMOVED
+            | DXGI_ERROR_DEVICE_RESET
+    )
 }
 
 struct QpcInstantMapper {
@@ -741,19 +789,28 @@ fn run_dynamic_desktop_duplication_capture(
         }
 
         let texture = capture.take_output_texture(output);
-        let Some(captured_at) =
-            capture.acquire_latest_into(SHUTDOWN_POLL_INTERVAL_MS, texture.as_ref())?
-        else {
-            if let Some(texture) = texture {
-                capture.recycle_output_texture(texture);
-            }
-            // AcquireNextFrame holds the D3D11 device's unfair multithread lock
-            // for the entire timeout. Yield it while the desktop is idle so an
-            // on-demand IDR or encoder teardown is not starved by the capture
-            // thread immediately entering another blocking acquire.
-            thread::sleep(Duration::from_millis(10));
-            continue;
-        };
+        let captured_at =
+            match capture.acquire_latest_into(SHUTDOWN_POLL_INTERVAL_MS, texture.as_ref())? {
+                DesktopDuplicationAcquire::Frame(captured_at) => captured_at,
+                DesktopDuplicationAcquire::NoFrame => {
+                    if let Some(texture) = texture {
+                        capture.recycle_output_texture(texture);
+                    }
+                    // AcquireNextFrame holds the D3D11 device's unfair multithread lock
+                    // for the entire timeout. Yield it while the desktop is idle so an
+                    // on-demand IDR or encoder teardown is not starved by the capture
+                    // thread immediately entering another blocking acquire.
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                DesktopDuplicationAcquire::Reinitialize(reason) => {
+                    drop(texture);
+                    if !reinitialize_desktop_duplication_capture(capture, output, reason) {
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
         let Some(texture) = texture else {
             trace!(
                 event = "windows_desktop_duplication_frame_dropped",
@@ -764,6 +821,45 @@ fn run_dynamic_desktop_duplication_capture(
         };
         if !output.publish(texture, capture, frame_rate, false, captured_at) {
             return Ok(());
+        }
+    }
+}
+
+fn reinitialize_desktop_duplication_capture(
+    capture: &mut DesktopDuplicationCapture,
+    output: &DesktopDuplicationCaptureOutput,
+    reason: &'static str,
+) -> bool {
+    let mut attempt = 0_u32;
+    loop {
+        if output.shutdown_requested() {
+            return false;
+        }
+        attempt = attempt.saturating_add(1);
+        match capture.reinitialize() {
+            Ok(()) => {
+                info!(
+                    event = "windows_desktop_duplication_reinitialized",
+                    screen_id = output.screen_id.get(),
+                    reason,
+                    attempt,
+                    width = capture.size.width,
+                    height = capture.size.height,
+                    "Reinitialized Windows Desktop Duplication capture"
+                );
+                return true;
+            }
+            Err(error) => {
+                warn!(
+                    event = "windows_desktop_duplication_reinitialize_retry",
+                    screen_id = output.screen_id.get(),
+                    reason,
+                    attempt,
+                    error = ?error,
+                    "Windows Desktop Duplication is temporarily unavailable; retrying"
+                );
+                thread::sleep(Duration::from_millis(250));
+            }
         }
     }
 }
@@ -801,7 +897,17 @@ fn run_fixed_desktop_duplication_capture(
             .as_ref()
             .cloned()
             .with_context(|| "Fixed Desktop Duplication snapshot texture is unavailable")?;
-        snapshot_valid |= capture.acquire_latest_into(0, Some(&snapshot))?.is_some();
+        match capture.acquire_latest_into(0, Some(&snapshot))? {
+            DesktopDuplicationAcquire::Frame(_) => snapshot_valid = true,
+            DesktopDuplicationAcquire::NoFrame => {}
+            DesktopDuplicationAcquire::Reinitialize(reason) => {
+                if !reinitialize_desktop_duplication_capture(capture, output, reason) {
+                    return Ok(());
+                }
+                snapshot_valid = false;
+                continue;
+            }
+        }
         if !snapshot_valid {
             continue;
         }
@@ -988,7 +1094,9 @@ impl FixedCaptureClock {
     }
 }
 
-fn find_dxgi_output(monitor: WindowsMonitorHandle) -> eros::Result<(IDXGIAdapter1, IDXGIOutput)> {
+fn find_dxgi_output(
+    monitor: WindowsMonitorHandle,
+) -> eros::Result<(IDXGIFactory1, IDXGIAdapter1, IDXGIOutput)> {
     let factory: IDXGIFactory1 =
         unsafe { CreateDXGIFactory1() }.with_context(|| "Failed to create DXGI factory")?;
     for adapter_index in 0.. {
@@ -1012,7 +1120,7 @@ fn find_dxgi_output(monitor: WindowsMonitorHandle) -> eros::Result<(IDXGIAdapter
             let description = unsafe { output.GetDesc() }
                 .with_context(|| "Failed to query DXGI output description")?;
             if description.Monitor == monitor.0 {
-                return Ok((adapter, output));
+                return Ok((factory, adapter, output));
             }
         }
     }
@@ -1144,7 +1252,15 @@ mod tests {
 
     use crate::kernel::{geometry::FrameRate, video_encoder::VideoFrameRateMode};
 
-    use super::{FixedCaptureClock, WindowsCaptureBackend, WindowsScreenCaptureManagerState};
+    use windows::Win32::Graphics::Dxgi::{
+        DXGI_ERROR_ACCESS_DENIED, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
+        DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_INVALID_CALL,
+    };
+
+    use super::{
+        FixedCaptureClock, WindowsCaptureBackend, WindowsScreenCaptureManagerState,
+        desktop_duplication_reinitialize_error,
+    };
 
     #[test]
     fn fixed_capture_clock_keeps_absolute_deadlines() {
@@ -1195,5 +1311,20 @@ mod tests {
         assert_eq!(configured.frame_rate, target);
         assert_eq!(fallback.frame_rate_mode, VideoFrameRateMode::Dynamic);
         assert_eq!(fallback.frame_rate, source);
+    }
+
+    #[test]
+    fn desktop_duplication_reinitializes_only_for_recoverable_dxgi_state() {
+        for code in [
+            DXGI_ERROR_ACCESS_LOST,
+            DXGI_ERROR_ACCESS_DENIED,
+            DXGI_ERROR_DEVICE_REMOVED,
+            DXGI_ERROR_DEVICE_RESET,
+        ] {
+            assert!(desktop_duplication_reinitialize_error(code));
+        }
+        assert!(!desktop_duplication_reinitialize_error(
+            DXGI_ERROR_INVALID_CALL
+        ));
     }
 }

@@ -225,6 +225,30 @@ where
         match event {
             Event::Frame(Some(frame)) => {
                 let frame = frame?;
+                if !encoder.uses_capture_device(&frame)? {
+                    let sequence = encoder.sequence;
+                    let timeline = encoder.timeline.clone();
+                    let mut replacement = MfH264Encoder::new(
+                        &frame,
+                        frame_rate,
+                        parameters.frame_rate_mode,
+                        parameters.bitrate,
+                        max_packet_size,
+                    )
+                    .with_context(
+                        || "Failed to rebuild the Windows Media Foundation H.264 encoder",
+                    )?;
+                    replacement.sequence = sequence;
+                    replacement.timeline = timeline;
+                    replacement.request_key_frame();
+                    encoder = replacement;
+                    info!(
+                        event = "windows_h264_encoder_reinitialized",
+                        screen_id = frame.screen_id.0,
+                        reason = "capture-d3d11-device-changed",
+                        "Reinitialized Windows H.264 encoder after Desktop Duplication recovery"
+                    );
+                }
                 if fixed_clock.is_some() {
                     encoder.update_latest_frame(&frame)?;
                 } else {
@@ -296,6 +320,7 @@ struct PendingInput {
     probe: Option<HostVideoFrameProbe>,
 }
 
+#[derive(Clone)]
 struct EncoderTimeline {
     mode: VideoFrameRateMode,
     frame_duration_hns: i64,
@@ -456,6 +481,12 @@ impl MfH264Encoder {
 
     fn request_key_frame(&mut self) {
         self.force_key_frame = true;
+    }
+
+    fn uses_capture_device(&self, frame: &WindowsFramePipelineFrame) -> eros::Result<bool> {
+        let device = unsafe { frame.texture().GetDevice() }
+            .with_context(|| "Failed to query the recovered Windows capture D3D11 device")?;
+        Ok(self.d3d.as_raw() == device.as_raw())
     }
 
     async fn encode_frame<SendPacket, SendFuture>(
