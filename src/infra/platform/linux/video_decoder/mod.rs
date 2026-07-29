@@ -553,13 +553,13 @@ fn h264_access_unit_caps() -> gstreamer::Caps {
 }
 
 fn decoded_dma_buf_caps() -> gstreamer::Caps {
+    // Do not constrain colorimetry here. VA decoders do not consistently
+    // propagate H.264 VUI colorimetry onto DMA_DRM caps, and requiring the
+    // field makes otherwise valid Linux-host streams fail negotiation. The
+    // renderer applies the stream-wide BT.709 limited-range contract.
     gstreamer::Caps::builder("video/x-raw")
         .features(["memory:DMABuf"])
         .field("format", "DMA_DRM")
-        .field(
-            "colorimetry",
-            crate::infra::platform::video_color::gstreamer_colorimetry(),
-        )
         .build()
 }
 
@@ -672,11 +672,9 @@ mod tests {
                 .expect("Decoded output caps should contain a format"),
             "DMA_DRM"
         );
-        assert_eq!(
-            structure
-                .get::<&str>("colorimetry")
-                .expect("Decoded output caps should constrain colorimetry"),
-            "bt709"
+        assert!(
+            !structure.has_field("colorimetry"),
+            "VA decoders do not reliably expose colorimetry on DMA-BUF caps"
         );
     }
 
