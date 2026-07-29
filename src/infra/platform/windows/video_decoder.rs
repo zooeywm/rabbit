@@ -37,7 +37,7 @@ use windows::{
 
 use crate::kernel::{
     geometry::PixelSize, screen_manager::ScreenId, session::ReceivedVideoFrame,
-    video_decoder::VideoDecoder,
+    video_decoder::VideoDecoder, video_encoder::VideoCodec,
 };
 
 use super::{
@@ -80,6 +80,7 @@ impl VideoDecoder for WindowsVideoDecoder {
     type Frame = WindowsDecodedFrame;
 
     fn run<Inputs, PresentFrame, PresentFuture>(
+        codec: VideoCodec,
         inputs: Inputs,
         present_frame: PresentFrame,
     ) -> impl Future<Output = eros::Result<()>>
@@ -88,12 +89,13 @@ impl VideoDecoder for WindowsVideoDecoder {
         PresentFrame: FnMut(Self::Frame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        Self::run_with_probing(inputs, present_frame, false)
+        Self::run_with_probing(codec, inputs, present_frame, false)
     }
 }
 
 impl WindowsVideoDecoder {
     pub(crate) fn run_with_probing<Inputs, PresentFrame, PresentFuture>(
+        codec: VideoCodec,
         inputs: Inputs,
         present_frame: PresentFrame,
         enable_probing: bool,
@@ -103,11 +105,12 @@ impl WindowsVideoDecoder {
         PresentFrame: FnMut(WindowsDecodedFrame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        run_windows_decoder(inputs, present_frame, enable_probing)
+        run_windows_decoder(codec, inputs, present_frame, enable_probing)
     }
 }
 
 async fn run_windows_decoder<Inputs, PresentFrame, PresentFuture>(
+    codec: VideoCodec,
     mut inputs: Inputs,
     mut present_frame: PresentFrame,
     enable_probing: bool,
@@ -117,6 +120,9 @@ where
     PresentFrame: FnMut(WindowsDecodedFrame) -> PresentFuture,
     PresentFuture: Future<Output = eros::Result<()>>,
 {
+    if codec != VideoCodec::H264 {
+        eros::bail!("Windows video decoder does not support negotiated codec {codec:?}");
+    }
     let Some(first) = inputs.next().await else {
         return Ok(());
     };

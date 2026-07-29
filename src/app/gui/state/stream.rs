@@ -149,6 +149,16 @@ impl ScreenStreamState {
         }
     }
 
+    pub(crate) fn active_target(&self) -> Option<&ScreenStreamTarget> {
+        match self {
+            Self::Requesting(target)
+            | Self::WaitingForVideo(target)
+            | Self::Streaming(target)
+            | Self::Failed { target, .. } => Some(target),
+            Self::Idle => None,
+        }
+    }
+
     pub(crate) fn streaming_target(&self) -> Option<&ScreenStreamTarget> {
         match self {
             Self::Streaming(target) => Some(target),

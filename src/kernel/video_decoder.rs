@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use crate::kernel::screen_manager::ScreenId;
+use crate::kernel::{screen_manager::ScreenId, video_encoder::VideoCodec};
 
 pub trait DecodedVideoFrame {
     fn screen_id(&self) -> ScreenId;
@@ -12,6 +12,7 @@ pub trait VideoDecoder {
     type Frame;
 
     fn run<Inputs, PresentFrame, PresentFuture>(
+        codec: VideoCodec,
         inputs: Inputs,
         present_frame: PresentFrame,
     ) -> impl Future<Output = eros::Result<()>>
@@ -28,7 +29,7 @@ mod tests {
 
     use futures_util::StreamExt as _;
 
-    use crate::kernel::video_decoder::VideoDecoder;
+    use crate::kernel::{video_decoder::VideoDecoder, video_encoder::VideoCodec};
 
     struct NonCloneEncodedFrame(u8);
 
@@ -42,6 +43,7 @@ mod tests {
         type Frame = NonCloneDecodedFrame;
 
         fn run<Inputs, PresentFrame, PresentFuture>(
+            _codec: VideoCodec,
             inputs: Inputs,
             present_frame: PresentFrame,
         ) -> impl Future<Output = eros::Result<()>>
@@ -78,7 +80,7 @@ mod tests {
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime
-            .block_on(EmptyVideoDecoder::run(inputs, |frame| {
+            .block_on(EmptyVideoDecoder::run(VideoCodec::H264, inputs, |frame| {
                 frames.borrow_mut().push(frame);
                 std::future::ready(Ok(()))
             }))

@@ -185,6 +185,13 @@ where
             return Ok(());
         }
 
+        let codec = self
+            .remote_stream
+            .screen_stream
+            .active_target()
+            .filter(|target| target.session_id == session_id && target.screen_id == screen_id)
+            .map(|target| target.codec)
+            .with_context(|| "Video decoder has no matching negotiated stream codec")?;
         self.stop_video_decoder()?;
         let input = UnsyncQueue::default();
         let receiver = input.clone();
@@ -204,6 +211,7 @@ where
         ));
         let task = compio::runtime::spawn(async move {
             let result = <Stack::RemoteVideo as RemoteVideoStack>::run_decoder(
+                codec,
                 inputs,
                 move |frame| std::future::ready(view.present_video(session_id, screen_id, frame)),
                 enable_probing,

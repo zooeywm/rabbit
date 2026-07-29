@@ -10,7 +10,7 @@ use crate::{
         screen_manager::ScreenLayoutManager,
         session::ReceivedVideoFrame,
         video_decoder::{DecodedVideoFrame, VideoDecoder},
-        video_encoder::VideoEncoder,
+        video_encoder::{VideoCodec, VideoEncoder},
     },
 };
 
@@ -19,6 +19,7 @@ pub(crate) trait RemoteVideoStack: 'static {
     type Frame: DecodedVideoFrame + Send + 'static;
 
     fn run_decoder<Inputs, PresentFrame, PresentFuture>(
+        codec: VideoCodec,
         inputs: Inputs,
         present_frame: PresentFrame,
         enable_probing: bool,

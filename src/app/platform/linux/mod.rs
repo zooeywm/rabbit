@@ -231,6 +231,7 @@ impl RemoteVideoStack for RemoteVideo {
     type Frame = GStreamerDecodedFrame;
 
     fn run_decoder<Inputs, PresentFrame, PresentFuture>(
+        codec: crate::kernel::video_encoder::VideoCodec,
         inputs: Inputs,
         present_frame: PresentFrame,
         enable_probing: bool,
@@ -240,7 +241,7 @@ impl RemoteVideoStack for RemoteVideo {
         PresentFrame: FnMut(Self::Frame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        GStreamerVideoDecoder::run_with_probing(inputs, present_frame, enable_probing)
+        GStreamerVideoDecoder::run_with_probing(codec, inputs, present_frame, enable_probing)
     }
 }
 

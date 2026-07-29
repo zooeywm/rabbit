@@ -18,7 +18,7 @@ use crate::{
     },
     kernel::{
         geometry::PixelSize, screen_manager::ScreenId, session::ReceivedVideoFrame,
-        video_decoder::VideoDecoder,
+        video_decoder::VideoDecoder, video_encoder::VideoCodec,
     },
 };
 
@@ -327,6 +327,7 @@ impl GStreamerVideoDecoder {
     }
 
     async fn run_inner<Inputs, PresentFrame, PresentFuture>(
+        codec: VideoCodec,
         mut inputs: Inputs,
         mut present_frame: PresentFrame,
         enable_probing: bool,
@@ -336,6 +337,9 @@ impl GStreamerVideoDecoder {
         PresentFrame: FnMut(GStreamerDecodedFrame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
+        if codec != VideoCodec::H264 {
+            eros::bail!("Linux video decoder does not support negotiated codec {codec:?}");
+        }
         let Some(first_input) = poll_fn(|context| Pin::new(&mut inputs).poll_next(context)).await
         else {
             return Ok(());
@@ -410,6 +414,7 @@ impl VideoDecoder for GStreamerVideoDecoder {
     type Frame = GStreamerDecodedFrame;
 
     fn run<Inputs, PresentFrame, PresentFuture>(
+        codec: VideoCodec,
         inputs: Inputs,
         present_frame: PresentFrame,
     ) -> impl Future<Output = eros::Result<()>>
@@ -418,12 +423,13 @@ impl VideoDecoder for GStreamerVideoDecoder {
         PresentFrame: FnMut(Self::Frame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        Self::run_inner(inputs, present_frame, false)
+        Self::run_inner(codec, inputs, present_frame, false)
     }
 }
 
 impl GStreamerVideoDecoder {
     pub(crate) fn run_with_probing<Inputs, PresentFrame, PresentFuture>(
+        codec: VideoCodec,
         inputs: Inputs,
         present_frame: PresentFrame,
         enable_probing: bool,
@@ -433,7 +439,7 @@ impl GStreamerVideoDecoder {
         PresentFrame: FnMut(GStreamerDecodedFrame) -> PresentFuture,
         PresentFuture: Future<Output = eros::Result<()>>,
     {
-        Self::run_inner(inputs, present_frame, enable_probing)
+        Self::run_inner(codec, inputs, present_frame, enable_probing)
     }
 }
 
@@ -648,7 +654,7 @@ mod tests {
         infra::platform::video_decoder::{
             GStreamerVideoDecoder, decoded_dma_buf_caps, h264_rtp_caps,
         },
-        kernel::video_decoder::VideoDecoder,
+        kernel::{video_decoder::VideoDecoder, video_encoder::VideoCodec},
     };
 
     #[test]
@@ -657,7 +663,7 @@ mod tests {
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
         runtime
-            .block_on(GStreamerVideoDecoder::run(inputs, |_| {
+            .block_on(GStreamerVideoDecoder::run(VideoCodec::H264, inputs, |_| {
                 std::future::ready(Ok(()))
             }))
             .expect("Empty Linux video decoder should finish cleanly");
