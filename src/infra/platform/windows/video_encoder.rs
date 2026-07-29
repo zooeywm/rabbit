@@ -301,6 +301,7 @@ struct MfH264Encoder {
     d3d: ID3D11Device,
     output_stream_info_flags: u32,
     output_stream_buffer_size: u32,
+    reusable_output_sample: Option<IMFSample>,
     input_stream_id: u32,
     output_stream_id: u32,
     converter: Option<BgraToNv12Converter>,
@@ -484,6 +485,7 @@ impl MfH264Encoder {
             d3d,
             output_stream_info_flags: output_stream_info.dwFlags,
             output_stream_buffer_size: output_stream_info.cbSize,
+            reusable_output_sample: None,
             input_stream_id: 0,
             output_stream_id: 0,
             converter: None,
@@ -847,6 +849,7 @@ impl MfH264Encoder {
                     first_bytes_len,
                 })
             })?;
+            self.recycle_output_sample(output.sample)?;
             if !self.logged_output_format {
                 debug!(
                     event = "windows_h264_output_format",
@@ -943,16 +946,7 @@ impl MfH264Encoder {
         for stream_change_count in 0..MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT {
             let mut owned_sample = None;
             if self.output_stream_info_flags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
-                let sample = unsafe { MFCreateSample() }
-                    .with_context(|| "Failed to create an encoder output sample")?;
-                let buffer_size = self
-                    .output_stream_buffer_size
-                    .max(MAX_ENCODER_OUTPUT_SAMPLE_SIZE);
-                let buffer = unsafe { MFCreateMemoryBuffer(buffer_size) }
-                    .with_context(|| "Failed to create an encoder output buffer")?;
-                unsafe { sample.AddBuffer(&buffer) }
-                    .with_context(|| "Failed to attach an output buffer to the encoder sample")?;
-                owned_sample = Some(sample);
+                owned_sample = Some(self.take_output_sample()?);
             }
 
             let mut output = MFT_OUTPUT_DATA_BUFFER {
@@ -1008,8 +1002,14 @@ impl MfH264Encoder {
                         probe,
                     }));
                 }
-                Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                    if let Some(sample) = sample {
+                        self.recycle_output_sample(sample)?;
+                    }
+                    return Ok(None);
+                }
                 Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    drop(sample);
                     warn!(
                         event = "windows_h264_encoder_stream_change",
                         output_status = output.dwStatus,
@@ -1030,6 +1030,7 @@ impl MfH264Encoder {
                     }
                 }
                 Err(error) => {
+                    drop(sample);
                     Err(error).with_context(|| "Failed to receive H.264 encoder output")?;
                     unreachable!()
                 }
@@ -1140,6 +1141,37 @@ impl MfH264Encoder {
             .with_context(|| "Failed to refresh H.264 encoder output stream info")?;
         self.output_stream_info_flags = info.dwFlags;
         self.output_stream_buffer_size = info.cbSize;
+        self.reusable_output_sample = None;
+        Ok(())
+    }
+
+    fn take_output_sample(&mut self) -> eros::Result<IMFSample> {
+        if let Some(sample) = self.reusable_output_sample.take() {
+            return Ok(sample);
+        }
+        let sample = unsafe { MFCreateSample() }
+            .with_context(|| "Failed to create a reusable encoder output sample")?;
+        let buffer_size = self
+            .output_stream_buffer_size
+            .max(MAX_ENCODER_OUTPUT_SAMPLE_SIZE);
+        let buffer = unsafe { MFCreateMemoryBuffer(buffer_size) }
+            .with_context(|| "Failed to create a reusable encoder output buffer")?;
+        unsafe { sample.AddBuffer(&buffer) }
+            .with_context(|| "Failed to attach a reusable encoder output buffer")?;
+        Ok(sample)
+    }
+
+    fn recycle_output_sample(&mut self, sample: IMFSample) -> eros::Result<()> {
+        if self.output_stream_info_flags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0 {
+            return Ok(());
+        }
+        let buffer = unsafe { sample.GetBufferByIndex(0) }
+            .with_context(|| "Reusable encoder output sample lost its media buffer")?;
+        unsafe { buffer.SetCurrentLength(0) }
+            .with_context(|| "Failed to reset reusable encoder output buffer")?;
+        unsafe { sample.DeleteAllItems() }
+            .with_context(|| "Failed to reset reusable encoder output sample attributes")?;
+        self.reusable_output_sample = Some(sample);
         Ok(())
     }
 
