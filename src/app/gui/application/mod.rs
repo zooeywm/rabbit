@@ -6,7 +6,13 @@ mod update;
 mod video_decoder;
 mod view_state;
 
-use std::{collections::HashSet, marker::PhantomData, net::SocketAddr, rc::Rc};
+use std::{
+    collections::HashSet,
+    marker::PhantomData,
+    net::SocketAddr,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use eros::Context as _;
 use futures_util::{future::Either, pin_mut};
@@ -84,6 +90,55 @@ where
 {
     screen_stream: ScreenStreamState,
     video_decoder: Option<RunningVideoDecoder<Video>>,
+    key_frame_request: KeyFrameRequestGate,
+}
+
+#[derive(Default)]
+struct KeyFrameRequestGate {
+    generation: Option<crate::kernel::screen_configuration::ScreenStreamRequestId>,
+    last_requested: Option<Instant>,
+    in_flight: bool,
+}
+
+impl KeyFrameRequestGate {
+    const MINIMUM_INTERVAL: Duration = Duration::from_secs(2);
+
+    fn begin(
+        &mut self,
+        generation: crate::kernel::screen_configuration::ScreenStreamRequestId,
+    ) -> bool {
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.last_requested = None;
+            self.in_flight = false;
+        }
+        if self.in_flight
+            || self
+                .last_requested
+                .is_some_and(|last| last.elapsed() < Self::MINIMUM_INTERVAL)
+        {
+            return false;
+        }
+        self.in_flight = true;
+        self.last_requested = Some(Instant::now());
+        true
+    }
+
+    fn finish(&mut self, generation: crate::kernel::screen_configuration::ScreenStreamRequestId) {
+        if self.generation == Some(generation) {
+            self.in_flight = false;
+        }
+    }
+
+    fn recovered(
+        &mut self,
+        generation: crate::kernel::screen_configuration::ScreenStreamRequestId,
+    ) {
+        if self.generation == Some(generation) {
+            self.last_requested = None;
+            self.in_flight = false;
+        }
+    }
 }
 
 /// Host-side pending stream start/stop acknowledgements.
@@ -467,6 +522,7 @@ where
             remote_stream: RemoteStreamState {
                 screen_stream: ScreenStreamState::default(),
                 video_decoder: None,
+                key_frame_request: KeyFrameRequestGate::default(),
             },
             host_stream: HostStreamState {
                 pending_starts: HashSet::new(),
@@ -562,12 +618,14 @@ where
                     width,
                     height,
                     frame_rate,
+                    dynamic_frame_rate,
                     bitrate_mbps,
                 } => RootMessage::OpenRemoteScreen {
                     selected_index: index,
                     width,
                     height,
                     frame_rate,
+                    dynamic_frame_rate,
                     bitrate_mbps,
                 },
                 GuiIntent::DisconnectRemoteSession => RootMessage::DisconnectRemoteSession,
@@ -610,4 +668,26 @@ where
     Stack: ApplicationStack,
 {
     RootApplication::<Stack>::run(config, view, intents).await
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::kernel::screen_configuration::ScreenStreamRequestId;
+
+    use super::KeyFrameRequestGate;
+
+    #[test]
+    fn key_frame_requests_are_deduplicated_per_stream_generation() {
+        let mut gate = KeyFrameRequestGate::default();
+        let first = ScreenStreamRequestId(1);
+        let second = ScreenStreamRequestId(2);
+
+        assert!(gate.begin(first));
+        assert!(!gate.begin(first));
+        gate.finish(first);
+        assert!(!gate.begin(first));
+        assert!(gate.begin(second));
+        gate.recovered(second);
+        assert!(gate.begin(second));
+    }
 }

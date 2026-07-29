@@ -109,6 +109,22 @@ impl TransportSend for TcpTransportSend {
         })
     }
 
+    async fn send_unreliable_batch(
+        &self,
+        channel: TransportChannel,
+        payloads: Vec<Bytes>,
+    ) -> eros::Result<()> {
+        for payload in payloads {
+            self.send_message(TransportMessage {
+                channel,
+                delivery: Delivery::Unreliable,
+                payload,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
         self.send_message(message)
     }

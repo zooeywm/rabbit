@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use eros::Context as _;
@@ -526,8 +526,7 @@ fn run_desktop_duplication_capture(
     commands: &flume::Receiver<DesktopDuplicationCommand>,
     frames: &flume::Sender<eros::Result<WindowsCapturedFrame>>,
 ) -> eros::Result<()> {
-    const STATIC_FRAME_INTERVAL: Duration = Duration::from_millis(200);
-    let mut last_emitted = None;
+    const SHUTDOWN_POLL_INTERVAL_MS: u32 = 100;
     loop {
         if matches!(
             commands.try_recv(),
@@ -536,11 +535,7 @@ fn run_desktop_duplication_capture(
             return Ok(());
         }
 
-        let timeout_ms = static_frame_timeout_ms(last_emitted, STATIC_FRAME_INTERVAL);
-        let desktop_updated = capture.acquire_latest(timeout_ms)?;
-        let keepalive_due =
-            last_emitted.is_some_and(|last: Instant| last.elapsed() >= STATIC_FRAME_INTERVAL);
-        if !desktop_updated && !keepalive_due {
+        if !capture.acquire_latest(SHUTDOWN_POLL_INTERVAL_MS)? {
             continue;
         }
         let Some(texture) = capture.texture.as_ref().cloned() else {
@@ -569,16 +564,7 @@ fn run_desktop_duplication_capture(
         }
 
         let _ = released.recv();
-        last_emitted = Some(Instant::now());
     }
-}
-
-fn static_frame_timeout_ms(last_emitted: Option<Instant>, interval: Duration) -> u32 {
-    let remaining = last_emitted
-        .map(|last| interval.saturating_sub(last.elapsed()))
-        .unwrap_or(interval);
-    let milliseconds = remaining.as_millis().max(1);
-    u32::try_from(milliseconds).unwrap_or(u32::MAX)
 }
 
 fn find_dxgi_output(monitor: WindowsMonitorHandle) -> eros::Result<(IDXGIAdapter1, IDXGIOutput)> {

@@ -3,11 +3,13 @@ use std::rc::Rc;
 use crate::kernel::{
     geometry::{FrameRate, PixelSize},
     screen_manager::ScreenId,
+    video_encoder::VideoFrameRateMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FramePipelineParameters {
     pub frame_size: PixelSize,
+    pub frame_rate_mode: VideoFrameRateMode,
 }
 
 /// How frames move from capture to the consumer.
@@ -97,6 +99,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
             },
+            frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
         };
 
         manager

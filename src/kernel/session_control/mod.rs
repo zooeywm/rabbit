@@ -212,6 +212,7 @@ mod tests {
             },
             frame_rate: FrameRate::new(59_940, 1_000)
                 .expect("Test stream frame rate should be valid"),
+            frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
             codec: VideoCodec::H264,
             bitrate: VideoBitrate::new(20_500_000).expect("Test bitrate should be valid"),
         };

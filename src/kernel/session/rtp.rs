@@ -5,7 +5,10 @@
 //! recovery IDR is requested only after a subsequent frame arrives complete,
 //! which avoids adding a large keyframe to an already-congested path.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use eros::Context as _;
 
@@ -16,6 +19,7 @@ pub(super) struct RtpVideoStream {
     pub(super) frame: Option<RtpFrameAssembly>,
     pub(super) waiting_for_keyframe: bool,
     request_keyframe_after_complete_frame: bool,
+    last_keyframe_request: Option<Instant>,
 }
 
 impl Default for RtpVideoStream {
@@ -25,6 +29,7 @@ impl Default for RtpVideoStream {
             frame: None,
             waiting_for_keyframe: true,
             request_keyframe_after_complete_frame: true,
+            last_keyframe_request: None,
         }
     }
 }
@@ -51,6 +56,7 @@ pub(super) struct VideoAssemblyResult {
 
 const RTP_FIXED_HEADER_SIZE: usize = 12;
 const MAX_ENCODED_VIDEO_FRAME_SIZE: usize = 16 * 1024 * 1024;
+const RECOVERY_KEY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) fn assemble_video_frame(
     streams: &mut HashMap<ScreenId, RtpVideoStream>,
@@ -124,9 +130,13 @@ pub(super) fn assemble_video_frame(
     }
     if stream.waiting_for_keyframe {
         if !frame.keyframe {
-            if stream.request_keyframe_after_complete_frame {
+            let retry_due = stream
+                .last_keyframe_request
+                .is_some_and(|requested| requested.elapsed() >= RECOVERY_KEY_FRAME_RETRY_INTERVAL);
+            if stream.request_keyframe_after_complete_frame || retry_due {
                 request_key_frame = true;
                 stream.request_keyframe_after_complete_frame = false;
+                stream.last_keyframe_request = Some(Instant::now());
             }
             return Ok(VideoAssemblyResult {
                 frame: None,
@@ -135,6 +145,7 @@ pub(super) fn assemble_video_frame(
         }
         stream.waiting_for_keyframe = false;
         stream.request_keyframe_after_complete_frame = false;
+        stream.last_keyframe_request = None;
     }
 
     Ok(VideoAssemblyResult {

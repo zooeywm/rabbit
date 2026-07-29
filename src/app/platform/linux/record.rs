@@ -67,6 +67,7 @@ where
     let frame_rate = screen.frame_rate;
     let parameters = FramePipelineParameters {
         frame_size: screen.resolution,
+        frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
     };
     let screen_id = screen.id;
     info!(

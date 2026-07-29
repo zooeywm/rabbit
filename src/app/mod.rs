@@ -83,6 +83,16 @@ where
     /// messaging, and media streaming run in `app::gui::application` after this
     /// bootstrap returns.
     pub(crate) async fn run(&mut self) -> eros::Result<()> {
+        info!(
+            event = "application_build_profile",
+            build_profile = if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            optimized = !cfg!(debug_assertions),
+            "Rabbit build profile selected"
+        );
         let screens = self.screens();
 
         if screens.is_empty() {

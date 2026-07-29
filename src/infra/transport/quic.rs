@@ -177,6 +177,14 @@ impl TransportSend for QuicTransportSend {
         self.send_unreliable_message(channel, payload)
     }
 
+    fn send_unreliable_batch(
+        &self,
+        channel: TransportChannel,
+        payloads: Vec<Bytes>,
+    ) -> impl Future<Output = eros::Result<()>> {
+        self.send_unreliable_messages(channel, payloads)
+    }
+
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
         self.send_message(message)
     }
@@ -226,6 +234,21 @@ fn is_normal_close_reason(reason: Option<compio::quic::ConnectionError>) -> bool
 }
 
 impl QuicTransportSend {
+    async fn send_unreliable_messages(
+        &self,
+        channel: TransportChannel,
+        payloads: Vec<Bytes>,
+    ) -> eros::Result<()> {
+        for payload in payloads {
+            let datagram =
+                encode_tlv(channel, payload).with_context(|| "Failed to encode QUIC datagram")?;
+            self.connection
+                .send_datagram(datagram)
+                .with_context(|| "Failed to send QUIC datagram")?;
+        }
+        Ok(())
+    }
+
     async fn send_message(&self, message: TransportMessage) -> eros::Result<()> {
         let TransportMessage {
             channel,

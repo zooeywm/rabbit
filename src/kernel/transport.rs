@@ -64,6 +64,12 @@ pub trait TransportSend {
         payload: bytes::Bytes,
     ) -> impl Future<Output = eros::Result<()>>;
 
+    fn send_unreliable_batch(
+        &self,
+        channel: TransportChannel,
+        payloads: Vec<bytes::Bytes>,
+    ) -> impl Future<Output = eros::Result<()>>;
+
     fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>>;
 
     fn close(&self) -> impl Future<Output = ()>;

@@ -1027,6 +1027,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
             },
+            frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
         };
         let first = worker
             .register_pipeline(FramePipelineId(0), ScreenId(0), parameters, 1, true)
@@ -1240,6 +1241,7 @@ mod tests {
     fn parameters(width: u32, height: u32) -> FramePipelineParameters {
         FramePipelineParameters {
             frame_size: PixelSize { width, height },
+            frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
         }
     }
 }

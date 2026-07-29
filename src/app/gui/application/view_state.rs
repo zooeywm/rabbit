@@ -98,6 +98,7 @@ where
                             selected_width: screen.resolution.width.to_string(),
                             selected_height: screen.resolution.height.to_string(),
                             selected_frame_rate: frame_rate,
+                            selected_dynamic_frame_rate: true,
                             selected_bitrate_mbps: format_bitrate_mbps(bitrate),
                         }
                     })

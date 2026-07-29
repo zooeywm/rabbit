@@ -51,6 +51,7 @@ pub(crate) struct RemoteScreenView {
     pub(crate) selected_width: String,
     pub(crate) selected_height: String,
     pub(crate) selected_frame_rate: String,
+    pub(crate) selected_dynamic_frame_rate: bool,
     pub(crate) selected_bitrate_mbps: String,
 }
 

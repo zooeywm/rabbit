@@ -13,7 +13,7 @@ use crate::{
     kernel::{
         screen_manager::ScreenId,
         screen_stream::ScreenStream,
-        session::{SessionSend, VideoMessage},
+        session::SessionSend,
         transport::TransportSend,
         video_encoder::{VideoEncoder, VideoEncoderCommand, VideoEncoderParameters},
     },
@@ -46,6 +46,7 @@ where
         codec = ?parameters.codec,
         frame_rate_numerator = parameters.frame_rate.numerator(),
         frame_rate_denominator = parameters.frame_rate.denominator(),
+        frame_rate_mode = ?parameters.frame_rate_mode,
         bitrate_bps = parameters.bitrate.bits_per_second(),
         max_packet_size,
         "Host screen stream started"
@@ -64,19 +65,22 @@ where
         commands,
         parameters,
         max_packet_size,
-        move |packet: Encoder::Packet| {
+        move |packets: Vec<Encoder::Packet>| {
             let session = Rc::clone(&session);
             async move {
-                let payload = packet.into();
+                let payloads = packets
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<bytes::Bytes>>();
+                let payload_size = payloads.iter().map(bytes::Bytes::len).sum::<usize>();
                 trace!(
-                    event = "video_packet_send",
+                    event = "video_packet_batch_send",
                     screen_id = screen_id.0,
-                    payload_size = payload.len(),
-                    "Sending video packet"
+                    packet_count = payloads.len(),
+                    payload_size,
+                    "Sending video packet batch"
                 );
-                session
-                    .send_video(VideoMessage { screen_id, payload })
-                    .await
+                session.send_video_batch(screen_id, payloads).await
             }
         },
     )

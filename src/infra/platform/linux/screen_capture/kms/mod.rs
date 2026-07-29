@@ -40,6 +40,7 @@ pub(crate) struct KmsScreenCaptureManagerState {
     encoder_profiles: Option<Vec<DmaBufProfile>>,
     /// Applied to the next [`KmsCaptureLease::new`] from [`ScreenCaptureManager::acquire`].
     queue_policy: std::cell::Cell<KmsFrameQueuePolicy>,
+    frame_rate_mode: std::cell::Cell<crate::kernel::video_encoder::VideoFrameRateMode>,
 }
 
 type EncoderProfileProvider = fn(drm::buffer::DrmFourcc) -> eros::Result<Vec<DmaBufProfile>>;
@@ -58,11 +59,21 @@ impl KmsScreenCaptureManagerState {
             encoder_profile_provider,
             encoder_profiles: None,
             queue_policy: std::cell::Cell::new(KmsFrameQueuePolicy::Latest),
+            frame_rate_mode: std::cell::Cell::new(
+                crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
+            ),
         }
     }
 
     pub(crate) fn set_frame_queue_policy(&self, policy: KmsFrameQueuePolicy) {
         self.queue_policy.set(policy);
+    }
+
+    pub(crate) fn set_frame_rate_mode(
+        &self,
+        mode: crate::kernel::video_encoder::VideoFrameRateMode,
+    ) {
+        self.frame_rate_mode.set(mode);
     }
 
     fn encoder_profiles(&mut self) -> Vec<DmaBufProfile> {
@@ -114,8 +125,12 @@ where
         let encoder_profiles = state.encoder_profiles();
 
         let queue_policy = state.queue_policy.get();
+        let frame_rate_mode = state.frame_rate_mode.get();
         // One-shot: recording sets Reliable then acquire; streamers keep Latest.
         state.queue_policy.set(KmsFrameQueuePolicy::Latest);
+        state
+            .frame_rate_mode
+            .set(crate::kernel::video_encoder::VideoFrameRateMode::Fixed);
 
         Ok(KmsCaptureLease::new(
             screen_name,
@@ -124,6 +139,7 @@ where
             worker_reaper,
             encoder_profiles,
             queue_policy,
+            frame_rate_mode,
         )
         .with_context(|| context)?)
     }

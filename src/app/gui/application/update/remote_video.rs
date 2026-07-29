@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use eros::Context as _;
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::app::runtime::controller_policy::evaluate_controller_set_screen_streams;
 use crate::app::{
@@ -202,10 +202,81 @@ where
                 decoder.publish(video);
                 Ok(false)
             }
-            RootMessage::VideoFrameReady(id, screen_id) => Ok(self
-                .remote_stream
-                .screen_stream
-                .receive_video(id, screen_id)),
+            RootMessage::VideoFrameReady(id, screen_id) => {
+                let received = self
+                    .remote_stream
+                    .screen_stream
+                    .receive_video(id, screen_id);
+                if received
+                    && let Some(request_id) = self.remote_stream.screen_stream.active_request_id()
+                {
+                    self.remote_stream.key_frame_request.recovered(request_id);
+                }
+                Ok(received)
+            }
+            RootMessage::InitialVideoKeyFrameTimeout {
+                request_id,
+                session_id,
+                screen_id,
+            } => {
+                let still_waiting = self
+                    .remote_stream
+                    .screen_stream
+                    .waiting_target()
+                    .is_some_and(|target| {
+                        target.request_id == request_id
+                            && target.session_id == session_id
+                            && target.screen_id == screen_id
+                    });
+                if !still_waiting {
+                    return Ok(false);
+                }
+                if !self.remote_stream.key_frame_request.begin(request_id) {
+                    debug!(
+                        event = "initial_video_key_frame_request_suppressed",
+                        session_id = session_id.0,
+                        screen_id = screen_id.0,
+                        "A recent key-frame request already covers the initial video wait"
+                    );
+                    let retry_sender = sender.clone();
+                    compio::runtime::spawn(async move {
+                        compio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        retry_sender.post(RootMessage::InitialVideoKeyFrameTimeout {
+                            request_id,
+                            session_id,
+                            screen_id,
+                        });
+                    })
+                    .detach();
+                    return Ok(false);
+                }
+                let Some(session) = self
+                    .model
+                    .sessions
+                    .iter()
+                    .find(|session| session.send.id() == session_id)
+                else {
+                    return Ok(false);
+                };
+                warn!(
+                    event = "initial_video_key_frame_requested",
+                    session_id = session_id.0,
+                    screen_id = screen_id.0,
+                    "Requesting a key frame because no decodable first frame arrived"
+                );
+                let session = Rc::clone(&session.send);
+                let request_sender = sender.clone();
+                compio::runtime::spawn(async move {
+                    let result = session.request_key_frame(screen_id).await;
+                    request_sender.post(RootMessage::KeyFrameRequestFinished {
+                        session_id,
+                        screen_id,
+                        result,
+                    });
+                })
+                .detach();
+                Ok(false)
+            }
             RootMessage::VideoDecoderFinished(id, screen_id, result) => {
                 if !self
                     .remote_stream
@@ -239,13 +310,64 @@ where
                             error = ?error,
                             "Hardware video decoder failed"
                         );
-                        if self.remote_stream.screen_stream.fail(
-                            id,
-                            screen_id,
-                            format!("Hardware video decoding failed: {error}"),
-                        ) {
+                        if self
+                            .remote_stream
+                            .screen_stream
+                            .begin_recovery(id, screen_id)
+                        {
+                            let request_id = self
+                                .remote_stream
+                                .screen_stream
+                                .active_request_id()
+                                .context(
+                                "Recovering screen stream has no request generation",
+                            )?;
+                            if !self.remote_stream.key_frame_request.begin(request_id) {
+                                debug!(
+                                    event = "decoder_recovery_key_frame_request_suppressed",
+                                    session_id = id.0,
+                                    screen_id = screen_id.0,
+                                    "A recent key-frame request already covers decoder recovery"
+                                );
+                                let retry_sender = sender.clone();
+                                compio::runtime::spawn(async move {
+                                    compio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                    retry_sender.post(RootMessage::InitialVideoKeyFrameTimeout {
+                                        request_id,
+                                        session_id: id,
+                                        screen_id,
+                                    });
+                                })
+                                .detach();
+                                return Ok(true);
+                            }
+                            let Some(session) = self
+                                .model
+                                .sessions
+                                .iter()
+                                .find(|session| session.send.id() == id)
+                            else {
+                                return Ok(false);
+                            };
+                            warn!(
+                                event = "decoder_recovery_key_frame_requested",
+                                session_id = id.0,
+                                screen_id = screen_id.0,
+                                "Reinitializing the decoder from a fresh key frame"
+                            );
+                            let session = Rc::clone(&session.send);
+                            let request_sender = sender.clone();
+                            compio::runtime::spawn(async move {
+                                let result = session.request_key_frame(screen_id).await;
+                                request_sender.post(RootMessage::KeyFrameRequestFinished {
+                                    session_id: id,
+                                    screen_id,
+                                    result,
+                                });
+                            })
+                            .detach();
                             self.set_connection_status(format!(
-                                "Screen {} decoder failed: {error}",
+                                "Screen {} decoder is waiting for a recovery key frame",
                                 screen_id.0
                             ));
                             return Ok(true);
@@ -284,6 +406,17 @@ where
                 screen_id,
                 result,
             } => {
+                if let Some(request_id) = self
+                    .remote_stream
+                    .screen_stream
+                    .active_request_id()
+                    .filter(|_| {
+                        self.remote_stream.screen_stream.active_screen()
+                            == Some((session_id, screen_id))
+                    })
+                {
+                    self.remote_stream.key_frame_request.finish(request_id);
+                }
                 if let Err(error) = result {
                     warn!(
                         event = "key_frame_request_failed",
@@ -292,13 +425,8 @@ where
                         error = ?error,
                         "Failed to request the preferred on-demand key frame; stopping the Client screen stream"
                     );
-                    if self
-                        .remote_stream
-                        .video_decoder
-                        .as_ref()
-                        .is_some_and(|decoder| {
-                            decoder.session_id == session_id && decoder.screen_id == screen_id
-                        })
+                    if self.remote_stream.screen_stream.active_screen()
+                        == Some((session_id, screen_id))
                     {
                         self.stop_video_decoder()?;
                         self.remote_stream.screen_stream.fail_session(
@@ -311,6 +439,25 @@ where
                         ));
                         return Ok(true);
                     }
+                } else if let Some(target) = self
+                    .remote_stream
+                    .screen_stream
+                    .waiting_target()
+                    .filter(|target| {
+                        target.session_id == session_id && target.screen_id == screen_id
+                    })
+                    .cloned()
+                {
+                    let retry_sender = sender.clone();
+                    compio::runtime::spawn(async move {
+                        compio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        retry_sender.post(RootMessage::InitialVideoKeyFrameTimeout {
+                            request_id: target.request_id,
+                            session_id,
+                            screen_id,
+                        });
+                    })
+                    .detach();
                 }
 
                 Ok(false)
@@ -320,6 +467,7 @@ where
                 width,
                 height,
                 frame_rate,
+                dynamic_frame_rate,
                 bitrate_mbps,
             } => {
                 let (frame_size, frame_rate, bitrate) =
@@ -386,6 +534,11 @@ where
                             remote_display: RemoteDisplayMode::Preserve,
                             frame_size,
                             frame_rate,
+                            frame_rate_mode: if dynamic_frame_rate {
+                                crate::kernel::video_encoder::VideoFrameRateMode::Dynamic
+                            } else {
+                                crate::kernel::video_encoder::VideoFrameRateMode::Fixed
+                            },
                             codec: VideoCodec::H264,
                             bitrate,
                         }],
@@ -412,6 +565,11 @@ where
                         screen_name,
                         frame_size,
                         frame_rate,
+                        frame_rate_mode: if dynamic_frame_rate {
+                            crate::kernel::video_encoder::VideoFrameRateMode::Dynamic
+                        } else {
+                            crate::kernel::video_encoder::VideoFrameRateMode::Fixed
+                        },
                         codec: VideoCodec::H264,
                         bitrate,
                     });

@@ -42,6 +42,7 @@ pub(crate) struct GStreamerVideoEncoder {
     pub(super) input_caps: gstreamer::Caps,
     pub(super) input_signature: DmaBufInputSignature,
     pub(super) source_frame_rate: FrameRate,
+    pub(super) latest_input: Option<gstreamer::Buffer>,
     pub(super) probe: Option<GStreamerVideoProbe>,
 }
 
@@ -56,7 +57,7 @@ impl GStreamerVideoEncoder {
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<GbmFramePipelineFrame>>> + Unpin,
         Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-        SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
+        SendPacket: FnMut(Vec<GStreamerRtpPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         if parameters.codec != VideoCodec::H264 {
@@ -259,6 +260,7 @@ impl GStreamerVideoEncoder {
             input_caps,
             input_signature,
             source_frame_rate: input_signature.frame_rate,
+            latest_input: None,
             probe,
         })
     }
@@ -305,10 +307,29 @@ impl GStreamerVideoEncoder {
             probe.submit_frame(frame_probe);
         }
 
+        self.latest_input = Some(frame.buffer.clone());
         self.source
             .push_buffer(frame.buffer)
             .with_context(|| "Failed to submit DMA-BUF frame to GStreamer H.264 encoder")?;
 
+        Ok(())
+    }
+
+    pub(crate) fn submit_latest_frame(&self) -> eros::Result<()> {
+        let mut buffer = self
+            .latest_input
+            .as_ref()
+            .cloned()
+            .with_context(|| "GStreamer encoder has no retained frame to encode")?;
+        {
+            let buffer = buffer.make_mut();
+            buffer.set_pts(gstreamer::ClockTime::NONE);
+            buffer.set_dts(gstreamer::ClockTime::NONE);
+            buffer.set_duration(gstreamer::ClockTime::NONE);
+        }
+        self.source
+            .push_buffer(buffer)
+            .with_context(|| "Failed to resubmit retained DMA-BUF frame to GStreamer")?;
         Ok(())
     }
 
@@ -481,7 +502,7 @@ impl GStreamerVideoEncoder {
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<GbmFramePipelineFrame>>> + Unpin,
         Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-        SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
+        SendPacket: FnMut(Vec<GStreamerRtpPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         enum Event {
@@ -498,7 +519,7 @@ impl GStreamerVideoEncoder {
                 let Some(packet) = self.receive_packet().await? else {
                     return Ok(());
                 };
-                send_packet(packet).await?;
+                send_packet(vec![packet]).await?;
                 continue;
             }
 
@@ -539,10 +560,11 @@ impl GStreamerVideoEncoder {
                 }
                 Event::Command(Some(VideoEncoderCommand::RequestKeyFrame)) => {
                     self.request_key_frame()?;
+                    self.submit_latest_frame()?;
                 }
                 Event::Command(None) => commands_open = false,
                 Event::Packet(packet) => match packet? {
-                    Some(packet) => send_packet(packet).await?,
+                    Some(packet) => send_packet(vec![packet]).await?,
                     None => return Ok(()),
                 },
             }
@@ -564,7 +586,7 @@ impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
         Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-        SendPacket: FnMut(Self::Packet) -> SendFuture,
+        SendPacket: FnMut(Vec<Self::Packet>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         Self::run_inner(frames, commands, parameters, max_packet_size, send_packet)

@@ -158,6 +158,18 @@ where
             .with_context(|| format!("Failed to send video packet for screen {}", screen_id.0))
     }
 
+    pub async fn send_video_batch(
+        &self,
+        screen_id: ScreenId,
+        payloads: Vec<bytes::Bytes>,
+    ) -> eros::Result<()> {
+        require_role(self.role, SessionRole::Host, "send video")?;
+        self.send
+            .send_unreliable_batch(TransportChannel::Video(screen_id), payloads)
+            .await
+            .with_context(|| format!("Failed to send video packets for screen {}", screen_id.0))
+    }
+
     pub async fn send_screen_list(&self, screens: OutgoingScreenList) -> eros::Result<()> {
         require_role(self.role, SessionRole::Host, "send a screen list")?;
         self.send
@@ -494,6 +506,21 @@ mod tests {
             ready(Ok(()))
         }
 
+        fn send_unreliable_batch(
+            &self,
+            channel: TransportChannel,
+            payloads: Vec<Bytes>,
+        ) -> impl Future<Output = eros::Result<()>> {
+            self.messages
+                .borrow_mut()
+                .extend(payloads.into_iter().map(|payload| TransportMessage {
+                    channel,
+                    delivery: Delivery::Unreliable,
+                    payload,
+                }));
+            ready(Ok(()))
+        }
+
         fn send(&self, message: TransportMessage) -> impl Future<Output = eros::Result<()>> {
             self.messages.borrow_mut().push(message);
             ready(Ok(()))
@@ -614,6 +641,44 @@ mod tests {
                 delivery: Delivery::Unreliable,
                 payload: Bytes::from_static(b"standard RTP packet"),
             }]
+        );
+    }
+
+    #[test]
+    fn host_sends_a_video_packet_batch_through_one_screen_channel() {
+        let session = SessionSend {
+            id: SessionId(7),
+            role: SessionRole::Host,
+            send: TestTransportSend {
+                messages: RefCell::new(Vec::new()),
+                closed: Cell::new(false),
+            },
+        };
+        let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
+        runtime
+            .block_on(session.send_video_batch(
+                ScreenId(3),
+                vec![
+                    Bytes::from_static(b"first RTP packet"),
+                    Bytes::from_static(b"second RTP packet"),
+                ],
+            ))
+            .expect("Host should send one video packet batch");
+
+        assert_eq!(
+            session.send.messages.borrow().as_slice(),
+            &[
+                TransportMessage {
+                    channel: TransportChannel::Video(ScreenId(3)),
+                    delivery: Delivery::Unreliable,
+                    payload: Bytes::from_static(b"first RTP packet"),
+                },
+                TransportMessage {
+                    channel: TransportChannel::Video(ScreenId(3)),
+                    delivery: Delivery::Unreliable,
+                    payload: Bytes::from_static(b"second RTP packet"),
+                },
+            ]
         );
     }
 

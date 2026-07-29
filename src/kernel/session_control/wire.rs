@@ -18,6 +18,7 @@ use crate::kernel::{
     },
     screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
     transport::{Delivery, TransportChannel, TransportMessage},
+    video_encoder::VideoFrameRateMode,
 };
 
 #[derive(BinRead, BinWrite)]
@@ -38,6 +39,13 @@ pub(super) enum WireControlMessageTag {
 #[brw(repr = u8)]
 pub(super) enum WireRemoteDisplayMode {
     Preserve = 0,
+}
+
+#[derive(BinRead, BinWrite)]
+#[brw(repr = u8)]
+pub(super) enum WireVideoFrameRateMode {
+    Fixed = 0,
+    Dynamic = 1,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -116,6 +124,7 @@ pub(super) struct WireScreenStreamRequest {
     remote_display: WireRemoteDisplayMode,
     frame_size: WirePixelSize,
     frame_rate: WireFrameRate,
+    frame_rate_mode: WireVideoFrameRateMode,
     codec: u8,
     bitrate_bps: u32,
 }
@@ -235,6 +244,24 @@ impl From<WireRemoteDisplayMode> for RemoteDisplayMode {
     fn from(mode: WireRemoteDisplayMode) -> Self {
         match mode {
             WireRemoteDisplayMode::Preserve => Self::Preserve,
+        }
+    }
+}
+
+impl From<VideoFrameRateMode> for WireVideoFrameRateMode {
+    fn from(mode: VideoFrameRateMode) -> Self {
+        match mode {
+            VideoFrameRateMode::Fixed => Self::Fixed,
+            VideoFrameRateMode::Dynamic => Self::Dynamic,
+        }
+    }
+}
+
+impl From<WireVideoFrameRateMode> for VideoFrameRateMode {
+    fn from(mode: WireVideoFrameRateMode) -> Self {
+        match mode {
+            WireVideoFrameRateMode::Fixed => Self::Fixed,
+            WireVideoFrameRateMode::Dynamic => Self::Dynamic,
         }
     }
 }
@@ -381,6 +408,7 @@ impl TryFrom<WireScreenStreamRequest> for ScreenStreamRequest {
             remote_display: request.remote_display.into(),
             frame_size: request.frame_size.into(),
             frame_rate,
+            frame_rate_mode: request.frame_rate_mode.into(),
             codec: crate::kernel::video_encoder::VideoCodec::try_from(request.codec).with_context(
                 || {
                     format!(
@@ -407,6 +435,7 @@ impl From<ScreenStreamRequest> for WireScreenStreamRequest {
             remote_display: request.remote_display.into(),
             frame_size: request.frame_size.into(),
             frame_rate: request.frame_rate.into(),
+            frame_rate_mode: request.frame_rate_mode.into(),
             codec: request.codec.as_u8(),
             bitrate_bps: request.bitrate.bits_per_second(),
         }

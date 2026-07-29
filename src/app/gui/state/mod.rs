@@ -142,6 +142,7 @@ mod tests {
                 height: 1200,
             },
             frame_rate: FrameRate::new(120, 1).expect("Test frame rate should be valid"),
+            frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
             codec: VideoCodec::H264,
             bitrate: VideoBitrate::new(100_000_000).expect("Test bitrate should be valid"),
         };

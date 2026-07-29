@@ -87,6 +87,7 @@ struct FramePipelineSource {
 
 #[derive(Debug)]
 struct CapturedScreenSource {
+    frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode,
     gpu_registration: RefCell<Option<GpuScreenRegistration>>,
     lease: RefCell<Option<KmsCaptureLease>>,
 }
@@ -720,6 +721,15 @@ where
             let state = <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref());
             state.captured_screens.borrow().get(screen_id).cloned()
         };
+        if let Some(captured_screen) = &existing_captured_screen
+            && captured_screen.frame_rate_mode != parameters.frame_rate_mode
+        {
+            eros::bail!(
+                "Screen {} is already captured in {:?} frame-rate mode; mixed fixed and dynamic streams are unsupported",
+                screen_id.0,
+                captured_screen.frame_rate_mode
+            );
+        }
         let captured_screen = match existing_captured_screen {
             Some(captured_screen) => captured_screen,
             None => {
@@ -729,12 +739,17 @@ where
                     >>::as_ref(self.prj_ref())
                     .set_frame_queue_policy(KmsFrameQueuePolicy::Reliable { capacity });
                 }
+                <Deps as AsRef<
+                    crate::infra::platform::screen_capture::KmsScreenCaptureManagerState,
+                >>::as_ref(self.prj_ref())
+                .set_frame_rate_mode(parameters.frame_rate_mode);
                 let ScreenCaptureSource { lease, receiver } =
                     ScreenCaptureManager::acquire(self.prj_ref_mut(), screen_id)?;
                 let state = <Deps as AsRef<GbmFramePipelineManagerState>>::as_ref(self.prj_ref());
                 let gpu_registration = state.register_screen(*screen_id, receiver)?;
 
                 Rc::new(CapturedScreenSource {
+                    frame_rate_mode: parameters.frame_rate_mode,
                     gpu_registration: RefCell::new(Some(gpu_registration)),
                     lease: RefCell::new(Some(lease)),
                 })
@@ -1103,6 +1118,7 @@ mod tests {
     fn parameters(width: u32, height: u32) -> FramePipelineParameters {
         FramePipelineParameters {
             frame_size: PixelSize { width, height },
+            frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
         }
     }
 

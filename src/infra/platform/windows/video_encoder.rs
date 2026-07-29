@@ -1,8 +1,11 @@
 use std::{collections::VecDeque, future::Future, rc::Rc, time::Duration};
 
-use bytes::Bytes;
+use bytes::{BufMut as _, Bytes, BytesMut};
 use eros::Context as _;
-use futures_util::{FutureExt as _, StreamExt as _};
+use futures_util::{
+    StreamExt as _,
+    future::{Either, select},
+};
 use tracing::{debug, info, warn};
 use windows::{
     Win32::{
@@ -63,6 +66,7 @@ use crate::{
         geometry::{FrameRate, PixelSize},
         video_encoder::{
             VideoBitrate, VideoCodec, VideoEncoder, VideoEncoderCommand, VideoEncoderParameters,
+            VideoFrameRateMode,
         },
     },
 };
@@ -97,7 +101,7 @@ impl VideoEncoder for WindowsVideoEncoder {
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
         Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-        SendPacket: FnMut(Self::Packet) -> SendFuture,
+        SendPacket: FnMut(Vec<Self::Packet>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         run_windows_encoder(frames, commands, parameters, max_packet_size, send_packet)
@@ -114,7 +118,7 @@ async fn run_windows_encoder<Frames, Commands, SendPacket, SendFuture>(
 where
     Frames: futures_core::Stream<Item = eros::Result<Rc<WindowsFramePipelineFrame>>> + Unpin,
     Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-    SendPacket: FnMut(WindowsVideoPacket) -> SendFuture,
+    SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
     SendFuture: Future<Output = eros::Result<()>>,
 {
     if parameters.codec != VideoCodec::H264 {
@@ -151,14 +155,59 @@ where
     encoder.encode_frame(&first_frame, &mut send_packet).await?;
     drop(first_frame);
 
-    while let Some(frame) = frames.next().await {
-        while let Some(command) = commands.next().now_or_never().flatten() {
-            match command {
-                VideoEncoderCommand::RequestKeyFrame => encoder.request_key_frame(),
+    let mut commands_open = true;
+    loop {
+        enum Event<Frame> {
+            Frame(Option<eros::Result<Rc<Frame>>>),
+            Command(Option<VideoEncoderCommand>),
+            FixedFrameDue,
+        }
+
+        let next_frame = frames.next();
+        let next_command = async {
+            if commands_open {
+                commands.next().await
+            } else {
+                std::future::pending().await
+            }
+        };
+        futures_util::pin_mut!(next_frame, next_command);
+        let input = select(next_command, next_frame);
+        futures_util::pin_mut!(input);
+        let event = match parameters.frame_rate_mode {
+            VideoFrameRateMode::Dynamic => match input.await {
+                Either::Left((command, _)) => Event::Command(command),
+                Either::Right((frame, _)) => Event::Frame(frame),
+            },
+            VideoFrameRateMode::Fixed => {
+                let tick = compio::time::sleep(frame_duration(frame_rate));
+                futures_util::pin_mut!(tick);
+                match select(input, tick).await {
+                    Either::Left((Either::Left((command, _)), _)) => Event::Command(command),
+                    Either::Left((Either::Right((frame, _)), _)) => Event::Frame(frame),
+                    Either::Right(((), _)) => Event::FixedFrameDue,
+                }
+            }
+        };
+
+        match event {
+            Event::Frame(Some(frame)) => {
+                let frame = frame?;
+                encoder.encode_frame(&frame, &mut send_packet).await?;
+            }
+            Event::Frame(None) => break,
+            Event::Command(Some(VideoEncoderCommand::RequestKeyFrame)) => {
+                encoder.request_key_frame();
+                encoder
+                    .encode_latest_frame(&mut send_packet)
+                    .await
+                    .with_context(|| "Failed to encode the retained Windows recovery key frame")?;
+            }
+            Event::Command(None) => commands_open = false,
+            Event::FixedFrameDue => {
+                encoder.encode_latest_frame(&mut send_packet).await?;
             }
         }
-        let frame = frame?;
-        encoder.encode_frame(&frame, &mut send_packet).await?;
     }
 
     encoder.drain(&mut send_packet).await
@@ -188,6 +237,7 @@ struct MfH264Encoder {
     force_key_frame: bool,
     logged_output_format: bool,
     async_accepts_input: bool,
+    latest_input: Option<ID3D11Texture2D>,
     pending_probes: VecDeque<Option<HostVideoFrameProbe>>,
     probe_reporter: Option<HostVideoProbeReporter>,
 }
@@ -268,6 +318,7 @@ impl MfH264Encoder {
             force_key_frame: false,
             logged_output_format: false,
             async_accepts_input,
+            latest_input: None,
             pending_probes: VecDeque::new(),
             probe_reporter,
         })
@@ -283,7 +334,7 @@ impl MfH264Encoder {
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
     where
-        SendPacket: FnMut(WindowsVideoPacket) -> SendFuture,
+        SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         if frame.size != self.frame_size {
@@ -304,19 +355,50 @@ impl MfH264Encoder {
             probe.mark_encoder_received();
         }
 
+        if let Some(probe) = &mut probe {
+            probe.mark_vpp_started();
+        }
+        let nv12 = self.convert_to_nv12(frame.texture())?;
+        self.latest_input = Some(nv12.clone());
+        if let Some(probe) = &mut probe {
+            probe.mark_vpp_completed();
+        }
+        self.encode_input(nv12, probe, send_packet).await
+    }
+
+    async fn encode_latest_frame<SendPacket, SendFuture>(
+        &mut self,
+        send_packet: &mut SendPacket,
+    ) -> eros::Result<()>
+    where
+        SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
+        let texture = self
+            .latest_input
+            .as_ref()
+            .cloned()
+            .with_context(|| "Windows encoder has no retained frame to encode")?;
+        self.encode_input(texture, None, send_packet).await
+    }
+
+    async fn encode_input<SendPacket, SendFuture>(
+        &mut self,
+        texture: ID3D11Texture2D,
+        mut probe: Option<HostVideoFrameProbe>,
+        send_packet: &mut SendPacket,
+    ) -> eros::Result<()>
+    where
+        SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
+        SendFuture: Future<Output = eros::Result<()>>,
+    {
         if self.transform_event_generator.is_some() {
             while !self.async_accepts_input {
                 self.handle_async_encoder_event().await?;
             }
         }
 
-        if let Some(probe) = &mut probe {
-            probe.mark_vpp_started();
-        }
-        let sample = self.create_input_sample(frame)?;
-        if let Some(probe) = &mut probe {
-            probe.mark_vpp_completed();
-        }
+        let sample = create_input_sample(&texture)?;
         unsafe {
             sample.SetSampleTime(self.next_sample_time_hns)?;
             sample.SetSampleDuration(self.frame_duration_hns)?;
@@ -375,7 +457,7 @@ impl MfH264Encoder {
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
     where
-        SendPacket: FnMut(WindowsVideoPacket) -> SendFuture,
+        SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         unsafe {
@@ -401,7 +483,7 @@ impl MfH264Encoder {
         send_packet: &mut SendPacket,
     ) -> eros::Result<()>
     where
-        SendPacket: FnMut(WindowsVideoPacket) -> SendFuture,
+        SendPacket: FnMut(Vec<WindowsVideoPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         loop {
@@ -422,6 +504,7 @@ impl MfH264Encoder {
             }
             let mut rtp_packets = 0u64;
             let mut rtp_bytes = 0u64;
+            let mut packet_batch = Vec::new();
             for access_unit in split_annex_b_access_units(&access_units) {
                 let nals = split_h264_nals(access_unit);
                 for (index, nal) in nals.iter().enumerate() {
@@ -437,10 +520,13 @@ impl MfH264Encoder {
                         rtp_packets = rtp_packets.saturating_add(1);
                         rtp_bytes = rtp_bytes
                             .saturating_add(u64::try_from(packet.len()).unwrap_or(u64::MAX));
-                        send_packet(WindowsVideoPacket(packet)).await?;
+                        packet_batch.push(WindowsVideoPacket(packet));
                     }
                 }
                 self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
+            }
+            if !packet_batch.is_empty() {
+                send_packet(packet_batch).await?;
             }
             if let (Some(reporter), Some(probe)) = (&mut self.probe_reporter, output.probe.take()) {
                 reporter.record_frame(probe, rtp_packets, rtp_bytes);
@@ -679,20 +765,6 @@ impl MfH264Encoder {
             unsafe { codec_api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value) }
                 .with_context(|| "Failed to request a Windows H.264 key frame")?,
         )
-    }
-
-    fn create_input_sample(
-        &mut self,
-        frame: &WindowsFramePipelineFrame,
-    ) -> eros::Result<IMFSample> {
-        let nv12 = self.convert_to_nv12(frame.texture())?;
-        let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &nv12, 0, false) }
-            .with_context(|| "Failed to wrap NV12 D3D11 texture for Media Foundation")?;
-        let sample = unsafe { MFCreateSample() }
-            .with_context(|| "Failed to create Media Foundation input sample")?;
-        unsafe { sample.AddBuffer(&buffer) }
-            .with_context(|| "Failed to attach the D3D11 texture buffer to the input sample")?;
-        Ok(sample)
     }
 
     fn convert_to_nv12(&mut self, texture: &ID3D11Texture2D) -> eros::Result<ID3D11Texture2D> {
@@ -1320,11 +1392,13 @@ fn packetize_h264_nal(
         let fu_header = (if start { 0x80 } else { 0 })
             | (if fragment_is_last { 0x40 } else { 0 })
             | (nal_header & 0x1f);
-        let mut rtp_payload = Vec::with_capacity(2 + end - offset);
-        rtp_payload.push(fu_indicator);
-        rtp_payload.push(fu_header);
-        rtp_payload.extend_from_slice(&payload[offset..end]);
-        packets.push(rtp_packet(*sequence, timestamp, rtp_marker, &rtp_payload));
+        packets.push(rtp_packet_parts(
+            *sequence,
+            timestamp,
+            rtp_marker,
+            &[fu_indicator, fu_header],
+            &payload[offset..end],
+        ));
         *sequence = sequence.wrapping_add(1);
         offset = end;
     }
@@ -1332,14 +1406,26 @@ fn packetize_h264_nal(
 }
 
 fn rtp_packet(sequence: u16, timestamp: u32, marker: bool, payload: &[u8]) -> Bytes {
-    let mut packet = Vec::with_capacity(RTP_FIXED_HEADER_SIZE + payload.len());
-    packet.push(2 << 6);
-    packet.push((u8::from(marker) << 7) | H264_RTP_PAYLOAD_TYPE);
-    packet.extend_from_slice(&sequence.to_be_bytes());
-    packet.extend_from_slice(&timestamp.to_be_bytes());
-    packet.extend_from_slice(&RTP_SSRC.to_be_bytes());
+    rtp_packet_parts(sequence, timestamp, marker, &[], payload)
+}
+
+fn rtp_packet_parts(
+    sequence: u16,
+    timestamp: u32,
+    marker: bool,
+    payload_prefix: &[u8],
+    payload: &[u8],
+) -> Bytes {
+    let mut packet =
+        BytesMut::with_capacity(RTP_FIXED_HEADER_SIZE + payload_prefix.len() + payload.len());
+    packet.put_u8(2 << 6);
+    packet.put_u8((u8::from(marker) << 7) | H264_RTP_PAYLOAD_TYPE);
+    packet.put_u16(sequence);
+    packet.put_u32(timestamp);
+    packet.put_u32(RTP_SSRC);
+    packet.extend_from_slice(payload_prefix);
     packet.extend_from_slice(payload);
-    Bytes::from(packet)
+    packet.freeze()
 }
 
 fn strip_annex_b_start_codes(mut bytes: &[u8]) -> &[u8] {
@@ -1358,6 +1444,26 @@ fn frame_duration_hns(frame_rate: FrameRate) -> i64 {
     let numerator = frame_rate.numerator().max(1) as i64;
     let denominator = frame_rate.denominator().max(1) as i64;
     ((10_000_000_i64 * denominator) / numerator).max(1)
+}
+
+fn frame_duration(frame_rate: FrameRate) -> Duration {
+    let numerator = u128::from(frame_rate.numerator().max(1));
+    let denominator = u128::from(frame_rate.denominator().max(1));
+    let nanoseconds = 1_000_000_000_u128
+        .saturating_mul(denominator)
+        .div_ceil(numerator)
+        .min(u64::MAX.into()) as u64;
+    Duration::from_nanos(nanoseconds.max(1))
+}
+
+fn create_input_sample(texture: &ID3D11Texture2D) -> eros::Result<IMFSample> {
+    let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false) }
+        .with_context(|| "Failed to wrap NV12 D3D11 texture for Media Foundation")?;
+    let sample = unsafe { MFCreateSample() }
+        .with_context(|| "Failed to create Media Foundation input sample")?;
+    unsafe { sample.AddBuffer(&buffer) }
+        .with_context(|| "Failed to attach the D3D11 texture buffer to the input sample")?;
+    Ok(sample)
 }
 
 fn frame_rate_rational_from_duration(duration_hns: i64) -> DXGI_RATIONAL {

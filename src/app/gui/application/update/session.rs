@@ -71,6 +71,20 @@ where
                         self.remote_stream
                             .screen_stream
                             .apply_configuration(&configured);
+                        if let Some(target) =
+                            self.remote_stream.screen_stream.waiting_target().cloned()
+                        {
+                            let timeout_sender = sender.clone();
+                            compio::runtime::spawn(async move {
+                                compio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                timeout_sender.post(RootMessage::InitialVideoKeyFrameTimeout {
+                                    request_id: target.request_id,
+                                    session_id: target.session_id,
+                                    screen_id: target.screen_id,
+                                });
+                            })
+                            .detach();
+                        }
                         let configured_count = configured
                             .outcomes
                             .iter()
@@ -117,6 +131,20 @@ where
                         eros::bail!("Video frame bypassed the latest-frame session queue")
                     }
                     SessionMessage::KeyFrameRequired(screen_id) => {
+                        let Some(request_id) = self
+                            .remote_stream
+                            .screen_stream
+                            .active_request_id()
+                            .filter(|_| {
+                                self.remote_stream.screen_stream.active_screen()
+                                    == Some((id, screen_id))
+                            })
+                        else {
+                            return Ok(false);
+                        };
+                        if !self.remote_stream.key_frame_request.begin(request_id) {
+                            return Ok(false);
+                        }
                         warn!(
                             event = "video_recovery_key_frame_requested",
                             session_id = id.0,

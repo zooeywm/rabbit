@@ -37,7 +37,7 @@ where
 
     pub fn run<SendFuture>(self) -> impl Future<Output = eros::Result<()>>
     where
-        SendPacket: FnMut(Encoder::Packet) -> SendFuture,
+        SendPacket: FnMut(Vec<Encoder::Packet>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         Encoder::run(
@@ -86,7 +86,7 @@ mod tests {
         where
             Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
             Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-            SendPacket: FnMut(Self::Packet) -> SendFuture,
+            SendPacket: FnMut(Vec<Self::Packet>) -> SendFuture,
             SendFuture: Future<Output = eros::Result<()>>,
         {
             assert_eq!(parameters.codec, VideoCodec::H264);
@@ -103,7 +103,7 @@ mod tests {
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<ProcessedFrame>>> + Unpin,
         Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-        SendPacket: FnMut(EncodedPacket) -> SendFuture,
+        SendPacket: FnMut(Vec<EncodedPacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         assert_eq!(
@@ -112,7 +112,7 @@ mod tests {
         );
         while let Some(frame) = frames.next().await {
             let frame = frame.expect("Screen stream should contain a processed frame");
-            send_packet(EncodedPacket(frame.0)).await?;
+            send_packet(vec![EncodedPacket(frame.0)]).await?;
         }
 
         Ok(())
@@ -128,11 +128,12 @@ mod tests {
             VideoEncoderParameters {
                 codec: VideoCodec::H264,
                 frame_rate: FrameRate::new(120, 1).expect("Test frame rate should be valid"),
+                frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 bitrate: VideoBitrate::new(100_000_000).expect("Test bitrate should be valid"),
             },
             1_200,
             |packet| {
-                packets.borrow_mut().push(packet);
+                packets.borrow_mut().extend(packet);
                 std::future::ready(Ok(()))
             },
         );

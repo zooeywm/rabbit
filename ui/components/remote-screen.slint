@@ -1,4 +1,4 @@
-import { LineEdit } from "std-widgets.slint";
+import { CheckBox, LineEdit } from "std-widgets.slint";
 
 import { RemoteScreenItem } from "../types.slint";
 import { BodyText, Card, Heading } from "./common.slint";
@@ -8,10 +8,10 @@ export component RemoteScreenCard inherits Card {
     in property <RemoteScreenItem> screen;
     in property <int> screen-index;
     pure callback recommended-bitrate(string, string, string) -> string;
-    callback open-screen(int, string, string, string, string);
+    callback open-screen(int, string, string, string, bool, string);
 
     min-width: 260px;
-    height: 378px;
+    height: 412px;
     property <bool> bitrate-overridden: false;
 
     function update-recommended-bitrate() {
@@ -89,6 +89,11 @@ export component RemoteScreenCard inherits Card {
             edited => { root.update-recommended-bitrate(); }
         }
 
+        dynamic-frame-rate := CheckBox {
+            text: "Dynamic frame rate (encode only when content changes)";
+            checked: root.screen.selected-dynamic-frame-rate;
+        }
+
         Text {
             text: "Bitrate (Mbps) · H.264 suggested: " + root.recommended-bitrate(
                 width-input.text,
@@ -127,6 +132,7 @@ export component RemoteScreenCard inherits Card {
                         width-input.text,
                         height-input.text,
                         frame-rate-input.text,
+                        dynamic-frame-rate.checked,
                         bitrate-input.text,
                     );
                 }
@@ -138,11 +144,11 @@ export component RemoteScreenCard inherits Card {
 export component RemoteScreenGrid inherits Rectangle {
     in property <[RemoteScreenItem]> screens;
     pure callback recommended-bitrate(string, string, string) -> string;
-    callback open-screen(int, string, string, string, string);
+    callback open-screen(int, string, string, string, bool, string);
 
     property <length> card-min-width: 260px;
     property <length> card-preferred-width: 320px;
-    property <length> card-height: 378px;
+    property <length> card-height: 412px;
     property <length> card-spacing: 12px;
     property <int> column-count: max(1, floor((root.width + root.card-spacing) / (root.card-preferred-width + root.card-spacing)));
     property <int> row-count: root.screens.length == 0 ? 0 : floor((root.screens.length + root.column-count - 1) / root.column-count);
@@ -159,12 +165,13 @@ export component RemoteScreenGrid inherits Rectangle {
         recommended-bitrate(width, height, frame-rate) => {
             root.recommended-bitrate(width, height, frame-rate)
         }
-        open-screen(i, selected-width, selected-height, selected-frame-rate, selected-bitrate) => {
+        open-screen(i, selected-width, selected-height, selected-frame-rate, dynamic-frame-rate, selected-bitrate) => {
             root.open-screen(
                 i,
                 selected-width,
                 selected-height,
                 selected-frame-rate,
+                dynamic-frame-rate,
                 selected-bitrate,
             );
         }

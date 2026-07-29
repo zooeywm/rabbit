@@ -29,7 +29,7 @@ export component ConnectedPage inherits Rectangle {
     callback stop-hosted-screen-stream(int);
     callback disconnect-device(int);
     pure callback recommended-bitrate(string, string, string) -> string;
-    callback open-screen(int, string, string, string, string);
+    callback open-screen(int, string, string, string, bool, string);
 
     clip: true;
 
@@ -184,12 +184,13 @@ export component ConnectedPage inherits Rectangle {
                 recommended-bitrate(width, height, frame-rate) => {
                     root.recommended-bitrate(width, height, frame-rate)
                 }
-                open-screen(i, selected-width, selected-height, selected-frame-rate, selected-bitrate) => {
+                open-screen(i, selected-width, selected-height, selected-frame-rate, dynamic-frame-rate, selected-bitrate) => {
                     root.open-screen(
                         i,
                         selected-width,
                         selected-height,
                         selected-frame-rate,
+                        dynamic-frame-rate,
                         selected-bitrate,
                     );
                 }

@@ -1,4 +1,5 @@
 mod kms;
+mod wayland_damage;
 
 #[cfg(test)]
 pub(crate) use kms::empty_kms_frame;

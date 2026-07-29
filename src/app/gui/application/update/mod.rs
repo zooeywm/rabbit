@@ -61,6 +61,7 @@ where
             | RootMessage::MouseButton { .. }
             | RootMessage::VideoFrameReceived(..)
             | RootMessage::VideoFrameReady(..)
+            | RootMessage::InitialVideoKeyFrameTimeout { .. }
             | RootMessage::VideoDecoderFinished(..)
             | RootMessage::VideoRendererFailed(..)
             | RootMessage::KeyFrameRequestFinished { .. }

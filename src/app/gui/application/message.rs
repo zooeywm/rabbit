@@ -52,6 +52,11 @@ pub(super) enum RootMessage {
     SessionMessageReceived(SessionId, SessionMessage),
     VideoFrameReceived(SessionId, ReceivedVideoFrame),
     VideoFrameReady(SessionId, ScreenId),
+    InitialVideoKeyFrameTimeout {
+        request_id: ScreenStreamRequestId,
+        session_id: SessionId,
+        screen_id: ScreenId,
+    },
     VideoDecoderFinished(SessionId, ScreenId, eros::Result<()>),
     VideoRendererFailed(String),
     ScreenStreamConfigurationFinished {
@@ -89,6 +94,7 @@ pub(super) enum RootMessage {
         width: String,
         height: String,
         frame_rate: String,
+        dynamic_frame_rate: bool,
         bitrate_mbps: String,
     },
     DisconnectRemoteSession,

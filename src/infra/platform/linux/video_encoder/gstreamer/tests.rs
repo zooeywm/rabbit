@@ -326,6 +326,7 @@ fn streams_several_host_video_frames() {
                 &ScreenId(0),
                 FramePipelineParameters {
                     frame_size: target_size,
+                    frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
                 },
                 target_frame_rate,
                 crate::kernel::frame_pipeline::FrameDelivery::Latest,
@@ -338,17 +339,20 @@ fn streams_several_host_video_frames() {
             VideoEncoderParameters {
                 codec: VideoCodec::H264,
                 frame_rate: target_frame_rate,
+                frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 bitrate: test_bitrate(),
             },
             MAX_RTP_PACKET_SIZE,
-            move |packet| {
-                assert!(
-                    packet.payload_len() <= MAX_RTP_PACKET_SIZE,
-                    "Encoded RTP packet should respect the transport packet size"
-                );
-                rtp_packets_for_callback.set(rtp_packets_for_callback.get() + 1);
-                if packet.is_frame_end() {
-                    encoded_frames_for_callback.set(encoded_frames_for_callback.get() + 1);
+            move |packets| {
+                for packet in packets {
+                    assert!(
+                        packet.payload_len() <= MAX_RTP_PACKET_SIZE,
+                        "Encoded RTP packet should respect the transport packet size"
+                    );
+                    rtp_packets_for_callback.set(rtp_packets_for_callback.get() + 1);
+                    if packet.is_frame_end() {
+                        encoded_frames_for_callback.set(encoded_frames_for_callback.get() + 1);
+                    }
                 }
 
                 ready(Ok::<(), eros::ErrorUnion>(()))
@@ -1088,6 +1092,7 @@ fn host_video_test_source_geometry(screen_name: &str) -> (PixelSize, FrameRate) 
         reaper_handle,
         Vec::new(),
         crate::infra::platform::screen_capture::KmsFrameQueuePolicy::Latest,
+        crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
     )
     .expect("KMS capture source should start");
     let (device, frames, _fallback) = receiver.into_parts();

@@ -59,7 +59,15 @@ impl VideoBitrate {
 pub struct VideoEncoderParameters {
     pub codec: VideoCodec,
     pub frame_rate: FrameRate,
+    pub frame_rate_mode: VideoFrameRateMode,
     pub bitrate: VideoBitrate,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VideoFrameRateMode {
+    Fixed,
+    #[default]
+    Dynamic,
 }
 
 fn recommended_h264_bitrate(frame_size: PixelSize, frame_rate: FrameRate) -> VideoBitrate {
@@ -98,7 +106,7 @@ pub trait VideoEncoder {
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
         Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-        SendPacket: FnMut(Self::Packet) -> SendFuture,
+        SendPacket: FnMut(Vec<Self::Packet>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>;
 }
 
@@ -142,7 +150,7 @@ mod tests {
         where
             Frames: futures_core::Stream<Item = eros::Result<Rc<Self::Input>>> + Unpin,
             Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-            SendPacket: FnMut(Self::Packet) -> SendFuture,
+            SendPacket: FnMut(Vec<Self::Packet>) -> SendFuture,
             SendFuture: Future<Output = eros::Result<()>>,
         {
             drive_empty_encoder(frames, commands, send_packet)
@@ -157,7 +165,7 @@ mod tests {
     where
         Frames: futures_core::Stream<Item = eros::Result<Rc<NonCloneFrame>>> + Unpin,
         Commands: futures_core::Stream<Item = VideoEncoderCommand> + Unpin,
-        SendPacket: FnMut(NonClonePacket) -> SendFuture,
+        SendPacket: FnMut(Vec<NonClonePacket>) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
         assert_eq!(
@@ -166,7 +174,7 @@ mod tests {
         );
         while let Some(frame) = frames.next().await {
             let frame = frame.expect("Encoder input should contain a frame");
-            send_packet(NonClonePacket(frame.0)).await?;
+            send_packet(vec![NonClonePacket(frame.0)]).await?;
         }
 
         Ok(())
@@ -185,11 +193,12 @@ mod tests {
                 VideoEncoderParameters {
                     codec: VideoCodec::H264,
                     frame_rate: FrameRate::new(120, 1).expect("Test frame rate should be valid"),
+                    frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                     bitrate: VideoBitrate::new(100_000_000).expect("Test bitrate should be valid"),
                 },
                 1_200,
                 |packet| {
-                    packets.borrow_mut().push(packet);
+                    packets.borrow_mut().extend(packet);
                     std::future::ready(Ok(()))
                 },
             ))

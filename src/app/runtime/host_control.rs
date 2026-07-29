@@ -367,6 +367,7 @@ mod tests {
                     height: 100,
                 },
                 frame_rate: FrameRate::new(60, 1).expect("fps"),
+                frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                 codec: VideoCodec::H264,
                 bitrate: VideoBitrate::new(1_000_000).expect("bitrate"),
             }],

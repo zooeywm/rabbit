@@ -47,6 +47,7 @@ pub(crate) enum GuiIntent {
         width: String,
         height: String,
         frame_rate: String,
+        dynamic_frame_rate: bool,
         bitrate_mbps: String,
     },
     DisconnectRemoteSession,
@@ -211,21 +212,24 @@ where
         }
         {
             let sender = sender.clone();
-            window.on_open_screen(move |index, width, height, frame_rate, bitrate_mbps| {
-                let Ok(index) = usize::try_from(index) else {
-                    return;
-                };
-                send_intent(
-                    &sender,
-                    GuiIntent::OpenRemoteScreen {
-                        index,
-                        width: width.to_string(),
-                        height: height.to_string(),
-                        frame_rate: frame_rate.to_string(),
-                        bitrate_mbps: bitrate_mbps.to_string(),
-                    },
-                );
-            });
+            window.on_open_screen(
+                move |index, width, height, frame_rate, dynamic_frame_rate, bitrate_mbps| {
+                    let Ok(index) = usize::try_from(index) else {
+                        return;
+                    };
+                    send_intent(
+                        &sender,
+                        GuiIntent::OpenRemoteScreen {
+                            index,
+                            width: width.to_string(),
+                            height: height.to_string(),
+                            frame_rate: frame_rate.to_string(),
+                            dynamic_frame_rate,
+                            bitrate_mbps: bitrate_mbps.to_string(),
+                        },
+                    );
+                },
+            );
         }
         {
             let sender = sender.clone();
@@ -489,6 +493,7 @@ fn remote_screen_model(entries: Vec<RemoteScreenView>) -> ModelRc<RemoteScreenIt
                 selected_width: SharedString::from(entry.selected_width),
                 selected_height: SharedString::from(entry.selected_height),
                 selected_frame_rate: SharedString::from(entry.selected_frame_rate),
+                selected_dynamic_frame_rate: entry.selected_dynamic_frame_rate,
                 selected_bitrate_mbps: SharedString::from(entry.selected_bitrate_mbps),
             })
             .collect::<Vec<_>>(),

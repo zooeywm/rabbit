@@ -19,6 +19,7 @@ use crate::{
         },
         video_probe::{VideoFrameProbe, VideoProbeClock},
     },
+    kernel::video_encoder::VideoFrameRateMode,
     kernel::{geometry::FrameRate, screen_capture::ScreenCaptureSource},
 };
 
@@ -73,6 +74,7 @@ struct KmsCaptureLoop {
     encoder_profiles: Vec<DmaBufProfile>,
     /// When true, overwrite older frames (streaming). When false, block on full queue.
     drop_to_latest: bool,
+    frame_rate_mode: VideoFrameRateMode,
 }
 
 #[derive(Debug)]
@@ -111,6 +113,7 @@ impl KmsCaptureLease {
         reaper: WorkerReaperHandle,
         encoder_profiles: Vec<DmaBufProfile>,
         queue_policy: KmsFrameQueuePolicy,
+        frame_rate_mode: VideoFrameRateMode,
     ) -> io::Result<ScreenCaptureSource<Self, KmsFrameReceiver>> {
         let (commands, command_receiver) = bounded(1);
         let (device_sender, device) = bounded(1);
@@ -133,6 +136,7 @@ impl KmsCaptureLease {
                 probe_interval,
                 encoder_profiles,
                 drop_to_latest,
+                frame_rate_mode,
             }
             .run();
         })?;
@@ -247,6 +251,7 @@ impl KmsCaptureLoop {
             probe_interval,
             encoder_profiles,
             drop_to_latest,
+            frame_rate_mode,
         } = self;
 
         let mut capturer = match KmsCapturer::new(&screen_name, encoder_profiles) {
@@ -261,6 +266,18 @@ impl KmsCaptureLoop {
             return;
         }
 
+        let mut damage_notifier = match frame_rate_mode {
+            VideoFrameRateMode::Fixed => None,
+            VideoFrameRateMode::Dynamic => {
+                match super::super::wayland_damage::WaylandDamageNotifier::new(&screen_name) {
+                    Ok(notifier) => Some(notifier),
+                    Err(error) => {
+                        let _ = frames.send(Err(error));
+                        return;
+                    }
+                }
+            }
+        };
         let mut probe_clock = enable_probing.then(|| VideoProbeClock::new(probe_interval));
         let mut use_composed_fallback = false;
 
@@ -272,6 +289,17 @@ impl KmsCaptureLoop {
                     }
                     Ok(KmsCaptureCommand::Shutdown) | Err(TryRecvError::Disconnected) => return,
                     Err(TryRecvError::Empty) => break,
+                }
+            }
+
+            if let Some(notifier) = &mut damage_notifier {
+                match notifier.wait(Duration::from_millis(100)) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        let _ = frames.send(Err(error));
+                        return;
+                    }
                 }
             }
 
@@ -381,6 +409,7 @@ mod tests {
             reaper_handle,
             Vec::new(),
             KmsFrameQueuePolicy::Latest,
+            crate::kernel::video_encoder::VideoFrameRateMode::Fixed,
         )
         .expect("KMS capture source should start asynchronously");
 

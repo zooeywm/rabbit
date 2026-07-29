@@ -61,10 +61,12 @@ fn resolve_desired_stream(
                     screen_id: desired.screen_id,
                     parameters: FramePipelineParameters {
                         frame_size: desired.frame_size,
+                        frame_rate_mode: desired.frame_rate_mode,
                     },
                     encoding: VideoEncoderParameters {
                         codec: desired.codec,
                         frame_rate: desired.frame_rate,
+                        frame_rate_mode: desired.frame_rate_mode,
                         bitrate: desired.bitrate,
                     },
                 });
@@ -129,6 +131,7 @@ mod tests {
                         height: 1200,
                     },
                     frame_rate: FrameRate::new(60, 1).expect("frame rate"),
+                    frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                     codec: VideoCodec::H264,
                     bitrate: VideoBitrate::new(24_000_000).expect("bitrate"),
                 },
@@ -140,6 +143,7 @@ mod tests {
                         height: 720,
                     },
                     frame_rate: FrameRate::new(30, 1).expect("frame rate"),
+                    frame_rate_mode: crate::kernel::video_encoder::VideoFrameRateMode::Dynamic,
                     codec: VideoCodec::H264,
                     bitrate: VideoBitrate::new(5_000_000).expect("bitrate"),
                 },

@@ -74,6 +74,17 @@ impl TransportSend for SessionTransportSend {
         }
     }
 
+    async fn send_unreliable_batch(
+        &self,
+        channel: TransportChannel,
+        payloads: Vec<Bytes>,
+    ) -> eros::Result<()> {
+        match self {
+            Self::Quic(send) => send.send_unreliable_batch(channel, payloads).await,
+            Self::Tcp(send) => send.send_unreliable_batch(channel, payloads).await,
+        }
+    }
+
     async fn send(&self, message: TransportMessage) -> eros::Result<()> {
         match self {
             Self::Quic(send) => send.send(message).await,
