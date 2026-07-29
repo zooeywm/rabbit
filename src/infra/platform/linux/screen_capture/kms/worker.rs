@@ -354,7 +354,7 @@ impl KmsCaptureLoop {
             };
 
             let published = if drop_to_latest {
-                publish_latest_frame(&frames, &overflow_frames, frame)
+                publish_latest_frame(frames.clone(), overflow_frames.clone(), frame)
             } else {
                 // Reliable recording: block until the consumer drains space.
                 frames.send(frame).is_ok()
@@ -387,8 +387,8 @@ fn captured_frame(frame: KmsCaptureOutput, probe: Option<VideoFrameProbe>) -> Km
 }
 
 fn publish_latest_frame(
-    sender: &Sender<eros::Result<KmsCapturedFrame>>,
-    receiver: &Receiver<eros::Result<KmsCapturedFrame>>,
+    sender: Sender<eros::Result<KmsCapturedFrame>>,
+    receiver: Receiver<eros::Result<KmsCapturedFrame>>,
     mut item: eros::Result<KmsCapturedFrame>,
 ) -> bool {
     loop {
@@ -459,13 +459,13 @@ mod tests {
         };
 
         assert!(publish_latest_frame(
-            &sender,
-            &overflow_receiver,
+            sender.clone(),
+            overflow_receiver.clone(),
             Ok(empty_kms_frame(first_size)),
         ));
         assert!(publish_latest_frame(
-            &sender,
-            &overflow_receiver,
+            sender.clone(),
+            overflow_receiver.clone(),
             Ok(empty_kms_frame(latest_size)),
         ));
         let frame = receiver

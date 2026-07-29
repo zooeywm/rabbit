@@ -585,7 +585,7 @@ where
         .detach();
 
         while !application.lifecycle.finished {
-            let message = application.next_message(&intents).await;
+            let message = application.next_message(intents.clone()).await;
             let mut changed = application.update(message, &sender).await?;
             changed |= application.apply_session_timeouts()?;
             if changed {
@@ -597,7 +597,7 @@ where
         Ok(())
     }
 
-    pub(super) async fn next_message(&self, intents: &flume::Receiver<GuiIntent>) -> RootMessage {
+    pub(super) async fn next_message(&self, intents: flume::Receiver<GuiIntent>) -> RootMessage {
         let internal = self.messages.pop();
         let gui = intents.recv_async();
         pin_mut!(internal, gui);

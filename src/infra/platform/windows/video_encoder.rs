@@ -138,6 +138,8 @@ where
         return Ok(());
     };
     let first_frame = first_frame?;
+    let source_fixed_rate_paced =
+        parameters.frame_rate_mode == VideoFrameRateMode::Fixed && first_frame.fixed_rate_paced;
     debug!(
         event = "windows_video_encoder_starting",
         screen_id = first_frame.screen_id.0,
@@ -164,9 +166,10 @@ where
     info!(
         event = "windows_video_encoder_scheduling_selected",
         frame_rate_mode = ?parameters.frame_rate_mode,
-        input_handling = match parameters.frame_rate_mode {
-            VideoFrameRateMode::Dynamic => "encode-on-content-update",
-            VideoFrameRateMode::Fixed => "retain-latest-and-encode-on-fixed-clock",
+        input_handling = match (parameters.frame_rate_mode, source_fixed_rate_paced) {
+            (VideoFrameRateMode::Dynamic, _) => "encode-on-content-update",
+            (VideoFrameRateMode::Fixed, true) => "encode-source-paced-capture",
+            (VideoFrameRateMode::Fixed, false) => "retain-latest-and-encode-on-fixed-clock",
         },
         media_foundation_events = if encoder.transform_event_generator.is_some() {
             "async-callback"
@@ -180,7 +183,8 @@ where
     drop(first_frame);
 
     let mut commands_open = true;
-    let mut fixed_clock = (parameters.frame_rate_mode == VideoFrameRateMode::Fixed)
+    let mut fixed_clock = (parameters.frame_rate_mode == VideoFrameRateMode::Fixed
+        && !source_fixed_rate_paced)
         .then(|| FixedFrameClock::new(frame_rate));
     loop {
         enum Event<Frame> {
@@ -200,18 +204,13 @@ where
         futures_util::pin_mut!(next_frame, next_command);
         let input = select(next_command, next_frame);
         futures_util::pin_mut!(input);
-        let event = match parameters.frame_rate_mode {
-            VideoFrameRateMode::Dynamic => match input.await {
+        let event = match fixed_clock.as_ref() {
+            None => match input.await {
                 Either::Left((command, _)) => Event::Command(command),
                 Either::Right((frame, _)) => Event::Frame(frame),
             },
-            VideoFrameRateMode::Fixed => {
-                let tick = compio::time::sleep(
-                    fixed_clock
-                        .as_ref()
-                        .expect("Fixed frame-rate mode must have a clock")
-                        .delay(),
-                );
+            Some(clock) => {
+                let tick = compio::time::sleep(clock.delay());
                 futures_util::pin_mut!(tick);
                 match select(tick, input).await {
                     Either::Left(((), _)) => Event::FixedFrameDue,
@@ -224,11 +223,10 @@ where
         match event {
             Event::Frame(Some(frame)) => {
                 let frame = frame?;
-                match parameters.frame_rate_mode {
-                    VideoFrameRateMode::Dynamic => {
-                        encoder.encode_frame(&frame, &mut send_packet).await?;
-                    }
-                    VideoFrameRateMode::Fixed => encoder.update_latest_frame(&frame)?,
+                if fixed_clock.is_some() {
+                    encoder.update_latest_frame(&frame)?;
+                } else {
+                    encoder.encode_frame(&frame, &mut send_packet).await?;
                 }
             }
             Event::Frame(None) => break,

@@ -323,7 +323,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
     let mut gpu = None;
 
     loop {
-        match wait_for_event(&commands, &screens) {
+        match wait_for_event(commands.clone(), &screens) {
             GpuWorkerEvent::Command(Ok(GpuWorkerCommand::RegisterScreen { screen_id, frames })) => {
                 let (device, frames, composition_fallback) = frames.into_parts();
                 screens.insert(
@@ -392,7 +392,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
 
                 if let Some(error) = mismatch {
                     screens.remove(&screen_id);
-                    if !notify_screen_failed(&notifications, screen_id, error) {
+                    if !notify_screen_failed(notifications.clone(), screen_id, error) {
                         return;
                     }
                     continue;
@@ -409,7 +409,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                         Ok(context) => context,
                         Err(error) => {
                             screens.remove(&screen_id);
-                            if !notify_screen_failed(&notifications, screen_id, error) {
+                            if !notify_screen_failed(notifications.clone(), screen_id, error) {
                                 return;
                             }
                             continue;
@@ -423,7 +423,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
             }
             GpuWorkerEvent::ScreenReady(screen_id, Ok(Err(error))) => {
                 screens.remove(&screen_id);
-                if !notify_screen_failed(&notifications, screen_id, error) {
+                if !notify_screen_failed(notifications.clone(), screen_id, error) {
                     return;
                 }
             }
@@ -434,7 +434,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
                 let Some(gpu) = &gpu else {
                     screens.remove(&screen_id);
                     if !notify_screen_failed(
-                        &notifications,
+                        notifications.clone(),
                         screen_id,
                         eros::error!(
                             "GPU context is missing while processing screen {}",
@@ -453,7 +453,7 @@ fn run_worker(commands: Receiver<GpuWorkerCommand>, notifications: Sender<GpuWor
             }
             GpuWorkerEvent::Frame(screen_id, Ok(Err(error))) => {
                 screens.remove(&screen_id);
-                if !notify_screen_failed(&notifications, screen_id, error) {
+                if !notify_screen_failed(notifications.clone(), screen_id, error) {
                     return;
                 }
             }
@@ -480,7 +480,7 @@ fn gpu_mismatch(
 }
 
 fn notify_screen_failed(
-    notifications: &Sender<GpuWorkerNotification>,
+    notifications: Sender<GpuWorkerNotification>,
     screen_id: ScreenId,
     error: eros::ErrorUnion,
 ) -> bool {
@@ -490,10 +490,10 @@ fn notify_screen_failed(
 }
 
 fn wait_for_event(
-    commands: &Receiver<GpuWorkerCommand>,
+    commands: Receiver<GpuWorkerCommand>,
     screens: &HashMap<ScreenId, GpuScreen>,
 ) -> GpuWorkerEvent {
-    let mut selector = Selector::new().recv(commands, GpuWorkerEvent::Command);
+    let mut selector = Selector::new().recv(&commands, GpuWorkerEvent::Command);
 
     for (&screen_id, screen) in screens {
         if let Some(device) = &screen.device {
@@ -1059,7 +1059,7 @@ mod tests {
             },
         )]);
 
-        match wait_for_event(&command_receiver, &screens) {
+        match wait_for_event(command_receiver.clone(), &screens) {
             GpuWorkerEvent::ScreenReady(screen_id, Ok(Ok(device))) => {
                 assert_eq!(screen_id, ScreenId(3));
                 assert_eq!(

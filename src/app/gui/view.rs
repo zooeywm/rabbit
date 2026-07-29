@@ -101,7 +101,7 @@ struct PointerMailboxState {
 }
 
 impl PointerMailbox {
-    fn submit(&self, event: PointerViewportEvent, sender: &flume::Sender<GuiIntent>) {
+    fn submit(&self, event: PointerViewportEvent, sender: flume::Sender<GuiIntent>) {
         let notify = {
             let mut state = self.state.lock().expect("pointer mailbox poisoned");
             state.latest = Some(event);
@@ -182,13 +182,13 @@ where
                     NavigationSection::RemoteDevices => WorkspaceSection::RemoteDevices,
                     NavigationSection::ThisDevice => WorkspaceSection::ThisDevice,
                 };
-                send_intent(&sender, GuiIntent::SelectSection(section));
+                send_intent(sender.clone(), GuiIntent::SelectSection(section));
             });
         }
         {
             let sender = sender.clone();
             window.on_connect(move |address| {
-                send_intent(&sender, GuiIntent::Connect(address.to_string()));
+                send_intent(sender.clone(), GuiIntent::Connect(address.to_string()));
             });
         }
         {
@@ -198,7 +198,7 @@ where
                     return;
                 };
                 send_intent(
-                    &sender,
+                    sender.clone(),
                     GuiIntent::DecideConnectionRequest { index, accept },
                 );
             });
@@ -218,7 +218,7 @@ where
                         return;
                     };
                     send_intent(
-                        &sender,
+                        sender.clone(),
                         GuiIntent::OpenRemoteScreen {
                             index,
                             width: width.to_string(),
@@ -234,7 +234,7 @@ where
         {
             let sender = sender.clone();
             window.on_disconnect_remote_session(move || {
-                send_intent(&sender, GuiIntent::DisconnectRemoteSession);
+                send_intent(sender.clone(), GuiIntent::DisconnectRemoteSession);
             });
         }
         {
@@ -243,7 +243,7 @@ where
                 let Ok(index) = usize::try_from(index) else {
                     return;
                 };
-                send_intent(&sender, GuiIntent::StopHostedScreenStream(index));
+                send_intent(sender.clone(), GuiIntent::StopHostedScreenStream(index));
             });
         }
         {
@@ -252,19 +252,19 @@ where
                 let Ok(index) = usize::try_from(index) else {
                     return;
                 };
-                send_intent(&sender, GuiIntent::DisconnectDevice(index));
+                send_intent(sender.clone(), GuiIntent::DisconnectDevice(index));
             });
         }
         {
             let sender = sender.clone();
             window.on_retry_connect(move || {
-                send_intent(&sender, GuiIntent::RetryConnection);
+                send_intent(sender.clone(), GuiIntent::RetryConnection);
             });
         }
         {
             let sender = sender.clone();
             window.on_stop_stream(move || {
-                send_intent(&sender, GuiIntent::StopScreenStream);
+                send_intent(sender.clone(), GuiIntent::StopScreenStream);
             });
         }
         {
@@ -281,9 +281,9 @@ where
                         viewport_height,
                     };
                     match pointer_mode {
-                        PointerMode::Absolute => mailbox.submit(event, &sender),
+                        PointerMode::Absolute => mailbox.submit(event, sender.clone()),
                         PointerMode::Relative => send_intent(
-                            &sender,
+                            sender.clone(),
                             GuiIntent::PointerMoved(PointerIntent::Direct(event)),
                         ),
                     }
@@ -297,7 +297,7 @@ where
                     return;
                 };
                 send_intent(
-                    &sender,
+                    sender.clone(),
                     GuiIntent::MouseButton {
                         button,
                         state: if pressed {
@@ -316,7 +316,7 @@ where
                     return;
                 };
                 send_intent(
-                    &sender,
+                    sender.clone(),
                     GuiIntent::Keyboard {
                         key,
                         state: if pressed {
@@ -406,7 +406,7 @@ where
     }
 }
 
-fn send_intent(sender: &flume::Sender<GuiIntent>, intent: GuiIntent) {
+fn send_intent(sender: flume::Sender<GuiIntent>, intent: GuiIntent) {
     if sender.send(intent).is_err()
         && let Err(error) = slint::quit_event_loop()
     {

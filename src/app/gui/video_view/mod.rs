@@ -130,7 +130,12 @@ where
             ..
         } = &mut *state;
         let result = if display.is_some() {
-            render_native_frame(&direct_commands, &direct_window, display, active_stream)
+            render_native_frame(
+                direct_commands.clone(),
+                &direct_window,
+                display,
+                active_stream,
+            )
         } else {
             if let Some(window) = direct_window.upgrade() {
                 window.window().request_redraw();
@@ -145,7 +150,7 @@ where
                 });
             }
             Ok(None) => {}
-            Err(error) => fail_video_display(&mut state, &direct_errors, error),
+            Err(error) => fail_video_display(&mut state, direct_errors.clone(), error),
         }
     });
 
@@ -166,7 +171,7 @@ where
                         ..
                     } = &mut *video;
                     let result = render_video_frame(
-                        &receiver,
+                        receiver.clone(),
                         &weak_window,
                         display,
                         active_stream,
@@ -198,7 +203,7 @@ where
             };
 
             if let Err(error) = result {
-                fail_video_display(&mut video, &errors, error);
+                fail_video_display(&mut video, errors.clone(), error);
             }
         })
         .context("Failed to install the native video surface rendering bridge")?;
@@ -277,7 +282,7 @@ where
 }
 
 fn render_video_frame<Stack>(
-    commands: &flume::Receiver<VideoViewCommand<Stack>>,
+    commands: flume::Receiver<VideoViewCommand<Stack>>,
     weak_window: &slint::Weak<RabbitWindow>,
     display: &mut Option<Box<Stack::NativeRenderer>>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
@@ -345,7 +350,7 @@ where
 }
 
 fn render_native_frame<Stack>(
-    commands: &flume::Receiver<VideoViewCommand<Stack>>,
+    commands: flume::Receiver<VideoViewCommand<Stack>>,
     weak_window: &slint::Weak<RabbitWindow>,
     display: &mut Option<Box<Stack::NativeRenderer>>,
     active_stream: &mut Option<(SessionId, ScreenId)>,
@@ -409,7 +414,7 @@ fn activate_stream(
     first_frame
 }
 
-fn report_error_once(errors: &flume::Sender<GuiIntent>, failed: &mut bool, error: String) {
+fn report_error_once(errors: flume::Sender<GuiIntent>, failed: &mut bool, error: String) {
     if *failed {
         return;
     }
@@ -423,7 +428,7 @@ fn report_error_once(errors: &flume::Sender<GuiIntent>, failed: &mut bool, error
 
 fn fail_video_display<Stack>(
     state: &mut VideoViewState<Stack>,
-    errors: &flume::Sender<GuiIntent>,
+    errors: flume::Sender<GuiIntent>,
     error: eros::ErrorUnion,
 ) where
     Stack: VideoViewStack,

@@ -1,11 +1,11 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use eros::Context as _;
@@ -20,7 +20,7 @@ use windows::{
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
     },
     Win32::{
-        Foundation::HMODULE,
+        Foundation::{CloseHandle, HANDLE, HMODULE, WAIT_OBJECT_0},
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0},
             Direct3D10::ID3D10Multithread,
@@ -37,18 +37,24 @@ use windows::{
                 IDXGIOutputDuplication, IDXGIResource,
             },
         },
+        System::Threading::{
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE,
+            SetWaitableTimerEx, TIMER_ALL_ACCESS, WaitForSingleObject,
+        },
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
             Graphics::Capture::IGraphicsCaptureItemInterop,
             RoGetActivationFactory,
         },
     },
-    core::{HSTRING, Interface as _, Ref},
+    core::{HSTRING, Interface as _, PCWSTR, Ref},
 };
 
 use crate::kernel::{
+    geometry::FrameRate,
     screen_capture::{ScreenCaptureManager, ScreenCaptureSource},
     screen_manager::{ScreenId, ScreenLayoutManager},
+    video_encoder::VideoFrameRateMode,
 };
 
 use super::{
@@ -69,6 +75,7 @@ pub(crate) struct WindowsScreenCaptureManagerState {
     enable_probing: bool,
     probe_interval: Duration,
     wgc_d3d: RefCell<Option<WgcD3dDevice>>,
+    next_frame_schedule: Cell<Option<WindowsCaptureFrameSchedule>>,
 }
 
 impl WindowsScreenCaptureManagerState {
@@ -82,7 +89,32 @@ impl WindowsScreenCaptureManagerState {
             enable_probing,
             probe_interval,
             wgc_d3d: RefCell::new(None),
+            next_frame_schedule: Cell::new(None),
         }
+    }
+
+    pub(crate) fn set_next_frame_schedule(
+        &self,
+        frame_rate_mode: VideoFrameRateMode,
+        frame_rate: FrameRate,
+    ) {
+        self.next_frame_schedule
+            .set(Some(WindowsCaptureFrameSchedule {
+                frame_rate_mode,
+                frame_rate,
+            }));
+    }
+
+    fn take_next_frame_schedule(
+        &self,
+        source_frame_rate: FrameRate,
+    ) -> WindowsCaptureFrameSchedule {
+        self.next_frame_schedule
+            .take()
+            .unwrap_or(WindowsCaptureFrameSchedule {
+                frame_rate_mode: VideoFrameRateMode::Dynamic,
+                frame_rate: source_frame_rate,
+            })
     }
 
     fn wgc_d3d(&self) -> eros::Result<WgcD3dDevice> {
@@ -104,6 +136,12 @@ impl WindowsScreenCaptureManagerState {
     fn probe_interval(&self) -> Duration {
         self.probe_interval
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowsCaptureFrameSchedule {
+    frame_rate_mode: VideoFrameRateMode,
+    frame_rate: FrameRate,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +184,7 @@ pub(crate) struct WindowsCapturedFrame {
     pub(crate) surface: WindowsCapturedSurface,
     pub(crate) content_size: crate::kernel::geometry::PixelSize,
     pub(crate) frame_rate: crate::kernel::geometry::FrameRate,
+    pub(crate) fixed_rate_paced: bool,
     pub(crate) probe: Option<HostVideoFrameProbe>,
 }
 
@@ -262,11 +301,13 @@ where
         let state = <Deps as AsRef<WindowsScreenCaptureManagerState>>::as_ref(self.prj_ref());
         let probe_interval = state.probe_interval();
         let probe_frame_id = state.probing_enabled().then(|| Arc::new(AtomicU64::new(0)));
+        let frame_schedule = state.take_next_frame_schedule(screen.frame_rate);
         match state.backend {
             WindowsCaptureBackend::DesktopDuplication => acquire_desktop_duplication(
                 *screen_id,
                 monitor,
                 screen.frame_rate,
+                frame_schedule,
                 probe_frame_id,
                 probe_interval,
             ),
@@ -333,8 +374,10 @@ fn acquire_wgc(
                         .TryGetNextFrame()
                         .and_then(|frame| capture_frame_texture(id, frame_rate, frame, probe))
                     {
-                        Ok(frame) => replace_latest(&sender, &stale, Ok(frame)),
-                        Err(error) => replace_latest(&sender, &stale, Err(error.into())),
+                        Ok(frame) => replace_latest(sender.clone(), stale.clone(), Ok(frame)),
+                        Err(error) => {
+                            replace_latest(sender.clone(), stale.clone(), Err(error.into()))
+                        }
                     }
                 }
                 Ok(())
@@ -375,6 +418,7 @@ fn acquire_desktop_duplication(
     screen_id: ScreenId,
     monitor: WindowsMonitorHandle,
     frame_rate: crate::kernel::geometry::FrameRate,
+    frame_schedule: WindowsCaptureFrameSchedule,
     probe_frame_id: Option<Arc<AtomicU64>>,
     probe_interval: Duration,
 ) -> eros::Result<ScreenCaptureSource<WindowsCaptureLease, WindowsFrameReceiver>> {
@@ -384,15 +428,16 @@ fn acquire_desktop_duplication(
     let thread = thread::Builder::new()
         .name(format!("rabbit-ddx-{}", screen_id.get()))
         .spawn(move || {
-            if let Err(error) = run_desktop_duplication_capture(
-                capture,
+            let output = DesktopDuplicationCaptureOutput {
                 screen_id,
-                frame_rate,
                 probe_frame_id,
                 probe_interval,
-                &command_receiver,
-                &sender,
-            ) {
+                commands: command_receiver,
+                frames: sender.clone(),
+            };
+            if let Err(error) =
+                run_desktop_duplication_capture(capture, frame_rate, frame_schedule, &output)
+            {
                 let _ = sender.try_send(Err(error));
             }
         })
@@ -538,19 +583,28 @@ impl DesktopDuplicationCapture {
 
 fn run_desktop_duplication_capture(
     mut capture: DesktopDuplicationCapture,
-    screen_id: ScreenId,
-    frame_rate: crate::kernel::geometry::FrameRate,
-    probe_frame_id: Option<Arc<AtomicU64>>,
-    probe_interval: Duration,
-    commands: &flume::Receiver<DesktopDuplicationCommand>,
-    frames: &flume::Sender<eros::Result<WindowsCapturedFrame>>,
+    source_frame_rate: crate::kernel::geometry::FrameRate,
+    frame_schedule: WindowsCaptureFrameSchedule,
+    output: &DesktopDuplicationCaptureOutput,
+) -> eros::Result<()> {
+    match frame_schedule.frame_rate_mode {
+        VideoFrameRateMode::Dynamic => {
+            run_dynamic_desktop_duplication_capture(&mut capture, source_frame_rate, output)
+        }
+        VideoFrameRateMode::Fixed => {
+            run_fixed_desktop_duplication_capture(&mut capture, frame_schedule.frame_rate, output)
+        }
+    }
+}
+
+fn run_dynamic_desktop_duplication_capture(
+    capture: &mut DesktopDuplicationCapture,
+    frame_rate: FrameRate,
+    output: &DesktopDuplicationCaptureOutput,
 ) -> eros::Result<()> {
     const SHUTDOWN_POLL_INTERVAL_MS: u32 = 100;
     loop {
-        if matches!(
-            commands.try_recv(),
-            Ok(DesktopDuplicationCommand::Shutdown) | Err(flume::TryRecvError::Disconnected)
-        ) {
+        if output.shutdown_requested() {
             return Ok(());
         }
 
@@ -562,45 +616,213 @@ fn run_desktop_duplication_capture(
             thread::sleep(Duration::from_millis(10));
             continue;
         }
-        let Some(texture) = capture.texture.as_ref().cloned() else {
+        if !output.publish(capture, frame_rate, false)? {
+            return Ok(());
+        }
+    }
+}
+
+fn run_fixed_desktop_duplication_capture(
+    capture: &mut DesktopDuplicationCapture,
+    frame_rate: FrameRate,
+    output: &DesktopDuplicationCaptureOutput,
+) -> eros::Result<()> {
+    let timer = HighResolutionWaitableTimer::new()?;
+    let mut clock = FixedCaptureClock::new(frame_rate);
+    info!(
+        event = "windows_desktop_duplication_fixed_rate_configured",
+        screen_id = output.screen_id.get(),
+        frame_rate_numerator = frame_rate.numerator(),
+        frame_rate_denominator = frame_rate.denominator(),
+        timer = "waitable-timer",
+        high_resolution = timer.high_resolution,
+        acquire_timeout_ms = 0,
+        "Configured fixed-rate Windows screen capture"
+    );
+    loop {
+        if output.shutdown_requested() {
+            return Ok(());
+        }
+        timer.wait(clock.delay())?;
+        clock.advance();
+        if output.shutdown_requested() {
+            return Ok(());
+        }
+
+        let _updated = capture.acquire_latest(0)?;
+        if capture.texture.is_none() {
             continue;
-        };
+        }
+        if !output.publish(capture, frame_rate, true)? {
+            return Ok(());
+        }
+    }
+}
+
+struct DesktopDuplicationCaptureOutput {
+    screen_id: ScreenId,
+    probe_frame_id: Option<Arc<AtomicU64>>,
+    probe_interval: Duration,
+    commands: flume::Receiver<DesktopDuplicationCommand>,
+    frames: flume::Sender<eros::Result<WindowsCapturedFrame>>,
+}
+
+impl DesktopDuplicationCaptureOutput {
+    fn publish(
+        &self,
+        capture: &DesktopDuplicationCapture,
+        frame_rate: FrameRate,
+        fixed_rate_paced: bool,
+    ) -> eros::Result<bool> {
+        let texture = capture
+            .texture
+            .as_ref()
+            .cloned()
+            .with_context(|| "Desktop Duplication snapshot texture is unavailable")?;
         let (release, released) = flume::bounded(1);
-        let probe = probe_frame_id.as_ref().map(|next_frame_id| {
+        let probe = self.probe_frame_id.as_ref().map(|next_frame_id| {
             HostVideoFrameProbe::new(
                 next_frame_id.fetch_add(1, Ordering::Relaxed),
-                probe_interval,
+                self.probe_interval,
             )
         });
         let frame = WindowsCapturedFrame {
-            screen_id,
+            screen_id: self.screen_id,
             surface: WindowsCapturedSurface {
                 texture,
                 owner: WindowsCapturedSurfaceOwner::DesktopDuplication(release),
             },
             content_size: capture.size,
             frame_rate,
+            fixed_rate_paced,
             probe,
         };
-        if frames.send(Ok(frame)).is_err() {
+        if self.frames.send(Ok(frame)).is_err() {
             let _ = released.recv();
-            return Ok(());
+            return Ok(false);
         }
 
         loop {
             match released.recv_timeout(Duration::from_millis(10)) {
-                Ok(()) | Err(flume::RecvTimeoutError::Disconnected) => break,
-                Err(flume::RecvTimeoutError::Timeout) => {
-                    if matches!(
-                        commands.try_recv(),
-                        Ok(DesktopDuplicationCommand::Shutdown)
-                            | Err(flume::TryRecvError::Disconnected)
-                    ) {
-                        return Ok(());
-                    }
+                Ok(()) | Err(flume::RecvTimeoutError::Disconnected) => return Ok(true),
+                Err(flume::RecvTimeoutError::Timeout) if self.shutdown_requested() => {
+                    return Ok(false);
                 }
+                Err(flume::RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        matches!(
+            self.commands.try_recv(),
+            Ok(DesktopDuplicationCommand::Shutdown) | Err(flume::TryRecvError::Disconnected)
+        )
+    }
+}
+
+struct HighResolutionWaitableTimer {
+    handle: HANDLE,
+    high_resolution: bool,
+}
+
+impl HighResolutionWaitableTimer {
+    fn new() -> eros::Result<Self> {
+        match unsafe {
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+        } {
+            Ok(handle) => Ok(Self {
+                handle,
+                high_resolution: true,
+            }),
+            Err(high_resolution_error) => {
+                warn!(
+                    event = "windows_high_resolution_timer_unavailable",
+                    error = ?high_resolution_error,
+                    "High-resolution waitable timer is unavailable; using a standard waitable timer"
+                );
+                let handle =
+                    unsafe { CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0) }
+                        .with_context(|| "Failed to create Windows capture waitable timer")?;
+                Ok(Self {
+                    handle,
+                    high_resolution: false,
+                })
+            }
+        }
+    }
+
+    fn wait(&self, duration: Duration) -> eros::Result<()> {
+        let due_time_100ns = duration
+            .as_nanos()
+            .div_ceil(100)
+            .max(1)
+            .min(i64::MAX as u128) as i64;
+        let due_time = -due_time_100ns;
+        unsafe { SetWaitableTimerEx(self.handle, &due_time, 0, None, None, None, 0) }
+            .with_context(|| "Failed to arm Windows capture waitable timer")?;
+        let result = unsafe { WaitForSingleObject(self.handle, INFINITE) };
+        if result != WAIT_OBJECT_0 {
+            eros::bail!("Windows capture waitable timer returned {result:?}");
+        }
+        Ok(())
+    }
+}
+
+impl Drop for HighResolutionWaitableTimer {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}
+
+struct FixedCaptureClock {
+    period: Duration,
+    next_frame_at: Instant,
+}
+
+impl FixedCaptureClock {
+    fn new(frame_rate: FrameRate) -> Self {
+        Self::new_at(frame_rate, Instant::now())
+    }
+
+    fn new_at(frame_rate: FrameRate, now: Instant) -> Self {
+        let numerator = u128::from(frame_rate.numerator().max(1));
+        let denominator = u128::from(frame_rate.denominator().max(1));
+        let nanoseconds = 1_000_000_000_u128
+            .saturating_mul(denominator)
+            .div_ceil(numerator)
+            .min(u64::MAX.into()) as u64;
+        let period = Duration::from_nanos(nanoseconds.max(1));
+        Self {
+            period,
+            next_frame_at: now.checked_add(period).unwrap_or(now),
+        }
+    }
+
+    fn delay(&self) -> Duration {
+        self.delay_at(Instant::now())
+    }
+
+    fn delay_at(&self, now: Instant) -> Duration {
+        self.next_frame_at.saturating_duration_since(now)
+    }
+
+    fn advance(&mut self) {
+        self.advance_at(Instant::now());
+    }
+
+    fn advance_at(&mut self, now: Instant) {
+        let next = self.next_frame_at.checked_add(self.period).unwrap_or(now);
+        self.next_frame_at = if next > now {
+            next
+        } else {
+            now.checked_add(self.period).unwrap_or(now)
+        };
     }
 }
 
@@ -694,7 +916,7 @@ fn create_output_duplication(
         .with_context(|| "IDXGIOutput1::DuplicateOutput failed")?)
 }
 
-fn replace_latest<T>(sender: &flume::Sender<T>, stale: &flume::Receiver<T>, mut value: T) {
+fn replace_latest<T>(sender: flume::Sender<T>, stale: flume::Receiver<T>, mut value: T) {
     loop {
         match sender.try_send(value) {
             Ok(()) => return,
@@ -735,6 +957,7 @@ fn capture_frame_texture(
             height: content.Height.max(0) as u32,
         },
         frame_rate,
+        fixed_rate_paced: false,
         probe,
     })
 }
@@ -750,4 +973,64 @@ fn create_capture_item_for_monitor(
     .with_context(|| "Failed to get GraphicsCaptureItem interop factory")?;
     Ok(unsafe { interop.CreateForMonitor(monitor.0) }
         .with_context(|| "Failed to create GraphicsCaptureItem for monitor")?)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use crate::kernel::{geometry::FrameRate, video_encoder::VideoFrameRateMode};
+
+    use super::{FixedCaptureClock, WindowsCaptureBackend, WindowsScreenCaptureManagerState};
+
+    #[test]
+    fn fixed_capture_clock_keeps_absolute_deadlines() {
+        let start = Instant::now();
+        let mut clock =
+            FixedCaptureClock::new_at(FrameRate::new(100, 1).expect("frame rate"), start);
+
+        assert_eq!(
+            clock.delay_at(start + Duration::from_millis(4)),
+            Duration::from_millis(6)
+        );
+        clock.advance_at(start + Duration::from_millis(6));
+        assert_eq!(
+            clock.delay_at(start + Duration::from_millis(6)),
+            Duration::from_millis(14)
+        );
+    }
+
+    #[test]
+    fn fixed_capture_clock_skips_missed_deadlines_without_bursting() {
+        let start = Instant::now();
+        let mut clock =
+            FixedCaptureClock::new_at(FrameRate::new(100, 1).expect("frame rate"), start);
+
+        clock.advance_at(start + Duration::from_millis(35));
+
+        assert_eq!(
+            clock.delay_at(start + Duration::from_millis(35)),
+            Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn capture_frame_schedule_is_consumed_once() {
+        let state = WindowsScreenCaptureManagerState::new(
+            WindowsCaptureBackend::DesktopDuplication,
+            false,
+            Duration::from_secs(2),
+        );
+        let target = FrameRate::new(120, 1).expect("target frame rate");
+        let source = FrameRate::new(60, 1).expect("source frame rate");
+
+        state.set_next_frame_schedule(VideoFrameRateMode::Fixed, target);
+        let configured = state.take_next_frame_schedule(source);
+        let fallback = state.take_next_frame_schedule(source);
+
+        assert_eq!(configured.frame_rate_mode, VideoFrameRateMode::Fixed);
+        assert_eq!(configured.frame_rate, target);
+        assert_eq!(fallback.frame_rate_mode, VideoFrameRateMode::Dynamic);
+        assert_eq!(fallback.frame_rate, source);
+    }
 }
