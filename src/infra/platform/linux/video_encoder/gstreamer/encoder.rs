@@ -519,13 +519,15 @@ impl GStreamerVideoEncoder {
 
         let mut input_open = true;
         let mut commands_open = true;
+        let mut packet_batch = Vec::new();
 
         loop {
             if !input_open {
                 let Some(packet) = self.receive_packet().await? else {
+                    log_incomplete_access_unit(&packet_batch);
                     return Ok(());
                 };
-                send_packet(vec![packet]).await?;
+                send_rtp_packet(packet, &mut packet_batch, send_packet).await?;
                 continue;
             }
 
@@ -570,11 +572,41 @@ impl GStreamerVideoEncoder {
                 }
                 Event::Command(None) => commands_open = false,
                 Event::Packet(packet) => match packet? {
-                    Some(packet) => send_packet(vec![packet]).await?,
-                    None => return Ok(()),
+                    Some(packet) => send_rtp_packet(packet, &mut packet_batch, send_packet).await?,
+                    None => {
+                        log_incomplete_access_unit(&packet_batch);
+                        return Ok(());
+                    }
                 },
             }
         }
+    }
+}
+
+async fn send_rtp_packet<SendPacket, SendFuture>(
+    packet: GStreamerRtpPacket,
+    packet_batch: &mut Vec<GStreamerRtpPacket>,
+    send_packet: &mut SendPacket,
+) -> eros::Result<()>
+where
+    SendPacket: FnMut(Vec<GStreamerRtpPacket>) -> SendFuture,
+    SendFuture: Future<Output = eros::Result<()>>,
+{
+    let frame_complete = packet.is_frame_end();
+    packet_batch.push(packet);
+    if frame_complete {
+        send_packet(std::mem::take(packet_batch)).await?;
+    }
+    Ok(())
+}
+
+fn log_incomplete_access_unit(packet_batch: &[GStreamerRtpPacket]) {
+    if !packet_batch.is_empty() {
+        tracing::warn!(
+            event = "linux_h264_incomplete_access_unit_dropped",
+            packet_count = packet_batch.len(),
+            "Dropped an incomplete encoded access unit at end of stream"
+        );
     }
 }
 
