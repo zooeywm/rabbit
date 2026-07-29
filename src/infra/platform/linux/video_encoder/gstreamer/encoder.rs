@@ -19,16 +19,18 @@ use gstreamer::prelude::{
 use super::{
     frame::{DmaBufInputSignature, GStreamerVideoFrame},
     pipeline_util::{
-        H264_BITRATE_KBPS, H264_CPB_SIZE_KBITS, H264_KEY_INT_MAX, configure_low_latency_encoder,
-        create_pipeline_stage_queue, create_required_element, h264_rtp_caps,
-        is_hardware_video_encoder, rtp_mtu, terminal_message_result, terminal_messages,
-        va_vpp_output_caps,
+        H264_KEY_INT_MAX, configure_low_latency_encoder, create_pipeline_stage_queue,
+        create_required_element, h264_rtp_caps, is_hardware_video_encoder, rtp_mtu,
+        terminal_message_result, terminal_messages, va_vpp_output_caps,
     },
     probe::GStreamerVideoProbe,
     rtp::GStreamerRtpPacket,
 };
 use crate::infra::platform::{frame_pipeline::GbmFramePipelineFrame, video_probe::VideoFrameProbe};
-use crate::kernel::{geometry::FrameRate, video_encoder::VideoEncoderCommand};
+use crate::kernel::{
+    geometry::FrameRate,
+    video_encoder::{VideoBitrate, VideoCodec, VideoEncoderCommand, VideoEncoderParameters},
+};
 
 #[derive(Debug)]
 
@@ -47,7 +49,7 @@ impl GStreamerVideoEncoder {
     pub(super) async fn run_inner<Frames, Commands, SendPacket, SendFuture>(
         mut frames: Frames,
         mut commands: Commands,
-        frame_rate: FrameRate,
+        parameters: VideoEncoderParameters,
         max_rtp_packet_size: usize,
         mut send_packet: SendPacket,
     ) -> eros::Result<()>
@@ -57,6 +59,13 @@ impl GStreamerVideoEncoder {
         SendPacket: FnMut(GStreamerRtpPacket) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
+        if parameters.codec != VideoCodec::H264 {
+            eros::bail!(
+                "GStreamer H.264 encoder cannot encode {:?}",
+                parameters.codec
+            );
+        }
+        let frame_rate = parameters.frame_rate;
         let Some(first_frame) = poll_fn(|context| Pin::new(&mut frames).poll_next(context)).await
         else {
             return Ok(());
@@ -65,7 +74,12 @@ impl GStreamerVideoEncoder {
             first_frame.with_context(|| "Failed to receive first frame-pipeline output")?;
         let source_frame_rate = first_frame.source_frame_rate;
         let first_frame = GStreamerVideoFrame::from_pipeline_frame(first_frame, frame_rate, None)?;
-        let mut encoder = Self::new(first_frame, source_frame_rate, max_rtp_packet_size)?;
+        let mut encoder = Self::new(
+            first_frame,
+            source_frame_rate,
+            parameters.bitrate,
+            max_rtp_packet_size,
+        )?;
         let result = encoder
             .drive(&mut frames, &mut commands, &mut send_packet)
             .await;
@@ -88,6 +102,7 @@ impl GStreamerVideoEncoder {
     pub(crate) fn new(
         first_frame: GStreamerVideoFrame,
         source_frame_rate: FrameRate,
+        bitrate: VideoBitrate,
         max_rtp_packet_size: usize,
     ) -> eros::Result<Self> {
         let probe_interval = first_frame
@@ -96,6 +111,7 @@ impl GStreamerVideoEncoder {
             .map(VideoFrameProbe::report_interval);
         let mut encoder = Self::create(
             first_frame.input_caps(),
+            bitrate,
             max_rtp_packet_size,
             probe_interval,
         )?;
@@ -111,6 +127,7 @@ impl GStreamerVideoEncoder {
 
     pub(super) fn create(
         input_caps: &gstreamer::CapsRef,
+        bitrate: VideoBitrate,
         max_rtp_packet_size: usize,
         probe_interval: Option<Duration>,
     ) -> eros::Result<Self> {
@@ -142,15 +159,15 @@ impl GStreamerVideoEncoder {
                     factory_name
                 )
             })?;
-        configure_low_latency_encoder(&element);
+        let (bitrate_kbps, cpb_size_kbits) = configure_low_latency_encoder(&element, bitrate)?;
         tracing::info!(
             target: "rabbit::video_encoder",
             event = "video_encoder_selected",
             factory = %factory_name,
             frame_rate_numerator = input_signature.frame_rate.numerator(),
             frame_rate_denominator = input_signature.frame_rate.denominator(),
-            bitrate_kbps = H264_BITRATE_KBPS,
-            cpb_size_kbits = H264_CPB_SIZE_KBITS,
+            bitrate_kbps,
+            cpb_size_kbits,
             key_int_max = H264_KEY_INT_MAX,
             "Selected low-latency hardware H.264 encoder"
         );
@@ -540,7 +557,7 @@ impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
     fn run<Frames, Commands, SendPacket, SendFuture>(
         frames: Frames,
         commands: Commands,
-        frame_rate: FrameRate,
+        parameters: VideoEncoderParameters,
         max_packet_size: usize,
         send_packet: SendPacket,
     ) -> impl Future<Output = eros::Result<()>>
@@ -550,6 +567,6 @@ impl crate::kernel::video_encoder::VideoEncoder for GStreamerVideoEncoder {
         SendPacket: FnMut(Self::Packet) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
-        Self::run_inner(frames, commands, frame_rate, max_packet_size, send_packet)
+        Self::run_inner(frames, commands, parameters, max_packet_size, send_packet)
     }
 }

@@ -89,6 +89,7 @@ pub(super) enum RootMessage {
         width: String,
         height: String,
         frame_rate: String,
+        bitrate_mbps: String,
     },
     DisconnectRemoteSession,
     StopHostedScreenStream(usize),

@@ -11,12 +11,11 @@ use tracing::{debug, trace};
 use crate::{
     infra::unsync_queue::UnsyncQueue,
     kernel::{
-        geometry::FrameRate,
         screen_manager::ScreenId,
         screen_stream::ScreenStream,
         session::{SessionSend, VideoMessage},
         transport::TransportSend,
-        video_encoder::{VideoEncoder, VideoEncoderCommand},
+        video_encoder::{VideoEncoder, VideoEncoderCommand, VideoEncoderParameters},
     },
 };
 
@@ -26,7 +25,7 @@ pub(crate) async fn run_host_screen_stream<Frames, Send, Encoder>(
     session: Rc<SessionSend<Send>>,
     cancellation: UnsyncQueue<()>,
     encoder_commands: UnsyncQueue<VideoEncoderCommand>,
-    frame_rate: FrameRate,
+    parameters: VideoEncoderParameters,
 ) -> eros::Result<()>
 where
     Encoder: VideoEncoder,
@@ -44,8 +43,10 @@ where
     debug!(
         event = "host_screen_stream_started",
         screen_id = screen_id.0,
-        frame_rate_numerator = frame_rate.numerator(),
-        frame_rate_denominator = frame_rate.denominator(),
+        codec = ?parameters.codec,
+        frame_rate_numerator = parameters.frame_rate.numerator(),
+        frame_rate_denominator = parameters.frame_rate.denominator(),
+        bitrate_bps = parameters.bitrate.bits_per_second(),
         max_packet_size,
         "Host screen stream started"
     );
@@ -61,7 +62,7 @@ where
             cancellation,
         },
         commands,
-        frame_rate,
+        parameters,
         max_packet_size,
         move |packet: Encoder::Packet| {
             let session = Rc::clone(&session);

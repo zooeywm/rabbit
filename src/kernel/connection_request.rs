@@ -6,6 +6,7 @@
 use crate::kernel::{
     protocol::{MAX_VIDEO_SCREEN_ID, PROTOCOL_MAJOR, PROTOCOL_MINOR},
     screen_manager::ScreenId,
+    video_encoder::VideoCodec,
 };
 
 /// Outbound or inbound connection request after the transport is open.
@@ -67,6 +68,12 @@ pub enum EncoderProfileTag {
 impl EncoderProfileTag {
     pub const fn as_u8(self) -> u8 {
         self as u8
+    }
+
+    pub const fn codec(self) -> VideoCodec {
+        match self {
+            Self::H264Hardware | Self::H264Software => VideoCodec::H264,
+        }
     }
 }
 

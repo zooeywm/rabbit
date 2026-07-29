@@ -61,7 +61,9 @@ use crate::{
     },
     kernel::{
         geometry::{FrameRate, PixelSize},
-        video_encoder::{VideoEncoder, VideoEncoderCommand},
+        video_encoder::{
+            VideoBitrate, VideoCodec, VideoEncoder, VideoEncoderCommand, VideoEncoderParameters,
+        },
     },
 };
 
@@ -88,7 +90,7 @@ impl VideoEncoder for WindowsVideoEncoder {
     fn run<Frames, Commands, SendPacket, SendFuture>(
         frames: Frames,
         commands: Commands,
-        frame_rate: FrameRate,
+        parameters: VideoEncoderParameters,
         max_packet_size: usize,
         send_packet: SendPacket,
     ) -> impl Future<Output = eros::Result<()>>
@@ -98,14 +100,14 @@ impl VideoEncoder for WindowsVideoEncoder {
         SendPacket: FnMut(Self::Packet) -> SendFuture,
         SendFuture: Future<Output = eros::Result<()>>,
     {
-        run_windows_encoder(frames, commands, frame_rate, max_packet_size, send_packet)
+        run_windows_encoder(frames, commands, parameters, max_packet_size, send_packet)
     }
 }
 
 async fn run_windows_encoder<Frames, Commands, SendPacket, SendFuture>(
     mut frames: Frames,
     mut commands: Commands,
-    frame_rate: FrameRate,
+    parameters: VideoEncoderParameters,
     max_packet_size: usize,
     mut send_packet: SendPacket,
 ) -> eros::Result<()>
@@ -115,6 +117,10 @@ where
     SendPacket: FnMut(WindowsVideoPacket) -> SendFuture,
     SendFuture: Future<Output = eros::Result<()>>,
 {
+    if parameters.codec != VideoCodec::H264 {
+        eros::bail!("Windows H.264 encoder cannot encode {:?}", parameters.codec);
+    }
+    let frame_rate = parameters.frame_rate;
     let Some(first_frame) = frames.next().await else {
         return Ok(());
     };
@@ -130,11 +136,17 @@ where
         source_frame_rate_denominator = first_frame.source_frame_rate.denominator(),
         output_frame_rate_numerator = first_frame.frame_rate.numerator(),
         output_frame_rate_denominator = first_frame.frame_rate.denominator(),
+        bitrate_bps = parameters.bitrate.bits_per_second(),
         max_packet_size,
         "Starting Windows H.264 encoder"
     );
-    let mut encoder = MfH264Encoder::new(&first_frame, frame_rate, max_packet_size)
-        .with_context(|| "Failed to initialize Windows Media Foundation H.264 encoder")?;
+    let mut encoder = MfH264Encoder::new(
+        &first_frame,
+        frame_rate,
+        parameters.bitrate,
+        max_packet_size,
+    )
+    .with_context(|| "Failed to initialize Windows Media Foundation H.264 encoder")?;
     encoder.request_key_frame();
     encoder.encode_frame(&first_frame, &mut send_packet).await?;
 
@@ -165,6 +177,7 @@ struct MfH264Encoder {
     converter: Option<BgraToNv12Converter>,
     frame_size: PixelSize,
     frame_rate: FrameRate,
+    bitrate: VideoBitrate,
     frame_duration_hns: i64,
     next_sample_time_hns: i64,
     sequence: u16,
@@ -194,6 +207,7 @@ impl MfH264Encoder {
     fn new(
         first_frame: &WgcFramePipelineFrame,
         frame_rate: FrameRate,
+        bitrate: VideoBitrate,
         max_packet_size: usize,
     ) -> eros::Result<Self> {
         if max_packet_size <= RTP_FIXED_HEADER_SIZE + 2 {
@@ -219,7 +233,7 @@ impl MfH264Encoder {
             .with_context(|| "D3D11 immediate context does not expose ID3D11VideoContext")?;
         let dxgi_manager = create_dxgi_device_manager(&d3d)?;
         let transform = activate_h264_encoder()?;
-        configure_transform(&transform, &dxgi_manager, frame_size, frame_rate)?;
+        configure_transform(&transform, &dxgi_manager, frame_size, frame_rate, bitrate)?;
         let output_stream_info = unsafe { transform.GetOutputStreamInfo(0) }
             .with_context(|| "Failed to query H.264 encoder output stream info")?;
         let transform_event_generator = transform.cast::<IMFMediaEventGenerator>().ok();
@@ -243,6 +257,7 @@ impl MfH264Encoder {
             converter: None,
             frame_size,
             frame_rate,
+            bitrate,
             frame_duration_hns: frame_duration_hns(frame_rate),
             next_sample_time_hns: 0,
             sequence: 0,
@@ -621,7 +636,8 @@ impl MfH264Encoder {
         // after invalidating their output type. Reapplying the requested type is
         // a useful compatibility fallback and still performs SetOutputType as
         // required to resume ProcessOutput.
-        let requested_type = create_h264_output_type(self.frame_size, self.frame_rate)?;
+        let requested_type =
+            create_h264_output_type(self.frame_size, self.frame_rate, self.bitrate)?;
         unsafe {
             self.transform
                 .SetOutputType(self.output_stream_id, &requested_type, 0)
@@ -971,6 +987,7 @@ fn configure_transform(
     dxgi_manager: &IMFDXGIDeviceManager,
     size: PixelSize,
     frame_rate: FrameRate,
+    bitrate: VideoBitrate,
 ) -> eros::Result<()> {
     let mut attribute_low_latency = false;
     unsafe {
@@ -986,10 +1003,9 @@ fn configure_transform(
             )
             .with_context(|| "Failed to attach DXGI device manager to H.264 encoder")?;
     }
-    let bitrate = target_bitrate(size, frame_rate);
     configure_codec_low_latency(transform, attribute_low_latency, bitrate)?;
 
-    let output_type = create_h264_output_type(size, frame_rate)?;
+    let output_type = create_h264_output_type(size, frame_rate, bitrate)?;
     unsafe { transform.SetOutputType(0, &output_type, 0) }
         .with_context(|| "Failed to configure H.264 encoder output type")?;
     let input_type = create_nv12_input_type(size, frame_rate)?;
@@ -1009,8 +1025,9 @@ fn configure_transform(
 fn configure_codec_low_latency(
     transform: &IMFTransform,
     attribute_low_latency: bool,
-    bitrate: u32,
+    bitrate: VideoBitrate,
 ) -> eros::Result<()> {
+    let bitrate_bps = bitrate.bits_per_second();
     let codec_api: ICodecAPI = transform
         .cast()
         .with_context(|| "Windows H.264 encoder does not expose ICodecAPI")?;
@@ -1042,9 +1059,9 @@ fn configure_codec_low_latency(
     let mean_bitrate = set_optional_codec_property(
         &codec_api,
         &CODECAPI_AVEncCommonMeanBitRate,
-        &VARIANT::from(bitrate),
+        &VARIANT::from(bitrate_bps),
     );
-    let buffer_size_bytes = bitrate / 8 / H264_CPB_WINDOWS_PER_SECOND;
+    let buffer_size_bytes = bitrate_bps / 8 / H264_CPB_INTERVALS_PER_SECOND;
     let bounded_buffer = set_optional_codec_property(
         &codec_api,
         &CODECAPI_AVEncCommonBufferSize,
@@ -1062,7 +1079,7 @@ fn configure_codec_low_latency(
         constant_bitrate,
         mean_bitrate,
         bounded_buffer,
-        bitrate,
+        bitrate_bps,
         buffer_size_bytes,
         "Configured Windows H.264 encoder for bounded real-time output without frame reordering"
     );
@@ -1105,12 +1122,16 @@ fn create_nv12_input_type(size: PixelSize, frame_rate: FrameRate) -> eros::Resul
     Ok(media_type)
 }
 
-fn create_h264_output_type(size: PixelSize, frame_rate: FrameRate) -> eros::Result<IMFMediaType> {
+fn create_h264_output_type(
+    size: PixelSize,
+    frame_rate: FrameRate,
+    bitrate: VideoBitrate,
+) -> eros::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType() }
         .with_context(|| "Failed to create H.264 output media type")?;
     set_video_type_common(&media_type, size, frame_rate, MFVideoFormat_H264)?;
     unsafe {
-        media_type.SetUINT32(&MF_MT_AVG_BITRATE, target_bitrate(size, frame_rate))?;
+        media_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate.bits_per_second())?;
         media_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, H264_KEY_FRAME_INTERVAL)?;
         media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
         media_type.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 0)?;
@@ -1344,13 +1365,6 @@ fn rtp_timestamp_step(frame_rate: FrameRate) -> u32 {
     ((90_000_u64 * denominator) / numerator).max(1) as u32
 }
 
-fn target_bitrate(size: PixelSize, frame_rate: FrameRate) -> u32 {
-    let fps = (frame_rate.numerator() / frame_rate.denominator().max(1)).max(1);
-    let pixels = u64::from(size.width) * u64::from(size.height);
-    let bitrate = pixels.saturating_mul(u64::from(fps)).saturating_mul(2);
-    bitrate.clamp(H264_MIN_BITRATE_BPS, H264_MAX_BITRATE_BPS) as u32
-}
-
 fn pack_u32_pair(high: u32, low: u32) -> u64 {
     (u64::from(high) << 32) | u64::from(low)
 }
@@ -1360,7 +1374,5 @@ const H264_RTP_PAYLOAD_TYPE: u8 = 96;
 const RTP_SSRC: u32 = 0x5242_4954;
 const MAX_ENCODER_OUTPUT_SAMPLE_SIZE: u32 = 4 * 1024 * 1024;
 const MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT: usize = 8;
-const H264_MIN_BITRATE_BPS: u64 = 1_000_000;
-const H264_MAX_BITRATE_BPS: u64 = 50_000_000;
 const H264_KEY_FRAME_INTERVAL: u32 = 1_024;
-const H264_CPB_WINDOWS_PER_SECOND: u32 = 10;
+const H264_CPB_INTERVALS_PER_SECOND: u32 = 10;

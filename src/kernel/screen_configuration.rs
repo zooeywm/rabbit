@@ -1,6 +1,7 @@
 use crate::kernel::{
     geometry::{FrameRate, PixelSize},
     screen_manager::ScreenId,
+    video_encoder::{VideoBitrate, VideoCodec},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,6 +19,8 @@ pub struct ScreenStreamRequest {
     pub remote_display: RemoteDisplayMode,
     pub frame_size: PixelSize,
     pub frame_rate: FrameRate,
+    pub codec: VideoCodec,
+    pub bitrate: VideoBitrate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

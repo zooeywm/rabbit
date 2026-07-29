@@ -28,7 +28,8 @@ export component ConnectedPage inherits Rectangle {
     callback disconnect-remote-session();
     callback stop-hosted-screen-stream(int);
     callback disconnect-device(int);
-    callback open-screen(int, string, string, string);
+    pure callback recommended-bitrate(string, string, string) -> string;
+    callback open-screen(int, string, string, string, string);
 
     clip: true;
 
@@ -180,8 +181,17 @@ export component ConnectedPage inherits Rectangle {
             if root.remote-screens.length > 0: RemoteScreenGrid {
                 width: connected-scroll.visible-width;
                 screens: root.remote-screens;
-                open-screen(i, selected-width, selected-height, selected-frame-rate) => {
-                    root.open-screen(i, selected-width, selected-height, selected-frame-rate);
+                recommended-bitrate(width, height, frame-rate) => {
+                    root.recommended-bitrate(width, height, frame-rate)
+                }
+                open-screen(i, selected-width, selected-height, selected-frame-rate, selected-bitrate) => {
+                    root.open-screen(
+                        i,
+                        selected-width,
+                        selected-height,
+                        selected-frame-rate,
+                        selected-bitrate,
+                    );
                 }
             }
 

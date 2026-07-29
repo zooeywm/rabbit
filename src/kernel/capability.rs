@@ -47,6 +47,19 @@ pub fn validate_set_screen_streams(
 
     assert_local_can_host(local)?;
 
+    for stream in &request.desired_streams {
+        if !local
+            .encoder_profiles
+            .iter()
+            .any(|profile| profile.codec() == stream.codec)
+        {
+            return Err(DomainError::capability(format!(
+                "local host cannot encode requested codec {:?}",
+                stream.codec
+            )));
+        }
+    }
+
     let requested = request.desired_streams.len();
     let requested_u8 = u8::try_from(requested).map_err(|_| {
         DomainError::capability(format!(
@@ -106,6 +119,7 @@ mod tests {
             RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
         },
         screen_manager::ScreenId,
+        video_encoder::{VideoBitrate, VideoCodec},
     };
 
     fn request_with_n_streams(n: usize) -> SetScreenStreams {
@@ -120,6 +134,8 @@ mod tests {
                         height: 1080,
                     },
                     frame_rate: FrameRate::new(60, 1).expect("fps"),
+                    codec: VideoCodec::H264,
+                    bitrate: VideoBitrate::new(21_000_000).expect("bitrate"),
                 })
                 .collect(),
         }

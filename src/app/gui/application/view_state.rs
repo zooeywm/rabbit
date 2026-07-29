@@ -4,7 +4,7 @@ use crate::app::{
         state::{
             ConnectedDeviceView, ConnectionRequestView, DirectConnectionState,
             HostedScreenStreamView, RemoteScreenView, ScreenStreamState, ViewPage, ViewState,
-            WorkspaceSection, format_frame_rate,
+            WorkspaceSection, format_bitrate_mbps, format_frame_rate,
         },
     },
     platform::ApplicationStack,
@@ -87,6 +87,8 @@ where
                     .find(|screen| screen.id == *screen_id)
                     .map(|screen| {
                         let frame_rate = format_frame_rate(screen.frame_rate);
+                        let bitrate = crate::kernel::video_encoder::VideoCodec::H264
+                            .recommended_bitrate(screen.resolution, screen.frame_rate);
                         RemoteScreenView {
                             name: format!("Session {} · {}", session_id.0, screen.name),
                             original: format!(
@@ -96,6 +98,7 @@ where
                             selected_width: screen.resolution.width.to_string(),
                             selected_height: screen.resolution.height.to_string(),
                             selected_frame_rate: frame_rate,
+                            selected_bitrate_mbps: format_bitrate_mbps(bitrate),
                         }
                     })
             })

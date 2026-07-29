@@ -41,6 +41,7 @@ mod tests {
             RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
         },
         screen_manager::{ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
+        video_encoder::{VideoBitrate, VideoCodec},
     };
 
     fn screen(id: u8) -> Screen {
@@ -83,6 +84,8 @@ mod tests {
                     height: 1080,
                 },
                 frame_rate: FrameRate::new(60, 1).expect("fps"),
+                codec: VideoCodec::H264,
+                bitrate: VideoBitrate::new(21_000_000).expect("bitrate"),
             }],
         };
         let err = evaluate_set_screen_streams(
@@ -111,6 +114,8 @@ mod tests {
                     height: 720,
                 },
                 frame_rate: FrameRate::new(30, 1).expect("fps"),
+                codec: VideoCodec::H264,
+                bitrate: VideoBitrate::new(5_000_000).expect("bitrate"),
             }],
         };
         let evaluation = evaluate_set_screen_streams(

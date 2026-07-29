@@ -34,7 +34,8 @@ where
         FnOnce(SessionId, crate::kernel::screen_manager::ScreenId, u64, eros::Result<()>) + 'static,
 {
     let screen_id = plan.screen_id;
-    let frame_rate = plan.frame_rate;
+    let encoding = plan.encoding;
+    let frame_rate = encoding.frame_rate;
     let frames = FramePipelineManager::subscribe(
         &mut model.app,
         &screen_id,
@@ -75,7 +76,7 @@ where
             session_send,
             task_cancellation,
             task_encoder_commands,
-            frame_rate,
+            encoding,
         )
         .await;
         report_finished(session_id, screen_id, stream_id, result);

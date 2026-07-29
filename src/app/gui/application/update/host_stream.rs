@@ -102,7 +102,7 @@ where
                         session_id,
                         plan.screen_id,
                         plan.parameters,
-                        plan.frame_rate,
+                        plan.encoding,
                         sender,
                     ) {
                         error!(

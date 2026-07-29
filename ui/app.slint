@@ -81,7 +81,8 @@ export component RabbitWindow inherits Window {
     callback video-frame-available();
     callback select-section(NavigationSection);
     callback decide-request(int, bool);
-    callback open-screen(int, string, string, string);
+    pure callback recommended-bitrate(string, string, string) -> string;
+    callback open-screen(int, string, string, string, string);
     callback disconnect-remote-session();
     callback stop-hosted-screen-stream(int);
     callback disconnect-device(int);
@@ -398,8 +399,17 @@ export component RabbitWindow inherits Window {
                         disconnect-remote-session() => { root.disconnect-remote-session(); }
                         stop-hosted-screen-stream(index) => { root.stop-hosted-screen-stream(index); }
                         disconnect-device(index) => { root.disconnect-device(index); }
-                        open-screen(index, selected-width, selected-height, selected-frame-rate) => {
-                            root.open-screen(index, selected-width, selected-height, selected-frame-rate);
+                        recommended-bitrate(width, height, frame-rate) => {
+                            root.recommended-bitrate(width, height, frame-rate)
+                        }
+                        open-screen(index, selected-width, selected-height, selected-frame-rate, selected-bitrate) => {
+                            root.open-screen(
+                                index,
+                                selected-width,
+                                selected-height,
+                                selected-frame-rate,
+                                selected-bitrate,
+                            );
                         }
                     }
 
@@ -482,11 +492,11 @@ export component RabbitWindow inherits Window {
                                                 self.mouse-x / 1px,
                                                 self.mouse-y / 1px,
                                                 self.previous-valid
-                                                    ? (self.mouse-x - self.previous-x) / 1px
-                                                    : 0,
+                                                ? (self.mouse-x - self.previous-x) / 1px
+                                                : 0,
                                                 self.previous-valid
-                                                    ? (self.mouse-y - self.previous-y) / 1px
-                                                    : 0,
+                                                ? (self.mouse-y - self.previous-y) / 1px
+                                                : 0,
                                                 self.width / 1px,
                                                 self.height / 1px,
                                             );

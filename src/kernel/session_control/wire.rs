@@ -116,6 +116,8 @@ pub(super) struct WireScreenStreamRequest {
     remote_display: WireRemoteDisplayMode,
     frame_size: WirePixelSize,
     frame_rate: WireFrameRate,
+    codec: u8,
+    bitrate_bps: u32,
 }
 
 #[derive(BinRead, BinWrite)]
@@ -379,6 +381,21 @@ impl TryFrom<WireScreenStreamRequest> for ScreenStreamRequest {
             remote_display: request.remote_display.into(),
             frame_size: request.frame_size.into(),
             frame_rate,
+            codec: crate::kernel::video_encoder::VideoCodec::try_from(request.codec).with_context(
+                || {
+                    format!(
+                        "Failed to decode SetScreenStreams codec for screen {}",
+                        request.screen_id
+                    )
+                },
+            )?,
+            bitrate: crate::kernel::video_encoder::VideoBitrate::new(request.bitrate_bps)
+                .with_context(|| {
+                    format!(
+                        "Failed to decode SetScreenStreams bitrate for screen {}",
+                        request.screen_id
+                    )
+                })?,
         })
     }
 }
@@ -390,6 +407,8 @@ impl From<ScreenStreamRequest> for WireScreenStreamRequest {
             remote_display: request.remote_display.into(),
             frame_size: request.frame_size.into(),
             frame_rate: request.frame_rate.into(),
+            codec: request.codec.as_u8(),
+            bitrate_bps: request.bitrate.bits_per_second(),
         }
     }
 }

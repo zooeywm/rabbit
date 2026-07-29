@@ -4,7 +4,9 @@ use eros::Context as _;
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{ElementExt as _, GObjectExtManualGst as _, GstObjectExt as _};
 
-use crate::infra::platform::video_color::gstreamer_colorimetry;
+use crate::{
+    infra::platform::video_color::gstreamer_colorimetry, kernel::video_encoder::VideoBitrate,
+};
 
 pub(crate) fn terminal_messages(
     pipeline: &gstreamer::Pipeline,
@@ -116,18 +118,23 @@ pub(crate) fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gst
         .build())
 }
 
-pub(crate) const H264_BITRATE_KBPS: u32 = 50_000;
-pub(crate) const H264_CPB_SIZE_KBITS: u32 = 5_000;
 pub(crate) const H264_KEY_INT_MAX: u32 = 1_024;
 
-pub(crate) fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
+pub(crate) fn configure_low_latency_encoder(
+    encoder: &gstreamer::Element,
+    bitrate: VideoBitrate,
+) -> eros::Result<(u32, u32)> {
     let is_vaapi = encoder
         .factory()
         .is_some_and(|factory| factory.name().starts_with("va"));
     if !is_vaapi {
-        return;
+        eros::bail!(
+            "Selected Linux H.264 encoder does not expose the supported VAAPI rate-control interface"
+        );
     }
 
+    let bitrate_kbps = bitrate.kilobits_per_second();
+    let cpb_size_kbits = bitrate_kbps.div_ceil(H264_CPB_INTERVALS_PER_SECOND);
     encoder.set_property("b-frames", 0_u32);
     encoder.set_property("ref-frames", 1_u32);
     encoder.set_property("target-usage", 7_u32);
@@ -135,10 +142,13 @@ pub(crate) fn configure_low_latency_encoder(encoder: &gstreamer::Element) {
         encoder.set_property_from_str("mbbrc", "disabled");
     }
     encoder.set_property_from_str("rate-control", "cbr");
-    encoder.set_property("bitrate", H264_BITRATE_KBPS);
-    encoder.set_property("cpb-size", H264_CPB_SIZE_KBITS);
+    encoder.set_property("bitrate", bitrate_kbps);
+    encoder.set_property("cpb-size", cpb_size_kbits);
     encoder.set_property("key-int-max", H264_KEY_INT_MAX);
+    Ok((bitrate_kbps, cpb_size_kbits))
 }
+
+const H264_CPB_INTERVALS_PER_SECOND: u32 = 10;
 
 pub(crate) fn is_hardware_video_encoder(factory: &gstreamer::ElementFactory) -> bool {
     let Some(class) = factory.metadata("klass") else {

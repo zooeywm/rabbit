@@ -5,6 +5,7 @@ use crate::kernel::{
     },
     screen_manager::ScreenId,
     session::SessionId,
+    video_encoder::{VideoBitrate, VideoCodec},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,6 +16,8 @@ pub(crate) struct ScreenStreamTarget {
     pub(crate) screen_name: String,
     pub(crate) frame_size: PixelSize,
     pub(crate) frame_rate: FrameRate,
+    pub(crate) codec: VideoCodec,
+    pub(crate) bitrate: VideoBitrate,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

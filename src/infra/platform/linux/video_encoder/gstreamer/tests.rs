@@ -51,6 +51,7 @@ use crate::{
         screen_manager::{
             Screen, ScreenId, ScreenLayout, ScreenLayoutManager, ScreenRect, ScreenTransform,
         },
+        video_encoder::{VideoBitrate, VideoCodec, VideoEncoderParameters},
     },
 };
 
@@ -58,6 +59,10 @@ struct HostVideoTestDeps {
     capture: KmsScreenCaptureManagerState,
     pipeline: GbmFramePipelineManagerState,
     screens: Vec<Screen>,
+}
+
+fn test_bitrate() -> VideoBitrate {
+    VideoBitrate::new(50_000_000).expect("Test bitrate should be valid")
 }
 
 #[derive(Debug, Default)]
@@ -330,7 +335,11 @@ fn streams_several_host_video_frames() {
         let encoding = GStreamerVideoEncoder::run_inner(
             frames,
             futures_util::stream::pending(),
-            target_frame_rate,
+            VideoEncoderParameters {
+                codec: VideoCodec::H264,
+                frame_rate: target_frame_rate,
+                bitrate: test_bitrate(),
+            },
             MAX_RTP_PACKET_SIZE,
             move |packet| {
                 assert!(
@@ -392,8 +401,9 @@ fn creates_a_hardware_h264_rtp_pipeline_for_nv12_dmabuf_input() {
 
     gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
     let input_caps = registered_nv12_dmabuf_input_caps();
-    let encoder = GStreamerVideoEncoder::create(&input_caps, MAX_RTP_PACKET_SIZE, None)
-        .expect("A hardware H.264 encoder element should be created for NV12 DMA-BUF input");
+    let encoder =
+        GStreamerVideoEncoder::create(&input_caps, test_bitrate(), MAX_RTP_PACKET_SIZE, None)
+            .expect("A hardware H.264 encoder element should be created for NV12 DMA-BUF input");
     let factory = encoder
         .pipeline
         .by_name("h264-encoder")
@@ -462,7 +472,7 @@ fn rejects_p010_dmabuf_input() {
         .field("drm-format", "P010")
         .build();
 
-    GStreamerVideoEncoder::create(&input_caps, 1_200, None)
+    GStreamerVideoEncoder::create(&input_caps, test_bitrate(), 1_200, None)
         .expect_err("The first-version encoder should reject P010 input");
 }
 
@@ -476,7 +486,7 @@ fn rejects_rtp_packet_size_below_payloader_minimum() {
         .field("drm-format", "NV12")
         .build();
 
-    let error = GStreamerVideoEncoder::create(&input_caps, 27, None)
+    let error = GStreamerVideoEncoder::create(&input_caps, test_bitrate(), 27, None)
         .expect_err("The RTP payloader should reject packet sizes below 28 bytes");
 
     assert!(error.to_string().contains("at least 28 bytes"));
@@ -487,14 +497,16 @@ fn rejects_rtp_packet_size_below_payloader_minimum() {
 fn starts_and_stops_hardware_h264_pipeline() {
     gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
     let input_caps = registered_nv12_dmabuf_input_caps();
-    let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
+    let mut encoder = GStreamerVideoEncoder::create(&input_caps, test_bitrate(), 1_200, None)
         .expect("The hardware H.264 pipeline should be created");
+    let h264_encoder = encoder
+        .pipeline
+        .by_name("h264-encoder")
+        .expect("The pipeline should retain its hardware encoder");
+    assert_eq!(h264_encoder.property::<u32>("bitrate"), 50_000);
+    assert_eq!(h264_encoder.property::<u32>("cpb-size"), 5_000);
     assert_eq!(
-        encoder
-            .pipeline
-            .by_name("h264-encoder")
-            .expect("The pipeline should retain its hardware encoder")
-            .property::<u32>("key-int-max"),
+        h264_encoder.property::<u32>("key-int-max"),
         H264_KEY_INT_MAX
     );
 
@@ -522,7 +534,7 @@ fn starts_and_stops_hardware_h264_pipeline() {
 fn requests_a_key_frame_from_the_running_hardware_encoder() {
     gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
     let input_caps = registered_nv12_dmabuf_input_caps();
-    let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
+    let mut encoder = GStreamerVideoEncoder::create(&input_caps, test_bitrate(), 1_200, None)
         .expect("The hardware H.264 pipeline should be created");
 
     encoder
@@ -541,7 +553,7 @@ fn requests_a_key_frame_from_the_running_hardware_encoder() {
 fn receives_gstreamer_eos_and_error_messages_asynchronously() {
     gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
     let input_caps = registered_nv12_dmabuf_input_caps();
-    let encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
+    let encoder = GStreamerVideoEncoder::create(&input_caps, test_bitrate(), 1_200, None)
         .expect("The hardware H.264 pipeline should be created");
     let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
@@ -581,7 +593,7 @@ fn receives_gstreamer_eos_and_error_messages_asynchronously() {
 fn finishes_hardware_h264_pipeline_through_appsrc() {
     gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
     let input_caps = registered_nv12_dmabuf_input_caps();
-    let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
+    let mut encoder = GStreamerVideoEncoder::create(&input_caps, test_bitrate(), 1_200, None)
         .expect("The hardware H.264 pipeline should be created");
     let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
@@ -604,7 +616,7 @@ fn finishes_hardware_h264_pipeline_through_appsrc() {
 fn closes_rtp_output_when_hardware_pipeline_reaches_eos() {
     gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
     let input_caps = registered_nv12_dmabuf_input_caps();
-    let mut encoder = GStreamerVideoEncoder::create(&input_caps, 1_200, None)
+    let mut encoder = GStreamerVideoEncoder::create(&input_caps, test_bitrate(), 1_200, None)
         .expect("The hardware H.264 pipeline should be created");
     let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 
@@ -666,7 +678,7 @@ fn creates_and_starts_encoder_from_first_frame() {
     let frame = dmabuf_video_frame();
     let input_caps = frame.input_caps().to_owned();
     let source_frame_rate = frame.input_signature.frame_rate;
-    let mut encoder = GStreamerVideoEncoder::new(frame, source_frame_rate, 1_200)
+    let mut encoder = GStreamerVideoEncoder::new(frame, source_frame_rate, test_bitrate(), 1_200)
         .expect("The first frame should create and start its hardware encoder");
     let (started, current, _) = encoder
         .pipeline
@@ -683,8 +695,9 @@ fn creates_and_starts_encoder_from_first_frame() {
 fn submits_a_dmabuf_video_frame_to_appsrc() {
     gstreamer::init().expect("GStreamer should initialize before inspecting encoder caps");
     let frame = dmabuf_video_frame();
-    let mut encoder = GStreamerVideoEncoder::create(frame.input_caps(), 1_200, None)
-        .expect("The hardware H.264 pipeline should be created");
+    let mut encoder =
+        GStreamerVideoEncoder::create(frame.input_caps(), test_bitrate(), 1_200, None)
+            .expect("The hardware H.264 pipeline should be created");
 
     encoder
         .submit_frame(frame)
@@ -903,7 +916,8 @@ fn vaapi_vpp_test_pipeline(
     filter.set_property("caps", &output_caps);
     let encoder = create_required_element("vah264enc", "vaapi-test-encoder")
         .expect("GStreamer VAAPI H.264 encoder should be available");
-    configure_low_latency_encoder(&encoder);
+    configure_low_latency_encoder(&encoder, test_bitrate())
+        .expect("VAAPI rate control should be configurable");
     let sink = create_required_element("appsink", "vaapi-test-output")
         .expect("GStreamer appsink should be available")
         .downcast::<gstreamer_app::AppSink>()

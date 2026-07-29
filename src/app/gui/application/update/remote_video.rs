@@ -21,6 +21,7 @@ use crate::kernel::{
         RemoteInputEvent, map_viewport_position,
     },
     screen_configuration::{RemoteDisplayMode, ScreenStreamRequest, SetScreenStreams},
+    video_encoder::VideoCodec,
 };
 
 impl<Stack> RootApplication<Stack>
@@ -319,9 +320,10 @@ where
                 width,
                 height,
                 frame_rate,
+                bitrate_mbps,
             } => {
-                let (frame_size, frame_rate) =
-                    match parse_stream_settings(&width, &height, &frame_rate) {
+                let (frame_size, frame_rate, bitrate) =
+                    match parse_stream_settings(&width, &height, &frame_rate, &bitrate_mbps) {
                         Ok(settings) => settings,
                         Err(error) => {
                             self.workspace.stream_settings_error = error.to_string();
@@ -384,6 +386,8 @@ where
                             remote_display: RemoteDisplayMode::Preserve,
                             frame_size,
                             frame_rate,
+                            codec: VideoCodec::H264,
+                            bitrate,
                         }],
                     };
                     if let Err(error) = evaluate_controller_set_screen_streams(
@@ -408,6 +412,8 @@ where
                         screen_name,
                         frame_size,
                         frame_rate,
+                        codec: VideoCodec::H264,
+                        bitrate,
                     });
 
                     let request_sender = sender.clone();

@@ -25,6 +25,7 @@ mod tests {
             RemoteDisplayMode, ScreenStreamRequest, ScreenStreamRequestId, SetScreenStreams,
         },
         screen_manager::ScreenId,
+        video_encoder::{VideoBitrate, VideoCodec},
     };
 
     #[test]
@@ -45,6 +46,8 @@ mod tests {
                     height: 1080,
                 },
                 frame_rate: FrameRate::new(60, 1).expect("fps"),
+                codec: VideoCodec::H264,
+                bitrate: VideoBitrate::new(21_000_000).expect("bitrate"),
             }],
         };
         let err = evaluate_controller_set_screen_streams(

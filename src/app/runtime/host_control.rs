@@ -316,6 +316,7 @@ mod tests {
             SetScreenStreams,
         },
         screen_manager::{ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
+        video_encoder::{VideoBitrate, VideoCodec},
     };
 
     fn screen(id: u8) -> Screen {
@@ -366,6 +367,8 @@ mod tests {
                     height: 100,
                 },
                 frame_rate: FrameRate::new(60, 1).expect("fps"),
+                codec: VideoCodec::H264,
+                bitrate: VideoBitrate::new(1_000_000).expect("bitrate"),
             }],
         };
         let decision = classify_host_session_message(

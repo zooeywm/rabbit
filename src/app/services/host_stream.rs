@@ -6,12 +6,12 @@
 
 use crate::kernel::{
     frame_pipeline::FramePipelineParameters,
-    geometry::FrameRate,
     screen_configuration::{
         RemoteDisplayMode, ResolutionResult, ScreenResolutionOutcome, ScreenResolutionStatus,
         ScreenStreamRequest, ScreenStreamsConfigured, SetScreenStreams,
     },
     screen_manager::{Screen, ScreenId},
+    video_encoder::VideoEncoderParameters,
 };
 
 /// One host pipeline subscription that should run after configuration succeeds.
@@ -19,7 +19,7 @@ use crate::kernel::{
 pub struct HostStreamPlan {
     pub screen_id: ScreenId,
     pub parameters: FramePipelineParameters,
-    pub frame_rate: FrameRate,
+    pub encoding: VideoEncoderParameters,
 }
 
 /// Resolves a controller stream request against the host's published screens.
@@ -62,7 +62,11 @@ fn resolve_desired_stream(
                     parameters: FramePipelineParameters {
                         frame_size: desired.frame_size,
                     },
-                    frame_rate: desired.frame_rate,
+                    encoding: VideoEncoderParameters {
+                        codec: desired.codec,
+                        frame_rate: desired.frame_rate,
+                        bitrate: desired.bitrate,
+                    },
                 });
                 ScreenResolutionStatus::Configured(ResolutionResult::Preserved {
                     requested: desired.frame_size,
@@ -89,6 +93,7 @@ mod tests {
         geometry::{FrameRate, PixelSize},
         screen_configuration::{ScreenStreamRequest, ScreenStreamRequestId},
         screen_manager::{ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
+        video_encoder::{VideoBitrate, VideoCodec},
     };
 
     fn sample_screen(id: u8, width: u32, height: u32) -> Screen {
@@ -124,6 +129,8 @@ mod tests {
                         height: 1200,
                     },
                     frame_rate: FrameRate::new(60, 1).expect("frame rate"),
+                    codec: VideoCodec::H264,
+                    bitrate: VideoBitrate::new(24_000_000).expect("bitrate"),
                 },
                 ScreenStreamRequest {
                     screen_id: ScreenId(9),
@@ -133,6 +140,8 @@ mod tests {
                         height: 720,
                     },
                     frame_rate: FrameRate::new(30, 1).expect("frame rate"),
+                    codec: VideoCodec::H264,
+                    bitrate: VideoBitrate::new(5_000_000).expect("bitrate"),
                 },
             ],
         };
@@ -168,6 +177,11 @@ mod tests {
                 width: 1920,
                 height: 1200
             }
+        );
+        assert_eq!(plans[0].encoding.codec, VideoCodec::H264);
+        assert_eq!(
+            plans[0].encoding.bitrate,
+            VideoBitrate::new(24_000_000).expect("bitrate")
         );
     }
 }

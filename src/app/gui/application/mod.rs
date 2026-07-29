@@ -47,11 +47,11 @@ use crate::{
     kernel::{
         connection_request::PeerCapabilities,
         frame_pipeline::FramePipelineParameters,
-        geometry::FrameRate,
         protocol::{PROTOCOL_NAME, protocol_version_string},
         screen_manager::{ScreenId, ScreenLayoutManager},
         session::{SessionId, SessionRecv, SessionRole, SessionSend},
         transport::TransportRecv,
+        video_encoder::VideoEncoderParameters,
     },
 };
 
@@ -269,13 +269,13 @@ where
         session_id: SessionId,
         screen_id: ScreenId,
         parameters: FramePipelineParameters,
-        frame_rate: FrameRate,
+        encoding: VideoEncoderParameters,
         sender: &MessageSender,
     ) -> eros::Result<()> {
         let plan = HostStreamPlan {
             screen_id,
             parameters,
-            frame_rate,
+            encoding,
         };
         let task_sender = sender.clone();
         launch_host_stream(
@@ -562,11 +562,13 @@ where
                     width,
                     height,
                     frame_rate,
+                    bitrate_mbps,
                 } => RootMessage::OpenRemoteScreen {
                     selected_index: index,
                     width,
                     height,
                     frame_rate,
+                    bitrate_mbps,
                 },
                 GuiIntent::DisconnectRemoteSession => RootMessage::DisconnectRemoteSession,
                 GuiIntent::StopHostedScreenStream(index) => {

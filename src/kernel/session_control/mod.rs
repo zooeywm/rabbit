@@ -63,6 +63,7 @@ mod tests {
             },
         },
         transport::{Delivery, TransportMessage},
+        video_encoder::{VideoBitrate, VideoCodec},
     };
 
     #[test]
@@ -211,6 +212,8 @@ mod tests {
             },
             frame_rate: FrameRate::new(59_940, 1_000)
                 .expect("Test stream frame rate should be valid"),
+            codec: VideoCodec::H264,
+            bitrate: VideoBitrate::new(20_500_000).expect("Test bitrate should be valid"),
         };
         let message = TransportMessage::try_from(SetScreenStreams {
             request_id: ScreenStreamRequestId(9),

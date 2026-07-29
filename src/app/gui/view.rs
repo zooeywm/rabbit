@@ -14,10 +14,13 @@ use crate::app::{
     config::{APP_ID, PointerMode, VideoDisplayPreference},
     gui::state::{
         ConnectedDeviceView, ConnectionRequestView, HostedScreenStreamView, RemoteScreenView,
-        ViewPage, ViewState, WorkspaceSection,
+        ViewPage, ViewState, WorkspaceSection, recommended_bitrate_text,
     },
 };
-use crate::kernel::input::{InputState, KeyboardKey, MouseButton};
+use crate::kernel::{
+    input::{InputState, KeyboardKey, MouseButton},
+    video_encoder::VideoCodec,
+};
 
 slint::slint! {
     export {
@@ -44,6 +47,7 @@ pub(crate) enum GuiIntent {
         width: String,
         height: String,
         frame_rate: String,
+        bitrate_mbps: String,
     },
     DisconnectRemoteSession,
     StopHostedScreenStream(usize),
@@ -200,8 +204,15 @@ where
             });
         }
         {
+            window.on_recommended_bitrate(move |width, height, frame_rate| {
+                recommended_bitrate_text(VideoCodec::H264, &width, &height, &frame_rate)
+                    .unwrap_or_default()
+                    .into()
+            });
+        }
+        {
             let sender = sender.clone();
-            window.on_open_screen(move |index, width, height, frame_rate| {
+            window.on_open_screen(move |index, width, height, frame_rate, bitrate_mbps| {
                 let Ok(index) = usize::try_from(index) else {
                     return;
                 };
@@ -212,6 +223,7 @@ where
                         width: width.to_string(),
                         height: height.to_string(),
                         frame_rate: frame_rate.to_string(),
+                        bitrate_mbps: bitrate_mbps.to_string(),
                     },
                 );
             });
@@ -483,6 +495,7 @@ fn remote_screen_model(entries: Vec<RemoteScreenView>) -> ModelRc<RemoteScreenIt
                 selected_width: SharedString::from(entry.selected_width),
                 selected_height: SharedString::from(entry.selected_height),
                 selected_frame_rate: SharedString::from(entry.selected_frame_rate),
+                selected_bitrate_mbps: SharedString::from(entry.selected_bitrate_mbps),
             })
             .collect::<Vec<_>>(),
     ))

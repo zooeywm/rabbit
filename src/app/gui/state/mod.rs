@@ -6,7 +6,8 @@ pub(crate) use connection::{DirectConnectionCompletion, DirectConnectionState, D
 pub(crate) use stream::{ScreenStreamState, ScreenStreamTarget};
 pub(crate) use view_model::{
     ConnectedDeviceView, ConnectionRequestView, HostedScreenStreamView, RemoteScreenView, ViewPage,
-    ViewState, WorkspaceSection, format_frame_rate, parse_stream_settings,
+    ViewState, WorkspaceSection, format_bitrate_mbps, format_frame_rate, parse_stream_settings,
+    recommended_bitrate_text,
 };
 
 // Focused test: cargo test app::gui::state::tests
@@ -16,7 +17,8 @@ mod tests {
 
     use crate::app::gui::state::{
         DirectConnectionCompletion, DirectConnectionState, DirectTarget, ScreenStreamState,
-        ScreenStreamTarget, format_frame_rate, parse_stream_settings,
+        ScreenStreamTarget, format_bitrate_mbps, format_frame_rate, parse_stream_settings,
+        recommended_bitrate_text,
     };
     use crate::kernel::{
         geometry::{FrameRate, PixelSize},
@@ -26,6 +28,7 @@ mod tests {
         },
         screen_manager::ScreenId,
         session::SessionId,
+        video_encoder::{VideoBitrate, VideoCodec},
     };
 
     #[test]
@@ -93,7 +96,7 @@ mod tests {
 
     #[test]
     fn stream_settings_parse_even_resolution_and_decimal_frame_rate() {
-        let (size, frame_rate) = parse_stream_settings("2560", "1440", "143.855")
+        let (size, frame_rate, bitrate) = parse_stream_settings("2560", "1440", "143.855", "80.5")
             .expect("Valid stream settings should parse");
 
         assert_eq!(
@@ -105,12 +108,26 @@ mod tests {
         );
         assert_eq!(frame_rate.numerator(), 143_855);
         assert_eq!(frame_rate.denominator(), 1_000);
+        assert_eq!(bitrate.bits_per_second(), 80_500_000);
     }
 
     #[test]
     fn stream_settings_reject_odd_resolution_and_zero_frame_rate() {
-        assert!(parse_stream_settings("1919", "1080", "60").is_err());
-        assert!(parse_stream_settings("1920", "1080", "0").is_err());
+        assert!(parse_stream_settings("1919", "1080", "60", "20").is_err());
+        assert!(parse_stream_settings("1920", "1080", "0", "20").is_err());
+        assert!(parse_stream_settings("1920", "1080", "60", "0").is_err());
+    }
+
+    #[test]
+    fn h264_bitrate_reference_tracks_target_geometry() {
+        assert_eq!(
+            recommended_bitrate_text(VideoCodec::H264, "1920", "1080", "60").as_deref(),
+            Some("21")
+        );
+        assert_eq!(
+            format_bitrate_mbps(VideoBitrate::new(80_500_000).expect("bitrate should be valid")),
+            "80.5"
+        );
     }
 
     #[test]
@@ -125,6 +142,8 @@ mod tests {
                 height: 1200,
             },
             frame_rate: FrameRate::new(120, 1).expect("Test frame rate should be valid"),
+            codec: VideoCodec::H264,
+            bitrate: VideoBitrate::new(100_000_000).expect("Test bitrate should be valid"),
         };
         let mut state = ScreenStreamState::default();
         state.begin(target.clone());
