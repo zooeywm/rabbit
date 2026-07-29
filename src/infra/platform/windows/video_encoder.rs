@@ -149,6 +149,7 @@ where
     .with_context(|| "Failed to initialize Windows Media Foundation H.264 encoder")?;
     encoder.request_key_frame();
     encoder.encode_frame(&first_frame, &mut send_packet).await?;
+    drop(first_frame);
 
     while let Some(frame) = frames.next().await {
         while let Some(command) = commands.next().now_or_never().flatten() {
