@@ -40,7 +40,10 @@ use crate::kernel::{
     video_decoder::VideoDecoder,
 };
 
-use super::client_video_probe::{ClientVideoFrameProbe, ClientVideoProbeClock};
+use super::{
+    client_video_probe::{ClientVideoFrameProbe, ClientVideoProbeClock},
+    video_color::set_media_type_colorimetry,
+};
 
 #[derive(Debug)]
 pub(crate) struct WindowsDecodedFrame {
@@ -468,6 +471,7 @@ fn configure_decoder_types(transform: &IMFTransform) -> eros::Result<DecoderOutp
     unsafe {
         input.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         input.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+        set_media_type_colorimetry(&input)?;
         transform.SetInputType(0, &input, 0)?;
     }
     configure_decoder_output_type(transform)
@@ -479,6 +483,7 @@ fn configure_decoder_output_type(transform: &IMFTransform) -> eros::Result<Decod
             break;
         };
         if unsafe { media_type.GetGUID(&MF_MT_SUBTYPE) }.ok() == Some(MFVideoFormat_NV12) {
+            set_media_type_colorimetry(&media_type)?;
             unsafe { transform.SetOutputType(0, &media_type, 0) }?;
             let packed_size = unsafe { media_type.GetUINT64(&MF_MT_FRAME_SIZE) }
                 .with_context(|| "Windows H.264 decoder output has no frame size")?;

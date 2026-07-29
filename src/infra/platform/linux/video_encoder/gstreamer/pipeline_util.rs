@@ -4,6 +4,8 @@ use eros::Context as _;
 use gstreamer::glib::prelude::ObjectExt as _;
 use gstreamer::prelude::{ElementExt as _, GObjectExtManualGst as _, GstObjectExt as _};
 
+use crate::infra::platform::video_color::gstreamer_colorimetry;
+
 pub(crate) fn terminal_messages(
     pipeline: &gstreamer::Pipeline,
 ) -> eros::Result<flume::Receiver<gstreamer::Message>> {
@@ -110,7 +112,7 @@ pub(crate) fn va_vpp_output_caps(input: &gstreamer::CapsRef) -> eros::Result<gst
         .field("width", width)
         .field("height", height)
         .field("framerate", framerate)
-        .field("colorimetry", "bt709")
+        .field("colorimetry", gstreamer_colorimetry())
         .build())
 }
 

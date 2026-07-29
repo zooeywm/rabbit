@@ -26,6 +26,7 @@ pub mod screen_stream;
 pub mod session;
 pub mod session_control;
 pub mod transport;
+pub mod video_color;
 pub mod video_decoder;
 pub mod video_encoder;
 pub mod video_renderer;

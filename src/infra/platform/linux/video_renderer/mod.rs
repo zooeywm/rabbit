@@ -17,10 +17,10 @@ use crate::{
         client_video_probe::ClientVideoProbeReporter,
         egl_dma_buf::{
             DMA_BUF_PLANE_FD_EXT, DMA_BUF_PLANE_MODIFIER_HI_EXT, DMA_BUF_PLANE_MODIFIER_LO_EXT,
-            DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, ITU_REC709_EXT, LINUX_DMA_BUF_EXT,
-            LINUX_DRM_FOURCC_EXT, SAMPLE_RANGE_HINT_EXT, YUV_COLOR_SPACE_HINT_EXT,
-            YUV_NARROW_RANGE_EXT,
+            DMA_BUF_PLANE_OFFSET_EXT, DMA_BUF_PLANE_PITCH_EXT, LINUX_DMA_BUF_EXT,
+            LINUX_DRM_FOURCC_EXT,
         },
+        video_color::egl_yuv_color_attributes,
         video_decoder::GStreamerDecodedFrame,
     },
     kernel::video_renderer::{VideoRenderer, VideoViewport},
@@ -226,11 +226,8 @@ impl OpenGlVideoRenderer {
             buffer.size.height as egl::Attrib,
             LINUX_DRM_FOURCC_EXT,
             buffer.format as u32 as egl::Attrib,
-            YUV_COLOR_SPACE_HINT_EXT,
-            ITU_REC709_EXT,
-            SAMPLE_RANGE_HINT_EXT,
-            YUV_NARROW_RANGE_EXT,
         ];
+        attributes.extend_from_slice(&egl_yuv_color_attributes());
         let extensions = self
             .egl
             .query_string(Some(self.display), egl::EXTENSIONS)

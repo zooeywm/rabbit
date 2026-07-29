@@ -102,6 +102,7 @@ out vec4 output_color;
 
 void main() {
     vec3 rgb = texture(source_texture, sampled_coordinate).rgb;
+    // BT.709 RGB to limited-range luma.
     float y = dot(rgb, vec3(0.182586, 0.614231, 0.062007)) + 0.062745;
     output_color = vec4(y, 0.0, 0.0, 1.0);
 }
@@ -118,6 +119,7 @@ out vec4 output_color;
 
 void main() {
     vec3 rgb = texture(source_texture, sampled_coordinate).rgb;
+    // BT.709 RGB to limited-range chroma.
     float u = dot(rgb, vec3(-0.100644, -0.338572, 0.439216)) + 0.501961;
     float v = dot(rgb, vec3( 0.439216, -0.398942, -0.040274)) + 0.501961;
     output_color = vec4(u, v, 0.0, 1.0);

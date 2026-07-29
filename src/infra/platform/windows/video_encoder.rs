@@ -11,19 +11,16 @@ use windows::{
             Direct3D11::{
                 D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER,
                 D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-                D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
-                D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-                D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-                D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11Resource, ID3D11Texture2D,
-                ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice,
-                ID3D11VideoProcessorEnumerator,
+                D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+                D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+                D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device,
+                ID3D11Resource, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1,
+                ID3D11VideoDevice, ID3D11VideoProcessorEnumerator,
             },
             Dxgi::Common::{
-                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
-                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_FORMAT_B8G8R8A8_UNORM,
-                DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+                DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
             },
         },
         Media::MediaFoundation::{
@@ -37,18 +34,15 @@ use windows::{
             MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
             MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
             MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
-            MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
-            MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK,
+            MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC_UNLOCK,
             MF_VERSION, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-            MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFNominalRange_16_235,
-            MFSTARTUP_FULL, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
-            MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN,
-            MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-            MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-            MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-            MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
-            MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
-            MFVideoPrimaries_BT709, MFVideoTransFunc_709, MFVideoTransferMatrix_BT709,
+            MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_FULL, MFStartup,
+            MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+            MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+            MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
+            MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER,
+            MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
+            MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
             eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_Base,
         },
         System::{
@@ -68,6 +62,11 @@ use crate::{
         geometry::{FrameRate, PixelSize},
         video_encoder::{VideoEncoder, VideoEncoderCommand},
     },
+};
+
+use super::video_color::{
+    captured_rgb_color_space, encoded_ycbcr_color_space, legacy_captured_rgb_color_space,
+    legacy_encoded_ycbcr_color_space, set_media_type_colorimetry,
 };
 
 #[derive(Debug, Clone)]
@@ -893,28 +892,23 @@ fn set_video_processor_color_space(
     processor: &windows::Win32::Graphics::Direct3D11::ID3D11VideoProcessor,
 ) {
     if let Ok(video_context_1) = video_context.cast::<ID3D11VideoContext1>() {
+        let input = captured_rgb_color_space();
+        let output = encoded_ycbcr_color_space();
         unsafe {
-            video_context_1.VideoProcessorSetStreamColorSpace1(
-                processor,
-                0,
-                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
-            );
-            video_context_1.VideoProcessorSetOutputColorSpace1(
-                processor,
-                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
-            );
+            video_context_1.VideoProcessorSetStreamColorSpace1(processor, 0, input);
+            video_context_1.VideoProcessorSetOutputColorSpace1(processor, output);
         }
         debug!(
             event = "windows_video_processor_color_space",
-            input = ?DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
-            output = ?DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+            input = ?input,
+            output = ?output,
             "Configured D3D11 video processor BT.709 color space"
         );
         return;
     }
 
-    let input = d3d11_video_processor_color_space(false, true, false);
-    let output = d3d11_video_processor_color_space(true, true, false);
+    let input = legacy_captured_rgb_color_space();
+    let output = legacy_encoded_ycbcr_color_space();
     unsafe {
         video_context.VideoProcessorSetStreamColorSpace(processor, 0, &input);
         video_context.VideoProcessorSetOutputColorSpace(processor, &output);
@@ -925,18 +919,6 @@ fn set_video_processor_color_space(
         output = output._bitfield,
         "Configured D3D11 video processor BT.709 color space"
     );
-}
-
-fn d3d11_video_processor_color_space(
-    ycbcr: bool,
-    studio_range: bool,
-    bt601_matrix: bool,
-) -> D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-        _bitfield: u32::from(ycbcr)
-            | (u32::from(studio_range) << 1)
-            | (u32::from(bt601_matrix) << 2),
-    }
 }
 
 fn create_dxgi_device_manager(d3d: &ID3D11Device) -> eros::Result<IMFDXGIDeviceManager> {
@@ -1143,11 +1125,8 @@ fn set_video_type_common(
         )?;
         media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u32_pair(1, 1))?;
         media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-        media_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)?;
-        media_type.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
-        media_type.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32)?;
-        media_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
     }
+    set_media_type_colorimetry(media_type)?;
     Ok(())
 }
 

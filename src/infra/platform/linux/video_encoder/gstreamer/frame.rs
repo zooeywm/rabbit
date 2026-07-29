@@ -12,6 +12,7 @@ use gstreamer_allocators::prelude::DmaBufAllocatorExtManual as _;
 use crate::infra::platform::{
     dma_buf::{DmaBufFrame, DmaBufLease},
     frame_pipeline::GbmFramePipelineFrame,
+    video_color::gstreamer_colorimetry,
     video_probe::VideoFrameProbe,
 };
 use crate::kernel::geometry::FrameRate;
@@ -323,7 +324,7 @@ pub(crate) fn dmabuf_caps(
         gstreamer_video::dma_drm_fourcc_to_string(frame.format as u32, modifier.into()).to_string()
     };
     let colorimetry = match frame.format {
-        DrmFourcc::Nv12 => "bt709",
+        DrmFourcc::Nv12 => gstreamer_colorimetry(),
         DrmFourcc::Xrgb8888 => "sRGB",
         format => eros::bail!("Unsupported DMA-BUF colorimetry for format: {:?}", format),
     };

@@ -19,9 +19,8 @@ use windows::{
             },
             Dxgi::Common::DXGI_FORMAT_NV12,
             Dxgi::{
-                DXGI_DECODE_SWAP_CHAIN_DESC, DXGI_MULTIPLANE_OVERLAY_YCbCr_FLAG_BT709,
-                DXGI_MULTIPLANE_OVERLAY_YCbCr_FLAG_NOMINAL_RANGE, DXGI_PRESENT,
-                IDXGIDecodeSwapChain, IDXGIDevice, IDXGIFactoryMedia, IDXGIResource,
+                DXGI_DECODE_SWAP_CHAIN_DESC, DXGI_PRESENT, IDXGIDecodeSwapChain, IDXGIDevice,
+                IDXGIFactoryMedia, IDXGIResource,
             },
             Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH},
         },
@@ -40,7 +39,9 @@ use crate::{
     kernel::video_renderer::{VideoRenderer, VideoViewport},
 };
 
-use super::client_video_probe::ClientVideoProbeReporter;
+use super::{
+    client_video_probe::ClientVideoProbeReporter, video_color::decode_swap_chain_color_space,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct NativeVideoViewport {
@@ -309,13 +310,8 @@ impl DecodeComposition {
             )
         }
         .with_context(|| "Failed to create zero-copy DXGI decode swap chain")?;
-        unsafe {
-            swap_chain.SetColorSpace(
-                DXGI_MULTIPLANE_OVERLAY_YCbCr_FLAG_BT709
-                    | DXGI_MULTIPLANE_OVERLAY_YCbCr_FLAG_NOMINAL_RANGE,
-            )
-        }
-        .with_context(|| "Failed to set Windows decode swap-chain color space")?;
+        unsafe { swap_chain.SetColorSpace(decode_swap_chain_color_space()) }
+            .with_context(|| "Failed to set Windows decode swap-chain color space")?;
         let surface_content = unsafe { device.CreateSurfaceFromHandle(surface_handle) }
             .with_context(|| "Failed to wrap DirectComposition video surface")?;
         unsafe {

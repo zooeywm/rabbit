@@ -556,6 +556,10 @@ fn decoded_dma_buf_caps() -> gstreamer::Caps {
     gstreamer::Caps::builder("video/x-raw")
         .features(["memory:DMABuf"])
         .field("format", "DMA_DRM")
+        .field(
+            "colorimetry",
+            crate::infra::platform::video_color::gstreamer_colorimetry(),
+        )
         .build()
 }
 
@@ -667,6 +671,12 @@ mod tests {
                 .get::<&str>("format")
                 .expect("Decoded output caps should contain a format"),
             "DMA_DRM"
+        );
+        assert_eq!(
+            structure
+                .get::<&str>("colorimetry")
+                .expect("Decoded output caps should constrain colorimetry"),
+            "bt709"
         );
     }
 
