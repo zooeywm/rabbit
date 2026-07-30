@@ -141,7 +141,7 @@ where
     );
 
     loop {
-        apply_headless_timeouts(&mut model, &timeout_policy);
+        apply_headless_timeouts(&mut model, &timeout_policy).await;
         match messages.pop().await {
             HeadlessMessage::Shutdown => {
                 info!(
@@ -168,15 +168,16 @@ where
                     id,
                     message,
                     &sender,
-                )?;
+                )
+                .await?;
             }
             HeadlessMessage::SessionClosed(id) => {
                 info!(session_id = id.0, "Headless session closed");
-                model.remove_session(id);
+                retire_session(&mut model, id).await;
             }
             HeadlessMessage::SessionFailed(id, error) => {
                 error!(session_id = id.0, error = ?error, "Headless session failed");
-                model.remove_session(id);
+                retire_session(&mut model, id).await;
             }
             HeadlessMessage::ScreenStreamFinished(id, screen_id, stream_id, result) => {
                 if let Some(session) = model
@@ -220,7 +221,7 @@ where
             } => {
                 if let Err(error) = result {
                     error!(session_id = session_id.0, error = ?error, "Failed to send stream config");
-                    model.remove_session(session_id);
+                    retire_session(&mut model, session_id).await;
                     continue;
                 }
                 for plan in plans {
@@ -268,22 +269,24 @@ async fn shutdown_headless<Stack>(model: &mut ApplicationModel<Stack>)
 where
     Stack: ApplicationStack,
 {
-    let tasks = model.begin_screen_stream_shutdown();
-    let sessions = model
+    let session_ids = model
         .sessions
         .iter()
-        .map(|session| Rc::clone(&session.send))
+        .map(|session| session.send.id())
         .collect::<Vec<_>>();
 
-    for task in tasks {
-        if let Err(error) = task.await {
-            error!(error = ?error, "Screen stream task failed during headless shutdown");
-        }
+    for session_id in session_ids {
+        retire_session(model, session_id).await;
     }
-    for session in sessions {
-        session.close().await;
+}
+
+async fn retire_session<Stack>(model: &mut ApplicationModel<Stack>, session_id: SessionId)
+where
+    Stack: ApplicationStack,
+{
+    if let Some(retirement) = model.begin_session_retirement(session_id) {
+        retirement.finish().await;
     }
-    model.sessions.clear();
 }
 
 async fn accept_request<Stack>(
@@ -332,7 +335,7 @@ where
             session_id = old_id.0,
             "Superseding draining headless session for reconnect"
         );
-        model.remove_session(old_id);
+        retire_session(model, old_id).await;
     }
 
     let mut running = RunningSession::new(
@@ -349,7 +352,7 @@ where
     Ok(())
 }
 
-fn apply_headless_timeouts<Stack>(
+async fn apply_headless_timeouts<Stack>(
     model: &mut ApplicationModel<Stack>,
     policy: &SessionTimeoutPolicy,
 ) where
@@ -367,11 +370,11 @@ fn apply_headless_timeouts<Stack>(
             session_id = id.0,
             "Headless session hit timeout policy; removing"
         );
-        model.remove_session(id);
+        retire_session(model, id).await;
     }
 }
 
-fn handle_session_message<Stack>(
+async fn handle_session_message<Stack>(
     model: &mut ApplicationModel<Stack>,
     remote_input_injector: &mut Stack::RemoteInputInjector,
     id: SessionId,
@@ -397,9 +400,20 @@ where
             })
             .detach();
         }
-        HostControlEffect::StreamRequestRejected(_)
-        | HostControlEffect::StreamStopped(_)
-        | HostControlEffect::NoShellAction => {}
+        HostControlEffect::StreamStopped { screen_id, task } => {
+            if let Some(task) = task
+                && let Err(join_error) = task.await
+            {
+                error!(
+                    event = "headless_stopped_screen_stream_join_failed",
+                    session_id = id.0,
+                    screen_id = screen_id.0,
+                    error = ?join_error,
+                    "Stopped headless screen stream failed while releasing its resources"
+                );
+            }
+        }
+        HostControlEffect::StreamRequestRejected(_) | HostControlEffect::NoShellAction => {}
     }
     Ok(())
 }

@@ -6,6 +6,7 @@ use std::{
 };
 
 use eros::Context as _;
+use tracing::error;
 
 use crate::{
     app::{
@@ -38,7 +39,7 @@ pub(crate) struct RunningSession {
     pub(crate) peer_capabilities: PeerCapabilities,
     pub(crate) send: Rc<SessionSend<SessionTransportSend>>,
     pub(crate) screen_streams: HashMap<ScreenId, RunningScreenStream>,
-    pub(crate) _receiver: compio::runtime::JoinHandle<()>,
+    receiver: Option<compio::runtime::JoinHandle<()>>,
 }
 
 impl RunningSession {
@@ -57,7 +58,7 @@ impl RunningSession {
             peer_capabilities,
             send,
             screen_streams: HashMap::new(),
-            _receiver: receiver,
+            receiver: Some(receiver),
         }
     }
 
@@ -103,6 +104,54 @@ impl RunningSession {
     pub(crate) fn admits_new_streams(&self) -> bool {
         self.phase.admits_new_streams()
     }
+
+    fn begin_retirement(mut self) -> SessionRetirement {
+        let stream_tasks = self
+            .screen_streams
+            .values_mut()
+            .filter_map(RunningScreenStream::begin_shutdown)
+            .collect();
+        SessionRetirement {
+            id: self.send.id(),
+            send: Rc::clone(&self.send),
+            stream_tasks,
+            receiver: self.receiver.take(),
+        }
+    }
+}
+
+#[must_use = "a retired Session must be joined with SessionRetirement::finish"]
+pub(crate) struct SessionRetirement {
+    id: SessionId,
+    send: Rc<SessionSend<SessionTransportSend>>,
+    stream_tasks: Vec<compio::runtime::JoinHandle<()>>,
+    receiver: Option<compio::runtime::JoinHandle<()>>,
+}
+
+impl SessionRetirement {
+    pub(crate) async fn finish(mut self) {
+        self.send.close().await;
+        for task in self.stream_tasks.drain(..) {
+            if let Err(join_error) = task.await {
+                error!(
+                    event = "retired_screen_stream_join_failed",
+                    session_id = self.id.0,
+                    error = ?join_error,
+                    "Retired screen stream task failed while releasing its resources"
+                );
+            }
+        }
+        if let Some(receiver) = self.receiver.take()
+            && let Err(join_error) = receiver.await
+        {
+            error!(
+                event = "retired_session_receiver_join_failed",
+                session_id = self.id.0,
+                error = ?join_error,
+                "Retired Session receiver task failed"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -141,10 +190,7 @@ pub(crate) struct RunningScreenStream {
 impl Drop for RunningScreenStream {
     fn drop(&mut self) {
         self.cancellation.push(());
-
-        if let Some(task) = self.task.take() {
-            task.detach();
-        }
+        self.task.take();
     }
 }
 
@@ -235,10 +281,24 @@ where
         Ok(id)
     }
 
-    pub(crate) fn remove_session(&mut self, id: SessionId) {
-        self.sessions.retain(|session| session.send.id() != id);
+    pub(crate) fn begin_session_retirement(&mut self, id: SessionId) -> Option<SessionRetirement> {
+        let position = self
+            .sessions
+            .iter()
+            .position(|session| session.send.id() == id)?;
+        let session = self.sessions.remove(position);
         self.remote_screens.remove(&id);
         self.screen_stream_results.remove(&id);
+        Some(session.begin_retirement())
+    }
+
+    pub(crate) fn begin_all_session_retirements(&mut self) -> Vec<SessionRetirement> {
+        self.remote_screens.clear();
+        self.screen_stream_results.clear();
+        self.sessions
+            .drain(..)
+            .map(RunningSession::begin_retirement)
+            .collect()
     }
 
     pub(crate) fn session_phase_for_key(&self, key: &SessionKey) -> Option<SessionPhase> {
@@ -258,21 +318,6 @@ where
                 .key
                 .matches_controller_target(remote_ip, remote_port)
         })
-    }
-
-    pub(crate) fn begin_screen_stream_shutdown(&mut self) -> Vec<compio::runtime::JoinHandle<()>> {
-        let mut tasks = Vec::new();
-
-        for session in &mut self.sessions {
-            let _ = session.begin_drain();
-            for stream in session.screen_streams.values_mut() {
-                if let Some(task) = stream.begin_shutdown() {
-                    tasks.push(task);
-                }
-            }
-        }
-
-        tasks
     }
 }
 

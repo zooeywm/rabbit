@@ -16,7 +16,7 @@ use std::{
 
 use eros::Context as _;
 use futures_util::{future::Either, pin_mut};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::app::{
     gui::{
@@ -28,7 +28,7 @@ use crate::app::{
         state::{DirectConnectionState, ScreenStreamState, WorkspaceSection},
         view::{GuiIntent, ViewPublisher},
     },
-    model::{ApplicationModel, RunningScreenStream, RunningSession, SessionKey},
+    model::{ApplicationModel, RunningSession, SessionKey},
     runtime::{
         host_stream_launch::launch_host_stream,
         session_lifecycle::{
@@ -248,7 +248,7 @@ where
         Ok(())
     }
 
-    pub(super) fn start_session<R>(
+    pub(super) async fn start_session<R>(
         &mut self,
         peer_address: SocketAddr,
         peer_name: Option<String>,
@@ -293,7 +293,9 @@ where
                 role = ?send.role(),
                 "Superseding draining session for reconnect"
             );
-            self.model.remove_session(old_id);
+            if let Some(retirement) = self.model.begin_session_retirement(old_id) {
+                retirement.finish().await;
+            }
         }
 
         let session_id = send.id();
@@ -354,11 +356,13 @@ where
         .await
     }
 
-    pub(super) fn remove_session(&mut self, id: SessionId) {
+    pub(super) async fn remove_session(&mut self, id: SessionId) {
         let was_controller = self.model.sessions.iter().any(|session| {
             session.send.id() == id && session.key.role() == SessionRole::Controller
         });
-        self.model.remove_session(id);
+        if let Some(retirement) = self.model.begin_session_retirement(id) {
+            retirement.finish().await;
+        }
         self.host_stream
             .pending_starts
             .retain(|(session_id, _)| *session_id != id);
@@ -405,7 +409,7 @@ where
         session_catalog::controller_session_for_peer(&self.model, *peer)
     }
 
-    pub(super) fn disconnect_session(&mut self, session_id: SessionId) -> eros::Result<bool> {
+    pub(super) async fn disconnect_session(&mut self, session_id: SessionId) -> eros::Result<bool> {
         let Some(session) = self
             .model
             .sessions
@@ -422,12 +426,6 @@ where
                 "Session drain transition rejected"
             );
         }
-        let send = Rc::clone(&session.send);
-        let tasks = session
-            .screen_streams
-            .values_mut()
-            .filter_map(RunningScreenStream::begin_shutdown)
-            .collect::<Vec<_>>();
         if self
             .remote_stream
             .screen_stream
@@ -438,20 +436,7 @@ where
         }
         self.stop_session_video_decoder(session_id)?;
 
-        self.remove_session(session_id);
-        compio::runtime::spawn(async move {
-            for task in tasks {
-                if let Err(error) = task.await {
-                    error!(
-                        session_id = session_id.0,
-                        error = ?error,
-                        "Screen stream task failed while disconnecting Session"
-                    );
-                }
-            }
-            send.close().await;
-        })
-        .detach();
+        self.remove_session(session_id).await;
 
         info!(
             event = "session_disconnect_requested",
@@ -545,7 +530,7 @@ where
     }
 
     /// Applies session timeout policy; drains then disconnects timed-out sessions.
-    pub(super) fn apply_session_timeouts(&mut self) -> eros::Result<bool> {
+    pub(super) async fn apply_session_timeouts(&mut self) -> eros::Result<bool> {
         let policy = self.host_stream.timeout_policy;
         let mut timed_out = Vec::new();
 
@@ -563,7 +548,7 @@ where
                 ?action,
                 "Session hit timeout policy; disconnecting"
             );
-            let _ = self.disconnect_session(id)?;
+            let _ = self.disconnect_session(id).await?;
             changed = true;
         }
         Ok(changed)
@@ -595,7 +580,7 @@ where
         while !application.lifecycle.finished {
             let message = application.next_message(intents.clone()).await;
             let mut changed = application.update(message, &sender).await?;
-            changed |= application.apply_session_timeouts()?;
+            changed |= application.apply_session_timeouts().await?;
             if changed {
                 application.publish_view_state()?;
             }

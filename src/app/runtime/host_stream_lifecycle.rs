@@ -36,18 +36,10 @@ pub fn apply_screen_stream_finished(
     }
 }
 
-/// Drops a host stream when the peer (or local UI) stops it. Returns whether a
-/// stream was present.
-pub fn apply_host_stop_screen_stream(
-    streams: &mut HashMap<ScreenId, RunningScreenStream>,
-    screen_id: ScreenId,
-) -> bool {
-    streams.remove(&screen_id).is_some()
-}
-
 /// Removes the current stream and returns its cancellation-aware task so the
-/// caller can join it before acquiring replacement platform resources.
-pub fn begin_host_screen_stream_replacement(
+/// caller can join it before considering the stream stopped or acquiring
+/// replacement platform resources.
+pub fn begin_host_screen_stream_shutdown(
     streams: &mut HashMap<ScreenId, RunningScreenStream>,
     screen_id: ScreenId,
 ) -> Option<compio::runtime::JoinHandle<()>> {
@@ -93,11 +85,15 @@ mod tests {
     }
 
     #[test]
-    fn host_stop_removes_stream() {
+    fn host_stop_returns_the_stream_task_for_joining() {
         let mut streams = HashMap::new();
         streams.insert(ScreenId(3), stream(1));
-        assert!(apply_host_stop_screen_stream(&mut streams, ScreenId(3)));
-        assert!(!apply_host_stop_screen_stream(&mut streams, ScreenId(3)));
+        assert!(
+            begin_host_screen_stream_shutdown(&mut streams, ScreenId(3)).is_none(),
+            "a synthetic stream without a task still must be removed"
+        );
+        assert!(!streams.contains_key(&ScreenId(3)));
+        assert!(begin_host_screen_stream_shutdown(&mut streams, ScreenId(3)).is_none());
     }
 
     #[test]
@@ -124,7 +120,7 @@ mod tests {
                 },
             );
 
-            let task = begin_host_screen_stream_replacement(&mut streams, ScreenId(4))
+            let task = begin_host_screen_stream_shutdown(&mut streams, ScreenId(4))
                 .expect("Replacement should return the previous task");
             task.await
                 .expect("Previous stream task should finish after cancellation");

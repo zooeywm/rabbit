@@ -1,6 +1,4 @@
-use std::rc::Rc;
-
-use tracing::{error, info};
+use tracing::info;
 
 use crate::app::{
     gui::application::{
@@ -34,32 +32,17 @@ where
                 self.lifecycle.closing = true;
                 crate::app::shutdown::request();
                 self.stop_video_decoder()?;
-                let tasks = self.model.begin_screen_stream_shutdown();
-                let sessions = self
-                    .model
-                    .sessions
-                    .iter()
-                    .map(|session| Rc::clone(&session.send))
-                    .collect::<Vec<_>>();
+                let retirements = self.model.begin_all_session_retirements();
                 let shutdown_sender = sender.clone();
 
                 info!(
                     event = "application_shutdown_started",
-                    screen_stream_count = tasks.len(),
+                    session_count = retirements.len(),
                     "Application shutdown started"
                 );
                 compio::runtime::spawn(async move {
-                    for task in tasks {
-                        if let Err(error) = task.await {
-                            error!(
-                                error = ?error,
-                                "Screen stream task failed during application shutdown"
-                            );
-                        }
-                    }
-
-                    for session in sessions {
-                        session.close().await;
+                    for retirement in retirements {
+                        retirement.finish().await;
                     }
 
                     shutdown_sender.post(RootMessage::ShutdownFinished);

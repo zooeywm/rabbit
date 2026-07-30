@@ -611,10 +611,10 @@ where
                         screen_id,
                         format!("Failed to request screen stream: {error}"),
                     ) {
-                        self.remove_session(session_id);
+                        self.remove_session(session_id).await;
                         return Ok(true);
                     }
-                    self.remove_session(session_id);
+                    self.remove_session(session_id).await;
                 } else {
                     if !self
                         .model

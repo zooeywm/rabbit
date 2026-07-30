@@ -10,7 +10,7 @@ use crate::{
         platform::ApplicationStack,
         runtime::{
             host_policy::{HostStreamEvaluation, evaluate_set_screen_streams},
-            host_stream_lifecycle::apply_host_stop_screen_stream,
+            host_stream_lifecycle::begin_host_screen_stream_shutdown,
         },
         services::host_stream::HostStreamPlan,
     },
@@ -70,7 +70,10 @@ pub(crate) fn can_replace_queued_absolute_pointer(
 pub enum HostControlEffect {
     ConfigureStreams(HostStreamConfiguration),
     StreamRequestRejected(DomainError),
-    StreamStopped(ScreenId),
+    StreamStopped {
+        screen_id: ScreenId,
+        task: Option<compio::runtime::JoinHandle<()>>,
+    },
     NoShellAction,
 }
 
@@ -187,20 +190,20 @@ where
             HostControlEffect::NoShellAction
         }
         HostControlDecision::StopScreenStream(screen_id) => {
-            if let Some(session) = model
+            let task = model
                 .sessions
                 .iter_mut()
                 .find(|session| session.send.id() == session_id)
-            {
-                apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
-            }
+                .and_then(|session| {
+                    begin_host_screen_stream_shutdown(&mut session.screen_streams, screen_id)
+                });
             info!(
                 event = "screen_stream_stop_received",
                 session_id = session_id.0,
                 screen_id = screen_id.0,
                 "Screen stream stop received"
             );
-            HostControlEffect::StreamStopped(screen_id)
+            HostControlEffect::StreamStopped { screen_id, task }
         }
         HostControlDecision::RemoteInput(input) => {
             apply_remote_input(model, remote_input_injector, session_id, input);

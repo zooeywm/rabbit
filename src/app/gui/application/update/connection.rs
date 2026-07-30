@@ -107,7 +107,8 @@ where
                             send,
                             recv,
                             sender,
-                        );
+                        )
+                        .await;
                     }
                     Ok(DirectConnectionOutcome::Rejected) => {
                         self.listener
@@ -228,14 +229,17 @@ where
             }
             RootMessage::InitialScreenListFinished { session, result } => {
                 let changed = match result {
-                    Ok(()) => self.start_session(
-                        session.peer_address,
-                        Some(session.peer_name),
-                        session.peer_capabilities,
-                        session.send,
-                        session.recv,
-                        sender,
-                    ),
+                    Ok(()) => {
+                        self.start_session(
+                            session.peer_address,
+                            Some(session.peer_name),
+                            session.peer_capabilities,
+                            session.send,
+                            session.recv,
+                            sender,
+                        )
+                        .await
+                    }
                     Err(error) => {
                         error!(error = ?error, "Failed to send the initial screen list");
                         false

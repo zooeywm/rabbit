@@ -11,7 +11,8 @@ use crate::app::{
     runtime::{
         host_stream_launch::notify_failed_host_stream,
         host_stream_lifecycle::{
-            ScreenStreamFinishEffect, apply_host_stop_screen_stream, apply_screen_stream_finished,
+            ScreenStreamFinishEffect, apply_screen_stream_finished,
+            begin_host_screen_stream_shutdown,
         },
     },
 };
@@ -79,7 +80,7 @@ where
                         error = ?error,
                         "Failed to send screen stream results"
                     );
-                    self.remove_session(session_id);
+                    self.remove_session(session_id).await;
                     return Ok(true);
                 }
 
@@ -216,7 +217,19 @@ where
                 else {
                     return Ok(false);
                 };
-                apply_host_stop_screen_stream(&mut session.screen_streams, screen_id);
+                let task =
+                    begin_host_screen_stream_shutdown(&mut session.screen_streams, screen_id);
+                if let Some(task) = task
+                    && let Err(join_error) = task.await
+                {
+                    error!(
+                        event = "stopped_screen_stream_join_failed",
+                        session_id = session_id.0,
+                        screen_id = screen_id.0,
+                        error = ?join_error,
+                        "Stopped screen stream task failed while releasing its resources"
+                    );
+                }
                 info!(
                     event = "host_screen_stream_stopped",
                     session_id = session_id.0,

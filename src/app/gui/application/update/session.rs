@@ -30,13 +30,13 @@ where
                 let Some(session_id) = self.controller_session_id() else {
                     return Ok(false);
                 };
-                self.disconnect_session(session_id)
+                self.disconnect_session(session_id).await
             }
             RootMessage::DisconnectDevice(index) => {
                 let Some(session_id) = self.host_session_ids().get(index).copied() else {
                     return Ok(false);
                 };
-                self.disconnect_session(session_id)
+                self.disconnect_session(session_id).await
             }
             RootMessage::SessionMessageReceived(id, message) => {
                 let role = self
@@ -47,7 +47,10 @@ where
                     .map(|session| session.key.role());
 
                 if role == Some(SessionRole::Host) {
-                    if self.handle_host_control_message(id, message, sender)? {
+                    if self
+                        .handle_host_control_message(id, message, sender)
+                        .await?
+                    {
                         return Ok(true);
                     }
                     // Fall through only for Ignore decisions that may still be
@@ -186,7 +189,7 @@ where
                 self.remote_stream
                     .screen_stream
                     .fail_session(id, "The remote session closed".to_string());
-                self.remove_session(id);
+                self.remove_session(id).await;
                 info!(
                     event = "session_closed",
                     session_id = id.0,
@@ -200,7 +203,7 @@ where
                 self.remote_stream
                     .screen_stream
                     .fail_session(id, format!("The remote session failed: {error}"));
-                self.remove_session(id);
+                self.remove_session(id).await;
                 error!(session_id = id.0, error = ?error, "Session receive loop failed");
                 self.set_connection_status(format!("Session {} failed: {error}", id.0));
                 Ok(true)
@@ -210,7 +213,7 @@ where
     }
 
     /// Adapts shared Host control effects to the GUI message queue.
-    fn handle_host_control_message(
+    async fn handle_host_control_message(
         &mut self,
         id: crate::kernel::session::SessionId,
         message: SessionMessage,
@@ -251,7 +254,18 @@ where
                 ));
                 Ok(true)
             }
-            HostControlEffect::StreamStopped(screen_id) => {
+            HostControlEffect::StreamStopped { screen_id, task } => {
+                if let Some(task) = task
+                    && let Err(join_error) = task.await
+                {
+                    error!(
+                        event = "stopped_screen_stream_join_failed",
+                        session_id = id.0,
+                        screen_id = screen_id.0,
+                        error = ?join_error,
+                        "Stopped screen stream task failed while releasing its resources"
+                    );
+                }
                 self.host_stream.pending_starts.remove(&(id, screen_id));
                 Ok(true)
             }

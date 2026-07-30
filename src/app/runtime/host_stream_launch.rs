@@ -8,7 +8,7 @@ use crate::{
     app::{
         model::{ApplicationModel, RunningScreenStream},
         platform::ApplicationStack,
-        runtime::host_stream_lifecycle::begin_host_screen_stream_replacement,
+        runtime::host_stream_lifecycle::begin_host_screen_stream_shutdown,
         screen_stream::run_host_screen_stream,
         services::host_stream::HostStreamPlan,
     },
@@ -79,7 +79,7 @@ where
                 screen_id.0
             );
         }
-        begin_host_screen_stream_replacement(&mut session.screen_streams, screen_id)
+        begin_host_screen_stream_shutdown(&mut session.screen_streams, screen_id)
     };
     if let Some(task) = previous_task
         && let Err(error) = task.await
