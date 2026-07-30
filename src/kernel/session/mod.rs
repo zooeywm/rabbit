@@ -6,7 +6,7 @@
 //!
 //! See `ARCHITECTURE.md` §3 for role and RTP policy.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use eros::Context as _;
 
@@ -26,9 +26,9 @@ pub(crate) mod fec;
 mod role;
 pub(crate) mod rtp;
 
-use fec::FecVideoReceiver;
+use fec::{FecVideoReceiver, video_datagram_source};
 use role::{require_role, validate_received_control};
-use rtp::{RtpVideoStream, assemble_video_frame};
+use rtp::{RtpVideoStream, VideoAssemblyResult, assemble_video_frame};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionRole {
@@ -84,8 +84,66 @@ where
     id: SessionId,
     role: SessionRole,
     recv: R,
-    video_streams: HashMap<ScreenId, RtpVideoStream>,
-    video_fec: HashMap<ScreenId, FecVideoReceiver>,
+    video_receivers: HashMap<ScreenId, VideoReceiveStream>,
+}
+
+#[derive(Default)]
+struct VideoReceiveStream {
+    active: Option<VideoReceiveGeneration>,
+    retired_sources: VecDeque<u32>,
+}
+
+struct VideoReceiveGeneration {
+    source: u32,
+    fec: FecVideoReceiver,
+    rtp: RtpVideoStream,
+}
+
+const RETIRED_VIDEO_SOURCE_LIMIT: usize = 8;
+
+impl VideoReceiveStream {
+    fn receive(
+        &mut self,
+        screen_id: ScreenId,
+        payload: bytes::Bytes,
+    ) -> eros::Result<Option<VideoAssemblyResult>> {
+        let source = video_datagram_source(&payload)?;
+        if self
+            .active
+            .as_ref()
+            .is_none_or(|generation| generation.source != source)
+        {
+            if self.retired_sources.contains(&source) {
+                return Ok(None);
+            }
+            if let Some(previous) = self.active.take() {
+                self.retired_sources.push_back(previous.source);
+                if self.retired_sources.len() > RETIRED_VIDEO_SOURCE_LIMIT {
+                    self.retired_sources.pop_front();
+                }
+            }
+            self.active = Some(VideoReceiveGeneration {
+                source,
+                fec: FecVideoReceiver::default(),
+                rtp: RtpVideoStream::default(),
+            });
+        }
+
+        let generation = self
+            .active
+            .as_mut()
+            .expect("active video generation was initialized above");
+        let Some(packets) = generation.fec.receive(source, payload)? else {
+            return Ok(None);
+        };
+        for packet in packets {
+            let result = assemble_video_frame(&mut generation.rtp, source, screen_id, packet)?;
+            if result.request_key_frame || result.frame.is_some() {
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl<T> Session<T>
@@ -121,8 +179,7 @@ where
                 id: self.id,
                 role: self.role,
                 recv: self.recv,
-                video_streams: HashMap::new(),
-                video_fec: HashMap::new(),
+                video_receivers: HashMap::new(),
             },
         )
     }
@@ -275,21 +332,17 @@ where
                         );
                     }
 
-                    let packets = self
-                        .video_fec
+                    let assembled = self
+                        .video_receivers
                         .entry(screen_id)
                         .or_default()
-                        .receive(message.payload)?;
-                    if let Some(packets) = packets {
-                        for packet in packets {
-                            let assembled =
-                                assemble_video_frame(&mut self.video_streams, screen_id, packet)?;
-                            if assembled.request_key_frame {
-                                return Ok(Some(SessionMessage::KeyFrameRequired(screen_id)));
-                            }
-                            if let Some(frame) = assembled.frame {
-                                return Ok(Some(SessionMessage::Video(frame)));
-                            }
+                        .receive(screen_id, message.payload)?;
+                    if let Some(assembled) = assembled {
+                        if assembled.request_key_frame {
+                            return Ok(Some(SessionMessage::KeyFrameRequired(screen_id)));
+                        }
+                        if let Some(frame) = assembled.frame {
+                            return Ok(Some(SessionMessage::Video(frame)));
                         }
                     }
                 }
@@ -310,11 +363,13 @@ mod tests {
         geometry::{FrameRate, PixelSize},
         screen_manager::{Screen, ScreenId, ScreenLayout, ScreenRect, ScreenTransform},
         session::{
-            SessionId, SessionRecv, SessionRole, SessionSend, VideoMessage,
-            rtp::assemble_video_frame,
+            SessionId, SessionRecv, SessionRole, SessionSend, VideoMessage, VideoReceiveStream,
+            fec::encode_access_unit,
+            rtp::{RtpVideoStream, assemble_video_frame},
         },
         session_control::{ControlMessage, OutgoingScreenList},
         transport::{Delivery, TransportChannel, TransportMessage, TransportRecv, TransportSend},
+        video_encoder::VideoFecPercentage,
     };
     use bytes::Bytes;
 
@@ -344,15 +399,15 @@ mod tests {
         let screen_id = ScreenId(3);
         let first = rtp_packet(41, 7, false);
         let last = rtp_packet(42, 7, true);
-        let mut frames = HashMap::new();
+        let mut stream = RtpVideoStream::default();
 
         assert!(
-            assemble_video_frame(&mut frames, screen_id, first.clone())
+            assemble_video_frame(&mut stream, 0, screen_id, first.clone())
                 .expect("First RTP packet should be accepted")
                 .frame
                 .is_none()
         );
-        let frame = assemble_video_frame(&mut frames, screen_id, last.clone())
+        let frame = assemble_video_frame(&mut stream, 0, screen_id, last.clone())
             .expect("Last RTP packet should complete the frame")
             .frame
             .expect("Complete RTP frame should be published");
@@ -364,38 +419,35 @@ mod tests {
     #[test]
     fn drops_the_whole_rtp_frame_after_a_sequence_gap() {
         let screen_id = ScreenId(4);
-        let mut streams = HashMap::new();
+        let mut stream = RtpVideoStream::default();
 
         assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_packet(8, 11, false))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_packet(8, 11, false))
                 .expect("First RTP packet should be accepted")
                 .frame
                 .is_none()
         );
-        let dropped = assemble_video_frame(&mut streams, screen_id, rtp_packet(10, 11, true))
+        let dropped = assemble_video_frame(&mut stream, 0, screen_id, rtp_packet(10, 11, true))
             .expect("Sequence gap should discard the completed frame");
         assert!(dropped.frame.is_none());
         assert!(!dropped.request_key_frame);
-        assert!(
-            streams
-                .get(&screen_id)
-                .is_some_and(|stream| stream.frame.is_none())
-        );
+        assert!(stream.frame.is_none());
     }
 
     #[test]
     fn drops_a_frame_when_its_first_rtp_packet_is_missing() {
         let screen_id = ScreenId(5);
-        let mut streams = HashMap::new();
+        let mut stream = RtpVideoStream::default();
 
         assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_packet(8, 11, true))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_packet(8, 11, true))
                 .expect("Initial RTP frame should complete")
                 .frame
                 .is_some()
         );
-        let dropped = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(10, 12, true))
-            .expect("Frame with a missing first packet should be discarded");
+        let dropped =
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(10, 12, true))
+                .expect("Frame with a missing first packet should be discarded");
         assert!(dropped.frame.is_none());
         assert!(!dropped.request_key_frame);
     }
@@ -403,10 +455,11 @@ mod tests {
     #[test]
     fn requests_an_idr_when_the_first_received_frame_is_not_a_key_frame() {
         let screen_id = ScreenId(7);
-        let mut streams = HashMap::new();
+        let mut stream = RtpVideoStream::default();
 
-        let received = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(20, 1, true))
-            .expect("Initial dependent frame should be handled");
+        let received =
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(20, 1, true))
+                .expect("Initial dependent frame should be handled");
 
         assert!(received.frame.is_none());
         assert!(received.request_key_frame);
@@ -415,51 +468,134 @@ mod tests {
     #[test]
     fn accepts_a_new_encoder_source_after_the_same_screen_restarts() {
         let screen_id = ScreenId(7);
-        let mut streams = HashMap::new();
+        let mut stream = VideoReceiveStream::default();
 
         assert!(
-            assemble_video_frame(
-                &mut streams,
-                screen_id,
-                rtp_packet_for_source(900, 900_000, 11, true),
-            )
-            .expect("First encoder IDR should be handled")
-            .frame
-            .is_some()
+            stream
+                .receive(screen_id, rtp_packet_for_source(900, 900_000, 11, true),)
+                .expect("First encoder IDR should be handled")
+                .expect("First encoder IDR should produce an assembly result")
+                .frame
+                .is_some()
         );
         assert!(
-            assemble_video_frame(
-                &mut streams,
-                screen_id,
-                rtp_packet_for_source(0, 1, 22, true),
-            )
-            .expect("Restarted encoder IDR should reset RTP state")
-            .frame
-            .is_some()
+            stream
+                .receive(screen_id, rtp_packet_for_source(0, 1, 22, true))
+                .expect("Restarted encoder IDR should reset RTP state")
+                .expect("Restarted encoder IDR should produce an assembly result")
+                .frame
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rejects_late_datagrams_from_a_retired_encoder_generation() {
+        let screen_id = ScreenId(9);
+        let mut stream = VideoReceiveStream::default();
+
+        assert!(
+            stream
+                .receive(screen_id, rtp_packet_for_source(1, 1, 11, true))
+                .expect("First source should be accepted")
+                .is_some()
+        );
+        assert!(
+            stream
+                .receive(screen_id, rtp_packet_for_source(1, 1, 22, true))
+                .expect("Replacement source should be accepted")
+                .is_some()
+        );
+        assert!(
+            stream
+                .receive(screen_id, rtp_packet_for_source(2, 2, 11, true))
+                .expect("Late retired-source datagram should be ignored")
+                .is_none()
+        );
+        assert_eq!(
+            stream.active.as_ref().map(|generation| generation.source),
+            Some(22)
+        );
+    }
+
+    #[test]
+    fn replacing_a_generation_drops_its_incomplete_fec_and_rtp_state_together() {
+        let screen_id = ScreenId(10);
+        let old_packets = (0..8)
+            .map(|sequence| rtp_packet_for_source(sequence, 900_000, 33, sequence == 7))
+            .collect::<Vec<_>>();
+        let old_datagrams =
+            encode_access_unit(old_packets, VideoFecPercentage::DEFAULT).expect("encode old FEC");
+        let mut stream = VideoReceiveStream::default();
+
+        assert!(
+            stream
+                .receive(screen_id, old_datagrams[0].clone())
+                .expect("Partial old FEC should be retained")
+                .is_none()
+        );
+        assert!(
+            stream
+                .receive(screen_id, rtp_packet_for_source(0, 1, 44, true))
+                .expect("New source should replace the incomplete generation")
+                .expect("New source IDR should complete")
+                .frame
+                .is_some()
+        );
+        assert!(
+            stream
+                .receive(screen_id, old_datagrams[1].clone())
+                .expect("Late old FEC should be ignored")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn separate_connections_never_share_video_receive_state() {
+        let screen_id = ScreenId(11);
+        let packet = rtp_packet_for_source(1, 1, 55, true);
+        let mut first_connection = VideoReceiveStream::default();
+        let mut second_connection = VideoReceiveStream::default();
+
+        assert!(
+            first_connection
+                .receive(screen_id, packet.clone())
+                .expect("First connection should accept its initial IDR")
+                .expect("First connection should publish its initial IDR")
+                .frame
+                .is_some()
+        );
+        assert!(
+            second_connection
+                .receive(screen_id, packet)
+                .expect("Second connection should have an independent sequence space")
+                .expect("Second connection should independently publish the same IDR")
+                .frame
+                .is_some()
         );
     }
 
     #[test]
     fn waits_for_a_complete_idr_after_an_rtp_sequence_gap() {
         let screen_id = ScreenId(6);
-        let mut streams = HashMap::new();
+        let mut stream = RtpVideoStream::default();
 
         assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_packet(1, 1, true))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_packet(1, 1, true))
                 .expect("Initial IDR should be accepted")
                 .frame
                 .is_some()
         );
-        let gap = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
+        let gap = assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(3, 2, true))
             .expect("Sequence gap should be handled");
         assert!(gap.frame.is_none());
         assert!(!gap.request_key_frame);
-        let dependent = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(4, 3, true))
-            .expect("Dependent frame should be discarded while waiting for IDR");
+        let dependent =
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(4, 3, true))
+                .expect("Dependent frame should be discarded while waiting for IDR");
         assert!(dependent.frame.is_none());
         assert!(dependent.request_key_frame);
         assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_packet(5, 4, true))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_packet(5, 4, true))
                 .expect("Complete IDR should restore the stream")
                 .frame
                 .is_some()
@@ -469,25 +605,26 @@ mod tests {
     #[test]
     fn requests_only_once_until_another_incomplete_frame() {
         let screen_id = ScreenId(8);
-        let mut streams = HashMap::new();
+        let mut stream = RtpVideoStream::default();
         assert!(
-            assemble_video_frame(&mut streams, screen_id, rtp_packet(1, 1, true))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_packet(1, 1, true))
                 .expect("Initial IDR should be accepted")
                 .frame
                 .is_some()
         );
-        let gap = assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(3, 2, true))
+        let gap = assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(3, 2, true))
             .expect("Sequence gap should be handled");
         assert!(!gap.request_key_frame);
 
         let recovered_network =
-            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(4, 3, true))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(4, 3, true))
                 .expect("First complete dependent frame should be handled");
         assert!(recovered_network.request_key_frame);
 
         for offset in 0..30u16 {
             let dependent = assemble_video_frame(
-                &mut streams,
+                &mut stream,
+                0,
                 screen_id,
                 rtp_delta_packet(5 + offset, u32::from(4 + offset), true),
             )
@@ -496,11 +633,11 @@ mod tests {
         }
 
         let second_gap =
-            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(36, 34, true))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(36, 34, true))
                 .expect("A new sequence gap should be handled");
         assert!(!second_gap.request_key_frame);
         let second_recovery =
-            assemble_video_frame(&mut streams, screen_id, rtp_delta_packet(37, 35, true))
+            assemble_video_frame(&mut stream, 0, screen_id, rtp_delta_packet(37, 35, true))
                 .expect("A complete frame after the new loss should trigger recovery");
         assert!(second_recovery.request_key_frame);
     }
@@ -528,8 +665,7 @@ mod tests {
                 delivery: Delivery::Unreliable,
                 payload: rtp_packet(1, 1, true),
             })),
-            video_streams: HashMap::new(),
-            video_fec: HashMap::new(),
+            video_receivers: HashMap::new(),
         };
         let runtime = compio::runtime::Runtime::new().expect("Compio test runtime should start");
 

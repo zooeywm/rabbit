@@ -5,17 +5,13 @@
 //! recovery IDR is requested only after a subsequent frame arrives complete,
 //! which avoids adding a large keyframe to an already-congested path.
 
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use eros::Context as _;
 
 use crate::kernel::{screen_manager::ScreenId, session::ReceivedVideoFrame};
 
 pub(super) struct RtpVideoStream {
-    ssrc: Option<u32>,
     pub(super) next_sequence: Option<u16>,
     pub(super) frame: Option<RtpFrameAssembly>,
     pub(super) waiting_for_keyframe: bool,
@@ -26,7 +22,6 @@ pub(super) struct RtpVideoStream {
 impl Default for RtpVideoStream {
     fn default() -> Self {
         Self {
-            ssrc: None,
             next_sequence: None,
             frame: None,
             waiting_for_keyframe: true,
@@ -62,19 +57,20 @@ const MAX_ENCODED_VIDEO_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const RECOVERY_KEY_FRAME_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) fn assemble_video_frame(
-    streams: &mut HashMap<ScreenId, RtpVideoStream>,
+    stream: &mut RtpVideoStream,
+    source: u32,
     screen_id: ScreenId,
     packet: bytes::Bytes,
 ) -> eros::Result<VideoAssemblyResult> {
     let metadata = decode_rtp_metadata(&packet)?;
-    let packet_size = packet.len();
-    let stream = streams.entry(screen_id).or_default();
-    if stream.ssrc != Some(metadata.ssrc) {
-        *stream = RtpVideoStream {
-            ssrc: Some(metadata.ssrc),
-            ..RtpVideoStream::default()
-        };
+    if metadata.ssrc != source {
+        eros::bail!(
+            "RTP source {} does not match active source {source} for screen {}",
+            metadata.ssrc,
+            screen_id.0
+        );
     }
+    let packet_size = packet.len();
     let sequence_is_contiguous = stream
         .next_sequence
         .is_none_or(|expected| metadata.sequence == expected);

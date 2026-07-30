@@ -155,9 +155,18 @@ fn rtp_ssrc(packet: &Bytes) -> eros::Result<u32> {
     ))
 }
 
+pub(super) fn video_datagram_source(payload: &Bytes) -> eros::Result<u32> {
+    if payload.starts_with(&MAGIC) {
+        return Ok(FecHeader::decode(payload)?.ssrc);
+    }
+    if payload.first().map(|byte| byte >> 6) != Some(2) {
+        eros::bail!("Video RTP datagram has an invalid or missing RTP version");
+    }
+    rtp_ssrc(payload)
+}
+
 #[derive(Default)]
 pub(super) struct FecVideoReceiver {
-    ssrc: Option<u32>,
     frame: Option<FecFrame>,
     last_completed_frame: Option<u32>,
 }
@@ -176,15 +185,20 @@ struct FecBlock {
 }
 
 impl FecVideoReceiver {
-    pub(super) fn receive(&mut self, payload: Bytes) -> eros::Result<Option<Vec<Bytes>>> {
+    pub(super) fn receive(
+        &mut self,
+        source: u32,
+        payload: Bytes,
+    ) -> eros::Result<Option<Vec<Bytes>>> {
         if !payload.starts_with(&MAGIC) {
             return Ok(Some(vec![payload]));
         }
         let header = FecHeader::decode(&payload)?;
-        if self.ssrc != Some(header.ssrc) {
-            self.ssrc = Some(header.ssrc);
-            self.frame = None;
-            self.last_completed_frame = None;
+        if header.ssrc != source {
+            eros::bail!(
+                "FEC source {} does not match active video source {source}",
+                header.ssrc
+            );
         }
         if self.last_completed_frame.is_some_and(|completed| {
             completed == header.frame_id || (header.frame_id.wrapping_sub(completed) as i32) <= 0
@@ -375,7 +389,7 @@ mod tests {
                 continue;
             }
             recovered = receiver
-                .receive(packet)
+                .receive(0, packet)
                 .expect("FEC packet should be accepted")
                 .or(recovered);
         }
@@ -392,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn fec_accepts_a_restarted_encoder_with_a_new_rtp_source() {
+    fn a_new_fec_generation_has_an_independent_frame_timeline() {
         let percentage = VideoFecPercentage::DEFAULT;
         let first = (0..4)
             .map(|sequence| rtp_packet_for_source(sequence, 900_000, 11, 100))
@@ -404,14 +418,15 @@ mod tests {
         let mut first_recovered = None;
         for packet in encode_access_unit(first.clone(), percentage).expect("encode first") {
             first_recovered = receiver
-                .receive(packet)
+                .receive(11, packet)
                 .expect("receive first")
                 .or(first_recovered);
         }
+        let mut restarted_receiver = FecVideoReceiver::default();
         let mut restarted_recovered = None;
         for packet in encode_access_unit(restarted.clone(), percentage).expect("encode restart") {
-            restarted_recovered = receiver
-                .receive(packet)
+            restarted_recovered = restarted_receiver
+                .receive(22, packet)
                 .expect("receive restart")
                 .or(restarted_recovered);
         }
@@ -435,7 +450,7 @@ mod tests {
                 continue;
             }
             published = receiver
-                .receive(packet)
+                .receive(0, packet)
                 .expect("FEC packet should be accepted")
                 .or(published);
         }
