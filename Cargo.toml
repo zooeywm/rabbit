@@ -4,3 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# For logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+jiff = "0.2"
+
+# For error propagation
+eros = "0.7"
+
+# For config
+config = { version = "0.15", default-features = false, features = ["toml"] }
+serde = { version = "1.0", features = ["derive"] }
+directories = "6.0"
