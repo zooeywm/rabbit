@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::{future::Future, rc::Rc};
 
 use crate::kernel::geometry::{FrameRate, PixelSize};
@@ -26,6 +27,11 @@ impl VideoCodec {
             }
         }
     }
+}
+
+pub fn next_video_ssrc() -> u32 {
+    static NEXT_VIDEO_SSRC: AtomicU32 = AtomicU32::new(0x5242_4954);
+    NEXT_VIDEO_SSRC.fetch_add(0x9e37_79b9, Ordering::Relaxed)
 }
 
 impl TryFrom<u8> for VideoCodec {
@@ -184,6 +190,7 @@ mod tests {
         geometry::FrameRate,
         video_encoder::{
             VideoBitrate, VideoCodec, VideoEncoder, VideoEncoderCommand, VideoEncoderParameters,
+            next_video_ssrc,
         },
     };
 
@@ -318,5 +325,10 @@ mod tests {
                 .bits_per_second(),
             7_000_000
         );
+    }
+
+    #[test]
+    fn encoder_instances_receive_distinct_rtp_sources() {
+        assert_ne!(next_video_ssrc(), next_video_ssrc());
     }
 }

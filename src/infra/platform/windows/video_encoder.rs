@@ -77,7 +77,7 @@ use crate::{
         geometry::{FrameRate, PixelSize},
         video_encoder::{
             VideoBitrate, VideoCodec, VideoEncoder, VideoEncoderCommand, VideoEncoderParameters,
-            VideoFrameRateMode,
+            VideoFrameRateMode, next_video_ssrc,
         },
     },
 };
@@ -228,6 +228,7 @@ where
                 let frame = frame?;
                 if !encoder.uses_capture_device(&frame)? {
                     let sequence = encoder.sequence;
+                    let ssrc = encoder.ssrc;
                     let timeline = encoder.timeline.clone();
                     let next_frame_id = encoder.next_frame_id;
                     let mut replacement = MfH264Encoder::new(
@@ -241,6 +242,7 @@ where
                         || "Failed to rebuild the Windows Media Foundation H.264 encoder",
                     )?;
                     replacement.sequence = sequence;
+                    replacement.ssrc = ssrc;
                     replacement.timeline = timeline;
                     replacement.next_frame_id = next_frame_id;
                     replacement.request_key_frame();
@@ -312,6 +314,7 @@ struct MfH264Encoder {
     frame_duration_hns: i64,
     timeline: EncoderTimeline,
     sequence: u16,
+    ssrc: u32,
     max_packet_size: usize,
     force_key_frame: bool,
     logged_output_format: bool,
@@ -496,6 +499,7 @@ impl MfH264Encoder {
             frame_duration_hns: frame_duration_hns(frame_rate),
             timeline: EncoderTimeline::new(frame_rate_mode, frame_rate),
             sequence: 0,
+            ssrc: next_video_ssrc(),
             max_packet_size,
             force_key_frame: false,
             logged_output_format: false,
@@ -826,6 +830,7 @@ impl MfH264Encoder {
                             nal,
                             timestamp,
                             &mut self.sequence,
+                            self.ssrc,
                             self.max_packet_size,
                             marker,
                         )? {
@@ -2271,6 +2276,7 @@ fn packetize_h264_nal(
     nal: &[u8],
     timestamp: u32,
     sequence: &mut u16,
+    ssrc: u32,
     max_packet_size: usize,
     marker: bool,
 ) -> eros::Result<Vec<Bytes>> {
@@ -2279,7 +2285,7 @@ fn packetize_h264_nal(
     }
     let payload = strip_annex_b_start_codes(nal);
     if payload.len() <= max_packet_size - RTP_FIXED_HEADER_SIZE {
-        let packet = rtp_packet(*sequence, timestamp, marker, payload);
+        let packet = rtp_packet(*sequence, timestamp, ssrc, marker, payload);
         *sequence = sequence.wrapping_add(1);
         return Ok(vec![packet]);
     }
@@ -2301,6 +2307,7 @@ fn packetize_h264_nal(
         packets.push(rtp_packet_parts(
             *sequence,
             timestamp,
+            ssrc,
             rtp_marker,
             &[fu_indicator, fu_header],
             &payload[offset..end],
@@ -2311,13 +2318,14 @@ fn packetize_h264_nal(
     Ok(packets)
 }
 
-fn rtp_packet(sequence: u16, timestamp: u32, marker: bool, payload: &[u8]) -> Bytes {
-    rtp_packet_parts(sequence, timestamp, marker, &[], payload)
+fn rtp_packet(sequence: u16, timestamp: u32, ssrc: u32, marker: bool, payload: &[u8]) -> Bytes {
+    rtp_packet_parts(sequence, timestamp, ssrc, marker, &[], payload)
 }
 
 fn rtp_packet_parts(
     sequence: u16,
     timestamp: u32,
+    ssrc: u32,
     marker: bool,
     payload_prefix: &[u8],
     payload: &[u8],
@@ -2328,7 +2336,7 @@ fn rtp_packet_parts(
     packet.put_u8((u8::from(marker) << 7) | H264_RTP_PAYLOAD_TYPE);
     packet.put_u16(sequence);
     packet.put_u32(timestamp);
-    packet.put_u32(RTP_SSRC);
+    packet.put_u32(ssrc);
     packet.extend_from_slice(payload_prefix);
     packet.extend_from_slice(payload);
     packet.freeze()
@@ -2437,7 +2445,6 @@ fn pack_u32_pair(high: u32, low: u32) -> u64 {
 
 const RTP_FIXED_HEADER_SIZE: usize = 12;
 const H264_RTP_PAYLOAD_TYPE: u8 = 96;
-const RTP_SSRC: u32 = 0x5242_4954;
 const MAX_ENCODER_OUTPUT_SAMPLE_SIZE: u32 = 4 * 1024 * 1024;
 const MAX_ENCODER_STREAM_CHANGES_PER_OUTPUT: usize = 8;
 const H264_INFINITE_GOP_LENGTH: u32 = u32::MAX;

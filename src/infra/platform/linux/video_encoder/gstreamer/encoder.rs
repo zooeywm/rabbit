@@ -29,7 +29,9 @@ use super::{
 use crate::infra::platform::{frame_pipeline::GbmFramePipelineFrame, video_probe::VideoFrameProbe};
 use crate::kernel::{
     geometry::FrameRate,
-    video_encoder::{VideoBitrate, VideoCodec, VideoEncoderCommand, VideoEncoderParameters},
+    video_encoder::{
+        VideoBitrate, VideoCodec, VideoEncoderCommand, VideoEncoderParameters, next_video_ssrc,
+    },
 };
 
 #[derive(Debug)]
@@ -189,8 +191,10 @@ impl GStreamerVideoEncoder {
         let parser = create_required_element("h264parse", "h264-parser")?;
         let encoded_output_queue = create_pipeline_stage_queue("encoded-output-queue", 2)?;
         let payloader = create_required_element("rtph264pay", "rtp-payloader")?;
+        let rtp_ssrc = next_video_ssrc();
         payloader.set_property("mtu", rtp_mtu);
         payloader.set_property("config-interval", -1_i32);
+        payloader.set_property("ssrc", rtp_ssrc);
         let sink = create_required_element("appsink", "rtp-output")?;
         let Ok(sink) = sink.downcast::<gstreamer_app::AppSink>() else {
             eros::bail!("GStreamer appsink factory returned an unexpected element type");
@@ -254,6 +258,7 @@ impl GStreamerVideoEncoder {
             input_memory = "dma-buf",
             video_processor = if vpp.is_some() { "vapostproc" } else { "none" },
             packetizer = "rtph264pay",
+            rtp_ssrc,
             transport_payload = "rtp",
             frame_rate_numerator = input_signature.frame_rate.numerator(),
             frame_rate_denominator = input_signature.frame_rate.denominator(),

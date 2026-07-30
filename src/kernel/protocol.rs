@@ -18,10 +18,10 @@
 //! [`crate::kernel::capability`].
 
 /// Incompatible protocol generation.
-pub const PROTOCOL_MAJOR: u16 = 4;
+pub const PROTOCOL_MAJOR: u16 = 5;
 
 /// Compatible extension level within [`PROTOCOL_MAJOR`].
-pub const PROTOCOL_MINOR: u16 = 1;
+pub const PROTOCOL_MINOR: u16 = 0;
 
 /// Human-readable protocol identity for logs and diagnostics.
 pub const PROTOCOL_NAME: &str = "rabbit-session";
@@ -30,7 +30,7 @@ pub const PROTOCOL_NAME: &str = "rabbit-session";
 pub const fn protocol_version_string() -> &'static str {
     // Keep this a const so it can appear in static diagnostics without format!.
     // Update both the constants above and this string together.
-    "4.1"
+    "5.0"
 }
 
 /// Control-plane channel id on the session transport.

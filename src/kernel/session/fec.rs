@@ -6,8 +6,8 @@ use reed_solomon_erasure::galois_8::ReedSolomon;
 
 use crate::kernel::video_encoder::VideoFecPercentage;
 
-const MAGIC: [u8; 4] = *b"RBF\x01";
-const HEADER_SIZE: usize = 16;
+const MAGIC: [u8; 4] = *b"RBF\x02";
+const HEADER_SIZE: usize = 20;
 const LENGTH_SIZE: usize = size_of::<u16>();
 const MAX_DATA_SHARDS: usize = 32;
 
@@ -33,6 +33,7 @@ pub(crate) fn encode_access_unit(
         return Ok(Vec::new());
     };
     let frame_id = rtp_timestamp(first)?;
+    let ssrc = rtp_ssrc(first)?;
     let block_count = packets.len().div_ceil(MAX_DATA_SHARDS);
     let block_count = u16::try_from(block_count).with_context(|| {
         format!(
@@ -47,15 +48,15 @@ pub(crate) fn encode_access_unit(
     );
 
     for (block_index, block) in packets.chunks(MAX_DATA_SHARDS).enumerate() {
-        if block
-            .iter()
-            .any(|packet| rtp_timestamp(packet).ok() != Some(frame_id))
-        {
-            eros::bail!("Video access unit contains multiple RTP timestamps");
+        if block.iter().any(|packet| {
+            rtp_timestamp(packet).ok() != Some(frame_id) || rtp_ssrc(packet).ok() != Some(ssrc)
+        }) {
+            eros::bail!("Video access unit contains multiple RTP timestamps or sources");
         }
         encode_block(
             &mut encoded,
             frame_id,
+            ssrc,
             u16::try_from(block_index).expect("FEC block index is bounded by block count"),
             block_count,
             block,
@@ -69,6 +70,7 @@ pub(crate) fn encode_access_unit(
 fn encode_block(
     encoded: &mut Vec<Bytes>,
     frame_id: u32,
+    ssrc: u32,
     block_index: u16,
     block_count: u16,
     packets: &[Bytes],
@@ -110,6 +112,7 @@ fn encode_block(
         let mut payload = BytesMut::with_capacity(HEADER_SIZE + shard.len());
         payload.extend_from_slice(&MAGIC);
         payload.put_u32(frame_id);
+        payload.put_u32(ssrc);
         payload.put_u16(block_index);
         payload.put_u16(block_count);
         payload.put_u8(data_shards);
@@ -142,8 +145,19 @@ fn rtp_timestamp(packet: &Bytes) -> eros::Result<u32> {
     ))
 }
 
+fn rtp_ssrc(packet: &Bytes) -> eros::Result<u32> {
+    let ssrc = packet
+        .get(8..12)
+        .with_context(|| format!("RTP packet is only {} bytes", packet.len()))?;
+    Ok(u32::from_be_bytes(
+        ssrc.try_into()
+            .expect("RTP SSRC slice has exactly four bytes"),
+    ))
+}
+
 #[derive(Default)]
 pub(super) struct FecVideoReceiver {
+    ssrc: Option<u32>,
     frame: Option<FecFrame>,
     last_completed_frame: Option<u32>,
 }
@@ -167,6 +181,11 @@ impl FecVideoReceiver {
             return Ok(Some(vec![payload]));
         }
         let header = FecHeader::decode(&payload)?;
+        if self.ssrc != Some(header.ssrc) {
+            self.ssrc = Some(header.ssrc);
+            self.frame = None;
+            self.last_completed_frame = None;
+        }
         if self.last_completed_frame.is_some_and(|completed| {
             completed == header.frame_id || (header.frame_id.wrapping_sub(completed) as i32) <= 0
         }) {
@@ -277,6 +296,7 @@ impl FecBlock {
 
 struct FecHeader {
     frame_id: u32,
+    ssrc: u32,
     block_index: u16,
     block_count: u16,
     data_shards: usize,
@@ -290,13 +310,14 @@ impl FecHeader {
             eros::bail!("Video FEC datagram is too short: {} bytes", payload.len());
         }
         let frame_id = u32::from_be_bytes(payload[4..8].try_into().expect("fixed header field"));
+        let ssrc = u32::from_be_bytes(payload[8..12].try_into().expect("fixed header field"));
         let block_index =
-            u16::from_be_bytes(payload[8..10].try_into().expect("fixed header field"));
+            u16::from_be_bytes(payload[12..14].try_into().expect("fixed header field"));
         let block_count =
-            u16::from_be_bytes(payload[10..12].try_into().expect("fixed header field"));
-        let data_shards = usize::from(payload[12]);
-        let parity_shards = usize::from(payload[13]);
-        let shard_index = usize::from(payload[14]);
+            u16::from_be_bytes(payload[14..16].try_into().expect("fixed header field"));
+        let data_shards = usize::from(payload[16]);
+        let parity_shards = usize::from(payload[17]);
+        let shard_index = usize::from(payload[18]);
         if block_count == 0 || block_index >= block_count {
             eros::bail!("Video FEC block index is outside its frame");
         }
@@ -309,6 +330,7 @@ impl FecHeader {
         }
         Ok(Self {
             frame_id,
+            ssrc,
             block_index,
             block_count,
             data_shards,
@@ -326,10 +348,15 @@ mod tests {
     use crate::kernel::video_encoder::VideoFecPercentage;
 
     fn rtp_packet(sequence: u16, timestamp: u32, size: usize) -> Bytes {
+        rtp_packet_for_source(sequence, timestamp, 0, size)
+    }
+
+    fn rtp_packet_for_source(sequence: u16, timestamp: u32, ssrc: u32, size: usize) -> Bytes {
         let mut packet = vec![0_u8; size.max(12)];
         packet[0] = 2 << 6;
         packet[2..4].copy_from_slice(&sequence.to_be_bytes());
         packet[4..8].copy_from_slice(&timestamp.to_be_bytes());
+        packet[8..12].copy_from_slice(&ssrc.to_be_bytes());
         Bytes::from(packet)
     }
 
@@ -360,8 +387,37 @@ mod tests {
         let percentage = VideoFecPercentage::DEFAULT;
         assert_eq!(
             fec_rtp_packet_size(1_200, percentage).expect("datagram should fit FEC"),
-            1_182
+            1_178
         );
+    }
+
+    #[test]
+    fn fec_accepts_a_restarted_encoder_with_a_new_rtp_source() {
+        let percentage = VideoFecPercentage::DEFAULT;
+        let first = (0..4)
+            .map(|sequence| rtp_packet_for_source(sequence, 900_000, 11, 100))
+            .collect::<Vec<_>>();
+        let restarted = (0..4)
+            .map(|sequence| rtp_packet_for_source(sequence, 1, 22, 100))
+            .collect::<Vec<_>>();
+        let mut receiver = FecVideoReceiver::default();
+        let mut first_recovered = None;
+        for packet in encode_access_unit(first.clone(), percentage).expect("encode first") {
+            first_recovered = receiver
+                .receive(packet)
+                .expect("receive first")
+                .or(first_recovered);
+        }
+        let mut restarted_recovered = None;
+        for packet in encode_access_unit(restarted.clone(), percentage).expect("encode restart") {
+            restarted_recovered = receiver
+                .receive(packet)
+                .expect("receive restart")
+                .or(restarted_recovered);
+        }
+
+        assert_eq!(first_recovered, Some(first));
+        assert_eq!(restarted_recovered, Some(restarted));
     }
 
     #[test]

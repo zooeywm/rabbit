@@ -15,6 +15,7 @@ use eros::Context as _;
 use crate::kernel::{screen_manager::ScreenId, session::ReceivedVideoFrame};
 
 pub(super) struct RtpVideoStream {
+    ssrc: Option<u32>,
     pub(super) next_sequence: Option<u16>,
     pub(super) frame: Option<RtpFrameAssembly>,
     pub(super) waiting_for_keyframe: bool,
@@ -25,6 +26,7 @@ pub(super) struct RtpVideoStream {
 impl Default for RtpVideoStream {
     fn default() -> Self {
         Self {
+            ssrc: None,
             next_sequence: None,
             frame: None,
             waiting_for_keyframe: true,
@@ -43,6 +45,7 @@ pub(super) struct RtpFrameAssembly {
 }
 
 struct RtpPacketMetadata {
+    ssrc: u32,
     sequence: u16,
     timestamp: u32,
     marker: bool,
@@ -66,6 +69,12 @@ pub(super) fn assemble_video_frame(
     let metadata = decode_rtp_metadata(&packet)?;
     let packet_size = packet.len();
     let stream = streams.entry(screen_id).or_default();
+    if stream.ssrc != Some(metadata.ssrc) {
+        *stream = RtpVideoStream {
+            ssrc: Some(metadata.ssrc),
+            ..RtpVideoStream::default()
+        };
+    }
     let sequence_is_contiguous = stream
         .next_sequence
         .is_none_or(|expected| metadata.sequence == expected);
@@ -173,6 +182,7 @@ fn decode_rtp_metadata(packet: &bytes::Bytes) -> eros::Result<RtpPacketMetadata>
     Ok(RtpPacketMetadata {
         sequence: u16::from_be_bytes([packet[2], packet[3]]),
         timestamp: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
+        ssrc: u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]),
         marker: packet[1] & 0x80 != 0,
         keyframe: h264_rtp_payload_contains_idr(&packet[RTP_FIXED_HEADER_SIZE..]),
     })

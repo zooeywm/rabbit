@@ -319,11 +319,16 @@ mod tests {
     use bytes::Bytes;
 
     fn rtp_packet(sequence: u16, timestamp: u32, marker: bool) -> Bytes {
+        rtp_packet_for_source(sequence, timestamp, 0, marker)
+    }
+
+    fn rtp_packet_for_source(sequence: u16, timestamp: u32, ssrc: u32, marker: bool) -> Bytes {
         let mut packet = vec![0_u8; 13];
         packet[0] = 2 << 6;
         packet[1] = u8::from(marker) << 7;
         packet[2..4].copy_from_slice(&sequence.to_be_bytes());
         packet[4..8].copy_from_slice(&timestamp.to_be_bytes());
+        packet[8..12].copy_from_slice(&ssrc.to_be_bytes());
         packet[12] = 5;
         Bytes::from(packet)
     }
@@ -405,6 +410,33 @@ mod tests {
 
         assert!(received.frame.is_none());
         assert!(received.request_key_frame);
+    }
+
+    #[test]
+    fn accepts_a_new_encoder_source_after_the_same_screen_restarts() {
+        let screen_id = ScreenId(7);
+        let mut streams = HashMap::new();
+
+        assert!(
+            assemble_video_frame(
+                &mut streams,
+                screen_id,
+                rtp_packet_for_source(900, 900_000, 11, true),
+            )
+            .expect("First encoder IDR should be handled")
+            .frame
+            .is_some()
+        );
+        assert!(
+            assemble_video_frame(
+                &mut streams,
+                screen_id,
+                rtp_packet_for_source(0, 1, 22, true),
+            )
+            .expect("Restarted encoder IDR should reset RTP state")
+            .frame
+            .is_some()
+        );
     }
 
     #[test]
