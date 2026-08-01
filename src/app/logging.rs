@@ -15,7 +15,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use crate::config::{LogLevel, LoggingConfig};
+use crate::app::config::{LogLevel, LoggingConfig};
 
 pub struct LoggingGuard {
     _console: WorkerGuard,

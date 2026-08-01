@@ -193,6 +193,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "kudi"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4549bcc6998eb40742901090a15e59f2c8574f9920b8bd96b8edf2d40acfc0a9"
+dependencies = [
+ "kudi-macros",
+]
+
+[[package]]
+name = "kudi-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "243c6729c8c25a7e665ab8c16faad968736c7ce76845f4e05b0500a416db8ef7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -320,6 +340,7 @@ dependencies = [
  "directories",
  "eros",
  "jiff",
+ "kudi",
  "serde",
  "tracing",
  "tracing-appender",
