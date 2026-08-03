@@ -1,8 +1,9 @@
 use crate::{
     app::App,
     infra::{
-        GbmFramePipelineManager, GbmFramePipelineManagerState, KmsScreenCaptureManager,
-        KmsScreenCaptureManagerState, NiriScreenLayoutManager, NiriScreenLayoutManagerState,
+        GbmFramePipelineManager, GbmFramePipelineManagerState, GnomeScreenLayoutManager,
+        GnomeScreenLayoutManagerState, KmsScreenCaptureManager, KmsScreenCaptureManagerState,
+        NiriScreenLayoutManager, NiriScreenLayoutManagerState,
     },
     kernel::{
         frame_pipeline::FramePipelineManager,
@@ -10,6 +11,42 @@ use crate::{
         screen_manager::{Screen, ScreenId, ScreenLayoutManager},
     },
 };
+
+impl<ScreenCaptureManagerState, FramePipelineManagerState> AsRef<GnomeScreenLayoutManagerState>
+    for App<GnomeScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
+{
+    fn as_ref(&self) -> &GnomeScreenLayoutManagerState {
+        &self.screen_layout_manager_state
+    }
+}
+
+impl<ScreenCaptureManagerState, FramePipelineManagerState> AsMut<GnomeScreenLayoutManagerState>
+    for App<GnomeScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
+{
+    fn as_mut(&mut self) -> &mut GnomeScreenLayoutManagerState {
+        &mut self.screen_layout_manager_state
+    }
+}
+
+impl<ScreenCaptureManagerState, FramePipelineManagerState> ScreenLayoutManager
+    for App<GnomeScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
+{
+    fn refresh(&mut self) -> eros::Result<()> {
+        GnomeScreenLayoutManager::inj_ref_mut(self).refresh()
+    }
+
+    fn screens(&self) -> &[Screen] {
+        GnomeScreenLayoutManager::inj_ref(self).screens()
+    }
+
+    fn screen(&self, id: &ScreenId) -> Option<&Screen> {
+        GnomeScreenLayoutManager::inj_ref(self).screen(id)
+    }
+
+    fn primary_screen(&self) -> eros::Result<&Screen> {
+        GnomeScreenLayoutManager::inj_ref(self).primary_screen()
+    }
+}
 
 impl<ScreenCaptureManagerState, FramePipelineManagerState> AsRef<NiriScreenLayoutManagerState>
     for App<NiriScreenLayoutManagerState, ScreenCaptureManagerState, FramePipelineManagerState>
@@ -63,8 +100,10 @@ impl<ScreenLayoutManagerState, FramePipelineManagerState> AsMut<KmsScreenCapture
     }
 }
 
-impl<FramePipelineManagerState> ScreenCaptureManager
-    for App<NiriScreenLayoutManagerState, KmsScreenCaptureManagerState, FramePipelineManagerState>
+impl<ScreenLayoutManagerState, FramePipelineManagerState> ScreenCaptureManager
+    for App<ScreenLayoutManagerState, KmsScreenCaptureManagerState, FramePipelineManagerState>
+where
+    Self: ScreenLayoutManager,
 {
     type Lease = <KmsScreenCaptureManager<Self> as ScreenCaptureManager>::Lease;
     type Receiver = <KmsScreenCaptureManager<Self> as ScreenCaptureManager>::Receiver;
@@ -94,12 +133,10 @@ impl<ScreenLayoutManagerState, ScreenCaptureManagerState> AsMut<GbmFramePipeline
     }
 }
 
-impl FramePipelineManager
-    for App<
-        NiriScreenLayoutManagerState,
-        KmsScreenCaptureManagerState,
-        GbmFramePipelineManagerState,
-    >
+impl<ScreenLayoutManagerState> FramePipelineManager
+    for App<ScreenLayoutManagerState, KmsScreenCaptureManagerState, GbmFramePipelineManagerState>
+where
+    Self: ScreenLayoutManager,
 {
     type Frame = <GbmFramePipelineManager<Self> as FramePipelineManager>::Frame;
     type Subscription = <GbmFramePipelineManager<Self> as FramePipelineManager>::Subscription;

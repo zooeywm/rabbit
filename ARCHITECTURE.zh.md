@@ -195,6 +195,7 @@ ApplicationStack
 | 栈 | 成熟度 |
 | --- | --- |
 | `linux/niri-kms-gbm-gstreamer-wayland` | 主产品路径 |
+| `linux/gnome-kms-gbm-gstreamer-wayland` | Ubuntu 24 / GNOME Wayland 路径；复用 KMS 媒体管线 |
 | `windows-wgc-d3d11-mf` | 脚手架；落后于 Linux |
 
 新后端 = 新 `ApplicationStack` + `infra` 适配器。勿在会话协议代码中分支。

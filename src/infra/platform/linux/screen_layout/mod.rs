@@ -1,8 +1,15 @@
+mod gnome;
 mod niri;
 
+pub(crate) use gnome::{GnomeScreenLayoutManager, GnomeScreenLayoutManagerState};
 pub(crate) use niri::{NiriScreenLayoutManager, NiriScreenLayoutManagerState};
 
-/// Creates the screen-layout manager state selected for Linux.
-pub(crate) fn create_screen_layout_manager_state() -> eros::Result<NiriScreenLayoutManagerState> {
+pub(crate) fn create_niri_screen_layout_manager_state() -> eros::Result<NiriScreenLayoutManagerState>
+{
     NiriScreenLayoutManagerState::new()
+}
+
+pub(crate) fn create_gnome_screen_layout_manager_state()
+-> eros::Result<GnomeScreenLayoutManagerState> {
+    GnomeScreenLayoutManagerState::new()
 }

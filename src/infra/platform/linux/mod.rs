@@ -21,7 +21,9 @@ pub(crate) use frame_pipeline::{
 pub(crate) use input::LinuxRemoteInputInjector;
 pub(crate) use screen_capture::{KmsScreenCaptureManager, KmsScreenCaptureManagerState};
 pub(crate) use screen_layout::{
-    NiriScreenLayoutManager, NiriScreenLayoutManagerState, create_screen_layout_manager_state,
+    GnomeScreenLayoutManager, GnomeScreenLayoutManagerState, NiriScreenLayoutManager,
+    NiriScreenLayoutManagerState, create_gnome_screen_layout_manager_state,
+    create_niri_screen_layout_manager_state,
 };
 pub(crate) use video_decoder::{GStreamerDecodedFrame, GStreamerVideoDecoder};
 pub(crate) use video_encoder::{GStreamerVideoEncoder, record_frames_to_mp4};

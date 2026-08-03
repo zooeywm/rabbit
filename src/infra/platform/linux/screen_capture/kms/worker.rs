@@ -272,11 +272,25 @@ impl KmsCaptureLoop {
                 match super::super::wayland_damage::WaylandDamageNotifier::new(&screen_name) {
                     Ok(notifier) => Some(notifier),
                     Err(error) => {
-                        let _ = frames.send(Err(error));
-                        return;
+                        tracing::warn!(
+                            target: "rabbit::screen_capture",
+                            event = "linux_dynamic_capture_fallback",
+                            output = %screen_name,
+                            error = ?error,
+                            fallback = "drm-vblank",
+                            "Wayland damage events are unavailable; falling back to fixed-rate KMS capture"
+                        );
+                        None
                     }
                 }
             }
+        };
+        let dynamic_update_source = match frame_rate_mode {
+            VideoFrameRateMode::Fixed => "disabled",
+            VideoFrameRateMode::Dynamic if damage_notifier.is_some() => {
+                "wayland-wlr-screencopy-damage"
+            }
+            VideoFrameRateMode::Dynamic => "drm-vblank-fallback",
         };
         tracing::info!(
             target: "rabbit::screen_capture",
@@ -285,10 +299,7 @@ impl KmsCaptureLoop {
             backend = "drm-kms",
             capture_source = "drm-framebuffer-planes",
             synchronization = "drm-vblank",
-            dynamic_update_source = match frame_rate_mode {
-                VideoFrameRateMode::Fixed => "disabled",
-                VideoFrameRateMode::Dynamic => "wayland-wlr-screencopy-damage",
-            },
+            dynamic_update_source,
             composition_fallback = "gbm-egl-opengl",
             memory = "dma-buf",
             render_node = %capturer.gpu_device().render_node_path().display(),

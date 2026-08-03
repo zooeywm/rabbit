@@ -199,6 +199,7 @@ ApplicationStack
 | Stack | Maturity |
 | --- | --- |
 | `linux/niri-kms-gbm-gstreamer-wayland` | Primary product path |
+| `linux/gnome-kms-gbm-gstreamer-wayland` | Ubuntu 24 / GNOME Wayland path; shares KMS media pipeline |
 | `windows-wgc-d3d11-mf` | Scaffolded; trails Linux |
 
 New backends = new `ApplicationStack` impl + `infra` adapters. Do not branch
