@@ -5,6 +5,8 @@ mod container;
 
 pub(crate) mod outbound_port;
 
+mod pipeline;
+
 pub use container::Container;
 
 use directories::ProjectDirs;
