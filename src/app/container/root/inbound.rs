@@ -1,7 +1,7 @@
 use eros::Context;
 
 use crate::{
-    app::container::{CaptureSourceContainer, root::outbound_port::CaptureManager},
+    app::container::{CaptureSourceContainer, root::outbound_port::CapturerManager},
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 

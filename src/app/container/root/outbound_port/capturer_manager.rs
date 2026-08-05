@@ -5,7 +5,7 @@ use crate::domain::stream::models::vo::CaptureSourceId;
 /// This port describes dependency creation only. The created state is passed
 /// into a dynamically created capture-source container, which determines its
 /// runtime scheduling and lifetime.
-pub(crate) trait CaptureManager {
+pub(crate) trait CapturerManager {
     /// The screen capturer state created by this manager.
     type ScreenCapturerState;
 

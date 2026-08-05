@@ -1,21 +1,21 @@
 use crate::{
-    app::container::root::outbound_port::CaptureManager,
+    app::container::root::outbound_port::CapturerManager,
     domain::stream::models::vo::CaptureSourceId,
 };
 
-use super::capture::FakeScreenCapturerState;
+use super::capturer::FakeScreenCapturerState;
 
 #[derive(kudi::DepInj)]
-#[target(FakeCaptureManagerImpl)]
-pub(crate) struct FakeCaptureManagerState;
+#[target(FakeCapturerManagerImpl)]
+pub(crate) struct FakeCapturerManagerState;
 
-impl FakeCaptureManagerState {
+impl FakeCapturerManagerState {
     pub(crate) fn new() -> eros::Result<Self> {
         Ok(Self)
     }
 }
 
-impl<Deps> CaptureManager for FakeCaptureManagerImpl<Deps> {
+impl<Deps> CapturerManager for FakeCapturerManagerImpl<Deps> {
     type ScreenCapturerState = FakeScreenCapturerState;
 
     fn create_screen_capturer(

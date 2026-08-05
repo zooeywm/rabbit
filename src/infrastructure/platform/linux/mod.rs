@@ -1,3 +1,3 @@
-mod capture_manager;
+mod capturer_manager;
 
-pub(crate) use capture_manager::{CaptureManagerImpl, CaptureManagerState, ScreenCapturerState};
+pub(crate) use capturer_manager::{CapturerManagerImpl, CapturerManagerState, ScreenCapturerState};

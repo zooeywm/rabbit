@@ -1,26 +1,26 @@
 use std::convert::Infallible;
 
 use crate::{
-    app::container::root::outbound_port::CaptureManager,
+    app::container::root::outbound_port::CapturerManager,
     domain::stream::models::vo::CaptureSourceId,
 };
 
 pub(crate) type ScreenCapturerState = Infallible;
 
 #[derive(kudi::DepInj)]
-#[target(CaptureManagerImpl)]
-pub(crate) struct CaptureManagerState {
+#[target(CapturerManagerImpl)]
+pub(crate) struct CapturerManagerState {
     /// Prevents direct construction outside this module.
     _private: (),
 }
 
-impl CaptureManagerState {
+impl CapturerManagerState {
     pub(crate) fn new() -> eros::Result<Self> {
         eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS,);
     }
 }
 
-impl<Deps> CaptureManager for CaptureManagerImpl<Deps> {
+impl<Deps> CapturerManager for CapturerManagerImpl<Deps> {
     type ScreenCapturerState = ScreenCapturerState;
 
     fn create_screen_capturer(

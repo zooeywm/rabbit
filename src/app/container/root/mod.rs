@@ -7,12 +7,12 @@ use std::collections::HashMap;
 
 use crate::{
     app::container::CaptureSourceContainer, domain::stream::models::vo::CaptureSourceId,
-    infrastructure::platform::CaptureManagerState,
+    infrastructure::platform::CapturerManagerState,
 };
 
 pub(crate) struct RootContainer {
     /// Creates screen capturer states for capture-source containers.
-    capture_manager_state: CaptureManagerState,
+    capturer_manager_state: CapturerManagerState,
 
     /// Owns all active capture-source containers.
     capture_sources: HashMap<CaptureSourceId, CaptureSourceContainer>,
@@ -21,7 +21,7 @@ pub(crate) struct RootContainer {
 impl RootContainer {
     pub(crate) fn new() -> eros::Result<Self> {
         Ok(Self {
-            capture_manager_state: CaptureManagerState::new()?,
+            capturer_manager_state: CapturerManagerState::new()?,
             capture_sources: HashMap::new(),
         })
     }

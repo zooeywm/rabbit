@@ -1,5 +1,5 @@
-mod capture;
-mod capture_manager;
+mod capturer;
+mod capturer_manager;
 
 mod converter;
 mod converter_manager;
@@ -7,9 +7,10 @@ mod converter_manager;
 mod encoder;
 mod encoder_manager;
 
-pub(crate) use capture::FakeScreenCapturerState as ScreenCapturerState;
-pub(crate) use capture_manager::{
-    FakeCaptureManagerImpl as CaptureManagerImpl, FakeCaptureManagerState as CaptureManagerState,
+pub(crate) use capturer::FakeScreenCapturerState as ScreenCapturerState;
+pub(crate) use capturer_manager::{
+    FakeCapturerManagerImpl as CapturerManagerImpl,
+    FakeCapturerManagerState as CapturerManagerState,
 };
 pub(crate) use converter::{
     FakeEncoderFrameConverterImpl as EncoderFrameConverterImpl,
