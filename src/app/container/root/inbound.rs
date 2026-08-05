@@ -1,7 +1,10 @@
 use eros::Context;
 
 use crate::{
-    app::container::{CaptureSourceContainer, root::outbound_port::CapturerManager},
+    app::container::{
+        CaptureSourceContainer, StreamPipelineContainer,
+        root::outbound_port::{CapturerManager, ConverterManager, EncoderManager},
+    },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
@@ -26,6 +29,41 @@ impl RootContainer {
             .capture_sources
             .get_mut(&capture_source_id)
             .with_context(|| "Capture source container was not found after creation")?)
+    }
+
+    /// Creates the runtime container for one stream pipeline.
+    fn create_stream_pipeline_container(&mut self) -> eros::Result<StreamPipelineContainer> {
+        let encoder_frame_converter_state = self.create_encoder_frame_converter()?;
+
+        let video_encoder_state = self.create_video_encoder()?;
+
+        Ok(StreamPipelineContainer::new(
+            encoder_frame_converter_state,
+            video_encoder_state,
+        ))
+    }
+
+    /// Creates and registers one stream runtime.
+    pub(crate) fn start_stream(
+        &mut self,
+        capture_source_id: CaptureSourceId,
+    ) -> eros::Result<StreamId> {
+        let stream_id = StreamId::new(self.next_stream_id);
+
+        let next_stream_id = self
+            .next_stream_id
+            .checked_add(1)
+            .with_context(|| "Stream ID space is exhausted")?;
+
+        let stream_pipeline = self.create_stream_pipeline_container()?;
+
+        let capture_source = self.get_or_create_capture_source(capture_source_id)?;
+
+        capture_source.add_stream(stream_id, stream_pipeline)?;
+
+        self.next_stream_id = next_stream_id;
+
+        Ok(stream_id)
     }
 
     /// Removes one stream and immediately removes its capture source when the

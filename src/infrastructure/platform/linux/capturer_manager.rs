@@ -1,22 +1,17 @@
-use std::convert::Infallible;
-
 use crate::{
     app::container::root::outbound_port::CapturerManager,
     domain::stream::models::vo::CaptureSourceId,
 };
 
-pub(crate) type ScreenCapturerState = Infallible;
+use super::capturer::ScreenCapturerState;
 
 #[derive(kudi::DepInj)]
 #[target(CapturerManagerImpl)]
-pub(crate) struct CapturerManagerState {
-    /// Prevents direct construction outside this module.
-    _private: (),
-}
+pub(crate) struct CapturerManagerState;
 
 impl CapturerManagerState {
     pub(crate) fn new() -> eros::Result<Self> {
-        eros::bail!("Linux capture infrastructure has not been implemented");
+        eros::bail!("Linux screen capturer infrastructure has not been implemented");
     }
 }
 
@@ -27,6 +22,6 @@ impl<Deps> CapturerManager for CapturerManagerImpl<Deps> {
         &mut self,
         _capture_source_id: CaptureSourceId,
     ) -> eros::Result<Self::ScreenCapturerState> {
-        eros::bail!("Linux capture infrastructure has not been implemented");
+        eros::bail!("Linux screen capturer infrastructure has not been implemented");
     }
 }

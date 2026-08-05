@@ -1,18 +1,13 @@
-use std::convert::Infallible;
-
 use crate::{
     app::container::root::outbound_port::CapturerManager,
     domain::stream::models::vo::CaptureSourceId,
 };
 
-pub(crate) type ScreenCapturerState = Infallible;
+use super::capturer::ScreenCapturerState;
 
 #[derive(kudi::DepInj)]
 #[target(CapturerManagerImpl)]
-pub(crate) struct CapturerManagerState {
-    /// Prevents direct construction outside this module.
-    _private: (),
-}
+pub(crate) struct CapturerManagerState;
 
 impl CapturerManagerState {
     pub(crate) fn new() -> eros::Result<Self> {

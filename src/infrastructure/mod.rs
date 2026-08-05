@@ -19,6 +19,9 @@ cfg_if::cfg_if! {
 /// The infrastructure implementation selected for the current build.
 pub(crate) mod platform {
     pub(crate) use super::selected_platform::{
-        CapturerManagerImpl, CapturerManagerState, ScreenCapturerState,
+        CapturerManagerImpl, CapturerManagerState, ConverterManagerImpl, ConverterManagerState,
+        EncoderFrameConverterImpl, EncoderFrameConverterState, EncoderManagerImpl,
+        EncoderManagerState, ScreenCapturerImpl, ScreenCapturerState, VideoEncoderImpl,
+        VideoEncoderState,
     };
 }
