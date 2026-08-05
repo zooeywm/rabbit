@@ -14,12 +14,14 @@ _xwin command *args:
     cargo xwin {{ command }} --target {{ windows-target }} {{ args }}
 
 run: (_cargo "run")
+run_fake: (_cargo "run" "--features" "fake")
 build: (_cargo "build" "--workspace")
 check: (_cargo "check" "--workspace" "--all-targets")
 lint: (_cargo "clippy" "--workspace" "--all-targets" "--all-features" "--" "-D" "warnings")
 release: (_cargo "build" "--workspace" "--release")
 
 run-xwin: (_xwin "run")
+run_fake-xwin: (_xwin "run" "--features" "fake")
 build-xwin: (_xwin "build" "--workspace")
 check-xwin: (_xwin "check" "--workspace" "--all-targets")
 lint-xwin: (_xwin "clippy" "--workspace" "--all-targets" "--all-features" "--" "-D" "warnings")
