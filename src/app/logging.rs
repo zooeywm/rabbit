@@ -39,14 +39,35 @@ fn make_filter(rust_log: Option<&str>, config_level: LogLevel) -> eros::Result<E
     }
 }
 
+fn log_file_name(now: &Zoned) -> String {
+    let offset_seconds = now.offset().seconds();
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let offset_seconds = offset_seconds.unsigned_abs();
+    let hours = offset_seconds / 3_600;
+    let minutes = offset_seconds % 3_600 / 60;
+    let seconds = offset_seconds % 60;
+
+    let offset = if seconds != 0 {
+        format!("{hours}{minutes:02}{seconds:02}")
+    } else if minutes != 0 {
+        format!("{hours}{minutes:02}")
+    } else {
+        hours.to_string()
+    };
+
+    format!(
+        "rabbit-{}{sign}{offset}.log",
+        now.strftime("%y%m%d-%H%M%S-%3f")
+    )
+}
+
 pub fn init(project_dirs: &ProjectDirs, config: &LoggingConfig) -> eros::Result<LoggingGuard> {
     let log_dir = project_dirs
         .state_dir()
         .unwrap_or_else(|| project_dirs.data_local_dir());
     create_dir_all(log_dir)?;
 
-    let timestamp = Zoned::now().strftime("%Y-%m-%dT%H-%M-%S%.6f%z").to_string();
-    let log_path = log_dir.join(format!("rabbit-{timestamp}.log"));
+    let log_path = log_dir.join(log_file_name(&Zoned::now()));
     let log_file = File::create(&log_path)?;
 
     let (console_writer, console_guard) = tracing_appender::non_blocking(std::io::stderr());
