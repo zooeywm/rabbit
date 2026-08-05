@@ -1,4 +1,4 @@
-use crate::app::outbound_port::FrameNumber;
+use crate::app::container::stream_pipeline::model::FrameNumber;
 
 pub struct EncodedVideoFrame<Buffer> {
     pub frame_number: FrameNumber,

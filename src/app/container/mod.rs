@@ -1,13 +1,7 @@
-mod inbound;
+pub(crate) mod capture_source;
+pub(crate) mod root;
+pub(crate) mod stream_pipeline;
 
-use crate::domain::stream::models::entity::Stream;
-
-pub struct Container {
-    stream: Vec<Stream>,
-}
-
-impl Container {
-    pub fn new() -> Self {
-        Self { stream: Vec::new() }
-    }
-}
+pub(crate) use capture_source::CaptureSourceContainer;
+pub(crate) use root::RootContainer;
+pub(crate) use stream_pipeline::{LatestFrameSlot, StreamPipelineContainer};

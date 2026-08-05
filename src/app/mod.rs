@@ -1,25 +1,20 @@
 mod config;
+pub(crate) mod container;
 mod logging;
 
-mod container;
-
-pub(crate) mod outbound_port;
-
-mod pipeline;
-
-pub use container::Container;
-
+use crate::app::container::RootContainer;
+use config::Config;
 use directories::ProjectDirs;
 use eros::Context;
 
-use config::Config;
-
 pub(crate) fn run() -> eros::Result<()> {
-    let project_dirs =
-        ProjectDirs::from("", "", "rabbit").context("Failed looking for app project dir")?;
+    let project_dirs = ProjectDirs::from("", "", "rabbit")
+        .with_context(|| "Failed looking for app project dir")?;
 
     let config = Config::load(&project_dirs)?;
     let _logging_guard = logging::init(&project_dirs, &config.logging)?;
+
+    let _root_container = RootContainer::new()?;
 
     tracing::trace!("rabbit started");
     tracing::debug!("rabbit started");

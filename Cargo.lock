@@ -336,6 +336,7 @@ dependencies = [
 name = "rabbit"
 version = "0.1.0"
 dependencies = [
+ "cfg-if",
  "config",
  "directories",
  "eros",

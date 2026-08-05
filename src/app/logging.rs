@@ -74,7 +74,7 @@ pub fn init(project_dirs: &ProjectDirs, config: &LoggingConfig) -> eros::Result<
         .with(console_layer)
         .with(file_layer)
         .try_init()
-        .context("Failed to initialize logging")?;
+        .with_context(|| "Failed to initialize logging")?;
 
     Ok(LoggingGuard {
         _console: console_guard,
