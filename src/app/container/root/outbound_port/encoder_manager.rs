@@ -3,7 +3,9 @@ pub(crate) trait EncoderManagerStateSpec {
 }
 
 pub(crate) trait EncoderManager {
-    type VideoEncoderState;
+    type State: EncoderManagerStateSpec;
 
-    fn create_video_encoder(&mut self) -> eros::Result<Self::VideoEncoderState>;
+    fn create_video_encoder(
+        &mut self,
+    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>;
 }

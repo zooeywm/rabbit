@@ -5,10 +5,10 @@ pub(crate) trait CapturerManagerStateSpec {
 }
 
 pub(crate) trait CapturerManager {
-    type ScreenCapturerState;
+    type State: CapturerManagerStateSpec;
 
     fn create_screen_capturer(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> eros::Result<Self::ScreenCapturerState>;
+    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>;
 }

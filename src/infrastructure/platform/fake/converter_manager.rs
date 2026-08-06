@@ -1,4 +1,4 @@
-use crate::app::container::root::outbound_port::ConverterManager;
+use crate::app::container::root::outbound_port::{ConverterManager, ConverterManagerStateSpec};
 
 use super::converter::FakeEncoderFrameConverterState;
 
@@ -13,9 +13,11 @@ impl FakeConverterManagerState {
 }
 
 impl<Deps> ConverterManager for FakeConverterManagerImpl<Deps> {
-    type EncoderFrameConverterState = FakeEncoderFrameConverterState;
+    type State = FakeConverterManagerState;
 
-    fn create_encoder_frame_converter(&mut self) -> eros::Result<Self::EncoderFrameConverterState> {
+    fn create_encoder_frame_converter(
+        &mut self,
+    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
         Ok(FakeEncoderFrameConverterState::new())
     }
 }

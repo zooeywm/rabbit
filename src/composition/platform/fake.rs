@@ -45,12 +45,12 @@ where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
 {
-    type ScreenCapturerState = FakeScreenCapturerState;
+    type State = FakeCapturerManagerState;
 
     fn create_screen_capturer(
         &mut self,
         capture_source_id: crate::domain::stream::models::vo::CaptureSourceId,
-    ) -> eros::Result<Self::ScreenCapturerState> {
+    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
         CapturerManager::create_screen_capturer(
             FakeCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
@@ -106,9 +106,11 @@ where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
 {
-    type EncoderFrameConverterState = FakeEncoderFrameConverterState;
+    type State = FakeConverterManagerState;
 
-    fn create_encoder_frame_converter(&mut self) -> eros::Result<Self::EncoderFrameConverterState> {
+    fn create_encoder_frame_converter(
+        &mut self,
+    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
         ConverterManager::create_encoder_frame_converter(FakeConverterManagerImpl::inj_ref_mut(
             self,
         ))
@@ -163,9 +165,11 @@ where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
 {
-    type VideoEncoderState = FakeVideoEncoderState;
+    type State = FakeEncoderManagerState;
 
-    fn create_video_encoder(&mut self) -> eros::Result<Self::VideoEncoderState> {
+    fn create_video_encoder(
+        &mut self,
+    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
         EncoderManager::create_video_encoder(FakeEncoderManagerImpl::inj_ref_mut(self))
     }
 }

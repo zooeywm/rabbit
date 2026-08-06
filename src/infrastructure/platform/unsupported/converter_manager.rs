@@ -1,6 +1,4 @@
-use crate::app::container::root::outbound_port::ConverterManager;
-
-use super::converter::UnsupportedEncoderFrameConverterState;
+use crate::app::container::root::outbound_port::{ConverterManager, ConverterManagerStateSpec};
 
 #[derive(kudi::DepInj)]
 #[target(UnsupportedConverterManagerImpl)]
@@ -13,9 +11,11 @@ impl UnsupportedConverterManagerState {
 }
 
 impl<Deps> ConverterManager for UnsupportedConverterManagerImpl<Deps> {
-    type EncoderFrameConverterState = UnsupportedEncoderFrameConverterState;
+    type State = UnsupportedConverterManagerState;
 
-    fn create_encoder_frame_converter(&mut self) -> eros::Result<Self::EncoderFrameConverterState> {
+    fn create_encoder_frame_converter(
+        &mut self,
+    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
         eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS,);
     }
 }

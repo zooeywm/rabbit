@@ -1,9 +1,7 @@
 use crate::{
-    app::container::root::outbound_port::CapturerManager,
+    app::container::root::outbound_port::{CapturerManager, CapturerManagerStateSpec},
     domain::stream::models::vo::CaptureSourceId,
 };
-
-use super::capturer::UnsupportedScreenCapturerState;
 
 #[derive(kudi::DepInj)]
 #[target(UnsupportedCapturerManagerImpl)]
@@ -16,12 +14,12 @@ impl UnsupportedCapturerManagerState {
 }
 
 impl<Deps> CapturerManager for UnsupportedCapturerManagerImpl<Deps> {
-    type ScreenCapturerState = UnsupportedScreenCapturerState;
+    type State = UnsupportedCapturerManagerState;
 
     fn create_screen_capturer(
         &mut self,
         _capture_source_id: CaptureSourceId,
-    ) -> eros::Result<Self::ScreenCapturerState> {
+    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
         eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS,);
     }
 }

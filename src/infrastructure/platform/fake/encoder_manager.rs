@@ -1,4 +1,4 @@
-use crate::app::container::root::outbound_port::EncoderManager;
+use crate::app::container::root::outbound_port::{EncoderManager, EncoderManagerStateSpec};
 
 use super::encoder::FakeVideoEncoderState;
 
@@ -13,9 +13,11 @@ impl FakeEncoderManagerState {
 }
 
 impl<Deps> EncoderManager for FakeEncoderManagerImpl<Deps> {
-    type VideoEncoderState = FakeVideoEncoderState;
+    type State = FakeEncoderManagerState;
 
-    fn create_video_encoder(&mut self) -> eros::Result<Self::VideoEncoderState> {
+    fn create_video_encoder(
+        &mut self,
+    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
         Ok(FakeVideoEncoderState::new())
     }
 }

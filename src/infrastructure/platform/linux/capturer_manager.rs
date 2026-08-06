@@ -1,9 +1,7 @@
 use crate::{
-    app::container::root::outbound_port::CapturerManager,
+    app::container::root::outbound_port::{CapturerManager, CapturerManagerStateSpec},
     domain::stream::models::vo::CaptureSourceId,
 };
-
-use super::capturer::LinuxScreenCapturerState;
 
 #[derive(kudi::DepInj)]
 #[target(LinuxCapturerManagerImpl)]
@@ -16,12 +14,12 @@ impl LinuxCapturerManagerState {
 }
 
 impl<Deps> CapturerManager for LinuxCapturerManagerImpl<Deps> {
-    type ScreenCapturerState = LinuxScreenCapturerState;
+    type State = LinuxCapturerManagerState;
 
     fn create_screen_capturer(
         &mut self,
         _capture_source_id: CaptureSourceId,
-    ) -> eros::Result<Self::ScreenCapturerState> {
+    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
         eros::bail!("Linux screen capturer infrastructure has not been implemented");
     }
 }

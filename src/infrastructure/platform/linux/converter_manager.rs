@@ -1,6 +1,4 @@
-use crate::app::container::root::outbound_port::ConverterManager;
-
-use super::converter::LinuxEncoderFrameConverterState;
+use crate::app::container::root::outbound_port::{ConverterManager, ConverterManagerStateSpec};
 
 #[derive(kudi::DepInj)]
 #[target(LinuxConverterManagerImpl)]
@@ -13,9 +11,11 @@ impl LinuxConverterManagerState {
 }
 
 impl<Deps> ConverterManager for LinuxConverterManagerImpl<Deps> {
-    type EncoderFrameConverterState = LinuxEncoderFrameConverterState;
+    type State = LinuxConverterManagerState;
 
-    fn create_encoder_frame_converter(&mut self) -> eros::Result<Self::EncoderFrameConverterState> {
+    fn create_encoder_frame_converter(
+        &mut self,
+    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
         eros::bail!("Linux frame conversion infrastructure has not been implemented");
     }
 }

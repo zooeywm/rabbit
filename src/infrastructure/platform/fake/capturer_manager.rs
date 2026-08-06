@@ -1,5 +1,5 @@
 use crate::{
-    app::container::root::outbound_port::CapturerManager,
+    app::container::root::outbound_port::{CapturerManager, CapturerManagerStateSpec},
     domain::stream::models::vo::CaptureSourceId,
 };
 
@@ -16,12 +16,12 @@ impl FakeCapturerManagerState {
 }
 
 impl<Deps> CapturerManager for FakeCapturerManagerImpl<Deps> {
-    type ScreenCapturerState = FakeScreenCapturerState;
+    type State = FakeCapturerManagerState;
 
     fn create_screen_capturer(
         &mut self,
         _capture_source_id: CaptureSourceId,
-    ) -> eros::Result<Self::ScreenCapturerState> {
+    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
         Ok(FakeScreenCapturerState::new(0))
     }
 }

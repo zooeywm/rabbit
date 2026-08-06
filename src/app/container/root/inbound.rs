@@ -18,9 +18,9 @@ where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
-    Self: CapturerManager<ScreenCapturerState = CapMgrSt::ScreenCapturerState>
-        + ConverterManager<EncoderFrameConverterState = CvtMgrSt::EncoderFrameConverterState>
-        + EncoderManager<VideoEncoderState = EcdMgrSt::VideoEncoderState>,
+    Self: CapturerManager<State = CapMgrSt>
+        + ConverterManager<State = CvtMgrSt>
+        + EncoderManager<State = EcdMgrSt>,
 {
     fn get_or_create_capture_source(
         &mut self,

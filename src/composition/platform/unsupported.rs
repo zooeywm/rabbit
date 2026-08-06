@@ -51,12 +51,12 @@ where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
 {
-    type ScreenCapturerState = UnsupportedScreenCapturerState;
+    type State = UnsupportedCapturerManagerState;
 
     fn create_screen_capturer(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> eros::Result<Self::ScreenCapturerState> {
+    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
         CapturerManager::create_screen_capturer(
             UnsupportedCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
@@ -112,9 +112,11 @@ where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
 {
-    type EncoderFrameConverterState = UnsupportedEncoderFrameConverterState;
+    type State = UnsupportedConverterManagerState;
 
-    fn create_encoder_frame_converter(&mut self) -> eros::Result<Self::EncoderFrameConverterState> {
+    fn create_encoder_frame_converter(
+        &mut self,
+    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
         ConverterManager::create_encoder_frame_converter(
             UnsupportedConverterManagerImpl::inj_ref_mut(self),
         )
@@ -169,9 +171,11 @@ where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
 {
-    type VideoEncoderState = UnsupportedVideoEncoderState;
+    type State = UnsupportedEncoderManagerState;
 
-    fn create_video_encoder(&mut self) -> eros::Result<Self::VideoEncoderState> {
+    fn create_video_encoder(
+        &mut self,
+    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
         EncoderManager::create_video_encoder(UnsupportedEncoderManagerImpl::inj_ref_mut(self))
     }
 }
