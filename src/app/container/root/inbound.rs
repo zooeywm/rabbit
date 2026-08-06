@@ -22,7 +22,6 @@ where
         + ConverterManager<EncoderFrameConverterState = CvtMgrSt::EncoderFrameConverterState>
         + EncoderManager<VideoEncoderState = EcdMgrSt::VideoEncoderState>,
 {
-    /// Returns the existing capture-source container or creates a new one.
     fn get_or_create_capture_source(
         &mut self,
         capture_source_id: CaptureSourceId,
@@ -42,7 +41,6 @@ where
             .with_context(|| "Capture source container was not found after creation")?)
     }
 
-    /// Creates the runtime container for one stream pipeline.
     fn create_stream_pipeline_container(
         &mut self,
     ) -> eros::Result<
@@ -58,7 +56,6 @@ where
         ))
     }
 
-    /// Creates and registers one stream runtime.
     pub(crate) fn start_stream(
         &mut self,
         capture_source_id: CaptureSourceId,
@@ -81,8 +78,6 @@ where
         Ok(stream_id)
     }
 
-    /// Removes one stream and immediately removes its capture source when the
-    /// stream was its final consumer.
     pub(crate) fn remove_stream(&mut self, stream_id: StreamId) -> eros::Result<()> {
         let capture_source_id = self
             .capture_sources

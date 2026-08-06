@@ -1,4 +1,3 @@
-/// Encoded frame number
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct FrameNumber(u64);
 

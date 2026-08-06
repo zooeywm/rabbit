@@ -22,19 +22,14 @@ where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
 {
-    /// Creates screen capturer states for capture-source containers.
     capturer_manager_state: CapMgrSt,
 
-    /// Creates frame-converter states for stream-pipeline containers.
     converter_manager_state: CvtMgrSt,
 
-    /// Creates video-encoder states for stream-pipeline containers.
     encoder_manager_state: EcdMgrSt,
 
-    /// Owns all active capture-source containers.
     capture_sources: HashMap<CaptureSourceId, CaptureSourceFor<CapMgrSt, CvtMgrSt, EcdMgrSt>>,
 
-    /// The numeric value assigned to the next successfully created stream.
     next_stream_id: u16,
 }
 
@@ -44,7 +39,7 @@ where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
 {
-    pub(crate) fn from_manager_states(
+    pub(crate) fn new(
         capturer_manager_state: CapMgrSt,
         converter_manager_state: CvtMgrSt,
         encoder_manager_state: EcdMgrSt,

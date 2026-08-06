@@ -7,17 +7,14 @@ use crate::{
 
 #[derive(Default)]
 pub(crate) struct FakeCapturedFrame {
-    /// The sequence assigned by the fake screen capturer.
     pub(crate) capture_sequence: u64,
 }
 
 #[derive(kudi::DepInj)]
 #[target(FakeScreenCapturerImpl)]
 pub(crate) struct FakeScreenCapturerState {
-    /// The frame pool used by the fake screen capturer.
     pub(super) frame_pool: FramePool<FakeCapturedFrame>,
 
-    /// The sequence to assign to the next captured frame.
     pub(super) next_capture_sequence: u64,
 }
 

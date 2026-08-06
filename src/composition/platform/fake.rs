@@ -1,26 +1,193 @@
-use crate::infrastructure::platform::{
-    FakeCapturerManagerImpl, FakeCapturerManagerState, FakeConverterManagerImpl,
-    FakeConverterManagerState, FakeEncoderFrameConverterState, FakeEncoderManagerImpl,
-    FakeEncoderManagerState, FakeScreenCapturerState, FakeVideoEncoderState,
+use crate::{
+    app::container::{
+        CaptureSourceContainer, RootContainer, StreamPipelineContainer,
+        root::outbound_port::{
+            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec,
+        },
+    },
+    infrastructure::platform::{
+        FakeCapturerManagerImpl, FakeCapturerManagerState, FakeConverterManagerImpl,
+        FakeConverterManagerState, FakeEncoderFrameConverterState, FakeEncoderManagerImpl,
+        FakeEncoderManagerState, FakeScreenCapturerState, FakeVideoEncoderState,
+    },
 };
 
-impl_capturer_boilerplate!(
-    FakeCapturerManagerState,
-    FakeCapturerManagerImpl,
-    FakeScreenCapturerState
-);
-impl_converter_boilerplate!(
-    FakeConverterManagerState,
-    FakeConverterManagerImpl,
-    FakeEncoderFrameConverterState
-);
-impl_encoder_boilerplate!(
-    FakeEncoderManagerState,
-    FakeEncoderManagerImpl,
-    FakeVideoEncoderState
-);
-impl_root_container!(
-    FakeCapturerManagerState,
-    FakeConverterManagerState,
-    FakeEncoderManagerState
-);
+impl CapturerManagerStateSpec for FakeCapturerManagerState {
+    type ScreenCapturerState = FakeScreenCapturerState;
+}
+
+impl<CvtMgrSt, EcdMgrSt> AsRef<FakeCapturerManagerState>
+    for RootContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+where
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
+    fn as_ref(&self) -> &FakeCapturerManagerState {
+        self.capturer_manager_state()
+    }
+}
+
+impl<CvtMgrSt, EcdMgrSt> AsMut<FakeCapturerManagerState>
+    for RootContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+where
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
+    fn as_mut(&mut self) -> &mut FakeCapturerManagerState {
+        self.capturer_manager_state_mut()
+    }
+}
+
+impl<CvtMgrSt, EcdMgrSt> CapturerManager
+    for RootContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+where
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
+    type ScreenCapturerState = FakeScreenCapturerState;
+
+    fn create_screen_capturer(
+        &mut self,
+        capture_source_id: crate::domain::stream::models::vo::CaptureSourceId,
+    ) -> eros::Result<Self::ScreenCapturerState> {
+        CapturerManager::create_screen_capturer(
+            FakeCapturerManagerImpl::inj_ref_mut(self),
+            capture_source_id,
+        )
+    }
+}
+
+impl<CvtSt, EcdSt> AsRef<FakeScreenCapturerState>
+    for CaptureSourceContainer<FakeScreenCapturerState, CvtSt, EcdSt>
+{
+    fn as_ref(&self) -> &FakeScreenCapturerState {
+        self.screen_capturer_state()
+    }
+}
+
+impl<CvtSt, EcdSt> AsMut<FakeScreenCapturerState>
+    for CaptureSourceContainer<FakeScreenCapturerState, CvtSt, EcdSt>
+{
+    fn as_mut(&mut self) -> &mut FakeScreenCapturerState {
+        self.screen_capturer_state_mut()
+    }
+}
+
+impl ConverterManagerStateSpec for FakeConverterManagerState {
+    type EncoderFrameConverterState = FakeEncoderFrameConverterState;
+}
+
+impl<CapMgrSt, EcdMgrSt> AsRef<FakeConverterManagerState>
+    for RootContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
+    fn as_ref(&self) -> &FakeConverterManagerState {
+        self.converter_manager_state()
+    }
+}
+
+impl<CapMgrSt, EcdMgrSt> AsMut<FakeConverterManagerState>
+    for RootContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
+    fn as_mut(&mut self) -> &mut FakeConverterManagerState {
+        self.converter_manager_state_mut()
+    }
+}
+
+impl<CapMgrSt, EcdMgrSt> ConverterManager
+    for RootContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
+    type EncoderFrameConverterState = FakeEncoderFrameConverterState;
+
+    fn create_encoder_frame_converter(&mut self) -> eros::Result<Self::EncoderFrameConverterState> {
+        ConverterManager::create_encoder_frame_converter(FakeConverterManagerImpl::inj_ref_mut(
+            self,
+        ))
+    }
+}
+
+impl<EcdSt> AsRef<FakeEncoderFrameConverterState>
+    for StreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
+{
+    fn as_ref(&self) -> &FakeEncoderFrameConverterState {
+        self.encoder_frame_converter_state()
+    }
+}
+
+impl<EcdSt> AsMut<FakeEncoderFrameConverterState>
+    for StreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
+{
+    fn as_mut(&mut self) -> &mut FakeEncoderFrameConverterState {
+        self.encoder_frame_converter_state_mut()
+    }
+}
+
+impl EncoderManagerStateSpec for FakeEncoderManagerState {
+    type VideoEncoderState = FakeVideoEncoderState;
+}
+
+impl<CapMgrSt, CvtMgrSt> AsRef<FakeEncoderManagerState>
+    for RootContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+{
+    fn as_ref(&self) -> &FakeEncoderManagerState {
+        self.encoder_manager_state()
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt> AsMut<FakeEncoderManagerState>
+    for RootContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+{
+    fn as_mut(&mut self) -> &mut FakeEncoderManagerState {
+        self.encoder_manager_state_mut()
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt> EncoderManager
+    for RootContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+{
+    type VideoEncoderState = FakeVideoEncoderState;
+
+    fn create_video_encoder(&mut self) -> eros::Result<Self::VideoEncoderState> {
+        EncoderManager::create_video_encoder(FakeEncoderManagerImpl::inj_ref_mut(self))
+    }
+}
+
+impl<CvtSt> AsRef<FakeVideoEncoderState> for StreamPipelineContainer<CvtSt, FakeVideoEncoderState> {
+    fn as_ref(&self) -> &FakeVideoEncoderState {
+        self.video_encoder_state()
+    }
+}
+
+impl<CvtSt> AsMut<FakeVideoEncoderState> for StreamPipelineContainer<CvtSt, FakeVideoEncoderState> {
+    fn as_mut(&mut self) -> &mut FakeVideoEncoderState {
+        self.video_encoder_state_mut()
+    }
+}
+
+pub(super) fn run() -> eros::Result<()> {
+    crate::app::run(|| {
+        Ok(RootContainer::new(
+            FakeCapturerManagerState::new()?,
+            FakeConverterManagerState::new()?,
+            FakeEncoderManagerState::new()?,
+        ))
+    })
+}

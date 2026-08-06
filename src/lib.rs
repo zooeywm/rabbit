@@ -5,5 +5,5 @@ mod infrastructure;
 mod presentation;
 
 pub fn run() -> eros::Result<()> {
-    app::run()
+    composition::run()
 }
