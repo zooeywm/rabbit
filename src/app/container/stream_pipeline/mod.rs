@@ -13,8 +13,26 @@ pub(crate) use model::{EncodedVideoFrame, FrameNumber};
 /// one stream. Its inbound implementation determines their runtime scheduling.
 pub(crate) struct StreamPipelineContainer<CvtSt, EcdSt> {
     /// Converts captured frames into encoder-compatible inputs.
-    pub(super) encoder_frame_converter_state: CvtSt,
+    encoder_frame_converter_state: CvtSt,
 
     /// Encodes converted inputs into compressed video frames.
-    pub(super) video_encoder_state: EcdSt,
+    video_encoder_state: EcdSt,
+}
+
+impl<CvtSt, EcdSt> StreamPipelineContainer<CvtSt, EcdSt> {
+    pub(crate) fn encoder_frame_converter_state(&self) -> &CvtSt {
+        &self.encoder_frame_converter_state
+    }
+
+    pub(crate) fn encoder_frame_converter_state_mut(&mut self) -> &mut CvtSt {
+        &mut self.encoder_frame_converter_state
+    }
+
+    pub(crate) fn video_encoder_state(&self) -> &EcdSt {
+        &self.video_encoder_state
+    }
+
+    pub(crate) fn video_encoder_state_mut(&mut self) -> &mut EcdSt {
+        &mut self.video_encoder_state
+    }
 }

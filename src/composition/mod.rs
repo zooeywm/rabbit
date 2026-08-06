@@ -14,7 +14,7 @@ macro_rules! impl_capturer_boilerplate {
             EcdMgrSt: $crate::app::container::root::outbound_port::EncoderManagerStateSpec,
         {
             fn as_ref(&self) -> &$manager_state {
-                &self.capturer_manager_state
+                self.capturer_manager_state()
             }
         }
 
@@ -26,7 +26,7 @@ macro_rules! impl_capturer_boilerplate {
             EcdMgrSt: $crate::app::container::root::outbound_port::EncoderManagerStateSpec,
         {
             fn as_mut(&mut self) -> &mut $manager_state {
-                &mut self.capturer_manager_state
+                self.capturer_manager_state_mut()
             }
         }
 
@@ -55,7 +55,7 @@ macro_rules! impl_capturer_boilerplate {
             for $crate::app::container::CaptureSourceContainer<$capturer_state, CvtSt, EcdSt>
         {
             fn as_ref(&self) -> &$capturer_state {
-                &self.screen_capturer_state
+                self.screen_capturer_state()
             }
         }
 
@@ -63,7 +63,7 @@ macro_rules! impl_capturer_boilerplate {
             for $crate::app::container::CaptureSourceContainer<$capturer_state, CvtSt, EcdSt>
         {
             fn as_mut(&mut self) -> &mut $capturer_state {
-                &mut self.screen_capturer_state
+                self.screen_capturer_state_mut()
             }
         }
     };
@@ -85,7 +85,7 @@ macro_rules! impl_converter_boilerplate {
             EcdMgrSt: $crate::app::container::root::outbound_port::EncoderManagerStateSpec,
         {
             fn as_ref(&self) -> &$manager_state {
-                &self.converter_manager_state
+                self.converter_manager_state()
             }
         }
 
@@ -97,7 +97,7 @@ macro_rules! impl_converter_boilerplate {
             EcdMgrSt: $crate::app::container::root::outbound_port::EncoderManagerStateSpec,
         {
             fn as_mut(&mut self) -> &mut $manager_state {
-                &mut self.converter_manager_state
+                self.converter_manager_state_mut()
             }
         }
 
@@ -124,7 +124,7 @@ macro_rules! impl_converter_boilerplate {
             for $crate::app::container::StreamPipelineContainer<$converter_state, EcdSt>
         {
             fn as_ref(&self) -> &$converter_state {
-                &self.encoder_frame_converter_state
+                self.encoder_frame_converter_state()
             }
         }
 
@@ -132,7 +132,7 @@ macro_rules! impl_converter_boilerplate {
             for $crate::app::container::StreamPipelineContainer<$converter_state, EcdSt>
         {
             fn as_mut(&mut self) -> &mut $converter_state {
-                &mut self.encoder_frame_converter_state
+                self.encoder_frame_converter_state_mut()
             }
         }
     };
@@ -153,7 +153,7 @@ macro_rules! impl_encoder_boilerplate {
             CvtMgrSt: $crate::app::container::root::outbound_port::ConverterManagerStateSpec,
         {
             fn as_ref(&self) -> &$manager_state {
-                &self.encoder_manager_state
+                self.encoder_manager_state()
             }
         }
 
@@ -164,7 +164,7 @@ macro_rules! impl_encoder_boilerplate {
             CvtMgrSt: $crate::app::container::root::outbound_port::ConverterManagerStateSpec,
         {
             fn as_mut(&mut self) -> &mut $manager_state {
-                &mut self.encoder_manager_state
+                self.encoder_manager_state_mut()
             }
         }
 
@@ -187,7 +187,7 @@ macro_rules! impl_encoder_boilerplate {
             for $crate::app::container::StreamPipelineContainer<CvtSt, $encoder_state>
         {
             fn as_ref(&self) -> &$encoder_state {
-                &self.video_encoder_state
+                self.video_encoder_state()
             }
         }
 
@@ -195,7 +195,7 @@ macro_rules! impl_encoder_boilerplate {
             for $crate::app::container::StreamPipelineContainer<CvtSt, $encoder_state>
         {
             fn as_mut(&mut self) -> &mut $encoder_state {
-                &mut self.video_encoder_state
+                self.video_encoder_state_mut()
             }
         }
     };
@@ -211,13 +211,11 @@ macro_rules! impl_root_container {
             >
         {
             pub(crate) fn new() -> eros::Result<Self> {
-                Ok(Self {
-                    capturer_manager_state: $capturer_manager_state::new()?,
-                    converter_manager_state: $converter_manager_state::new()?,
-                    encoder_manager_state: $encoder_manager_state::new()?,
-                    capture_sources: std::collections::HashMap::new(),
-                    next_stream_id: 0,
-                })
+                Ok(Self::from_manager_states(
+                    $capturer_manager_state::new()?,
+                    $converter_manager_state::new()?,
+                    $encoder_manager_state::new()?,
+                ))
             }
         }
     };

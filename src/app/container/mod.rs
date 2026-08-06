@@ -1,4 +1,3 @@
-mod boilerplate;
 pub(crate) mod capture_source;
 pub(crate) mod root;
 pub(crate) mod stream_pipeline;
