@@ -3,19 +3,30 @@ use eros::Context;
 use crate::{
     app::container::{
         CaptureSourceContainer, StreamPipelineContainer,
-        root::outbound_port::{CapturerManager, ConverterManager, EncoderManager},
+        root::outbound_port::{
+            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec,
+        },
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
-use super::RootContainer;
+use super::{CaptureSourceFor, RootContainer};
 
-impl RootContainer {
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+    Self: CapturerManager<ScreenCapturerState = CapMgrSt::ScreenCapturerState>
+        + ConverterManager<EncoderFrameConverterState = CvtMgrSt::EncoderFrameConverterState>
+        + EncoderManager<VideoEncoderState = EcdMgrSt::VideoEncoderState>,
+{
     /// Returns the existing capture-source container or creates a new one.
     fn get_or_create_capture_source(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> eros::Result<&mut CaptureSourceContainer> {
+    ) -> eros::Result<&mut CaptureSourceFor<CapMgrSt, CvtMgrSt, EcdMgrSt>> {
         if !self.capture_sources.contains_key(&capture_source_id) {
             let screen_capturer_state = self.create_screen_capturer(capture_source_id)?;
 
@@ -32,7 +43,11 @@ impl RootContainer {
     }
 
     /// Creates the runtime container for one stream pipeline.
-    fn create_stream_pipeline_container(&mut self) -> eros::Result<StreamPipelineContainer> {
+    fn create_stream_pipeline_container(
+        &mut self,
+    ) -> eros::Result<
+        StreamPipelineContainer<CvtMgrSt::EncoderFrameConverterState, EcdMgrSt::VideoEncoderState>,
+    > {
         let encoder_frame_converter_state = self.create_encoder_frame_converter()?;
 
         let video_encoder_state = self.create_video_encoder()?;

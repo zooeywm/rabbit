@@ -1,5 +1,10 @@
 use crate::domain::stream::models::vo::CaptureSourceId;
 
+/// Describes the capturer state created by one capturer-manager state.
+pub(crate) trait CapturerManagerStateSpec {
+    type ScreenCapturerState;
+}
+
 /// Creates screen capturer states for capture-source containers.
 ///
 /// This port describes dependency creation only. The created state is passed

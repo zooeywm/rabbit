@@ -1,3 +1,8 @@
+/// Describes the encoder state created by one encoder-manager state.
+pub(crate) trait EncoderManagerStateSpec {
+    type VideoEncoderState;
+}
+
 /// Creates video-encoder states for stream-pipeline containers.
 ///
 /// This port only describes dependency creation. The stream-pipeline

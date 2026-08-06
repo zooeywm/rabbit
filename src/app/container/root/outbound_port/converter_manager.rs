@@ -1,3 +1,8 @@
+/// Describes the converter state created by one converter-manager state.
+pub(crate) trait ConverterManagerStateSpec {
+    type EncoderFrameConverterState;
+}
+
 /// Creates frame-converter states for stream-pipeline containers.
 ///
 /// This port only describes dependency creation. The stream-pipeline

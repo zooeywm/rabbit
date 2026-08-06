@@ -1,41 +1,40 @@
-mod boilerplate;
 mod inbound;
 
 pub(crate) mod outbound_port;
 
 use std::collections::HashMap;
 
-use crate::{
-    app::container::CaptureSourceContainer,
-    domain::stream::models::vo::CaptureSourceId,
-    infrastructure::platform::{CapturerManagerState, ConverterManagerState, EncoderManagerState},
+use crate::{app::container::CaptureSourceContainer, domain::stream::models::vo::CaptureSourceId};
+
+use self::outbound_port::{
+    CapturerManagerStateSpec, ConverterManagerStateSpec, EncoderManagerStateSpec,
 };
 
-pub(crate) struct RootContainer {
+type CaptureSourceFor<CapMgrSt, CvtMgrSt, EcdMgrSt> = CaptureSourceContainer<
+    <CapMgrSt as CapturerManagerStateSpec>::ScreenCapturerState,
+    <CvtMgrSt as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    <EcdMgrSt as EncoderManagerStateSpec>::VideoEncoderState,
+>;
+
+pub(crate) struct RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
     /// Creates screen capturer states for capture-source containers.
-    capturer_manager_state: CapturerManagerState,
+    pub(super) capturer_manager_state: CapMgrSt,
 
     /// Creates frame-converter states for stream-pipeline containers.
-    converter_manager_state: ConverterManagerState,
+    pub(super) converter_manager_state: CvtMgrSt,
 
     /// Creates video-encoder states for stream-pipeline containers.
-    encoder_manager_state: EncoderManagerState,
+    pub(super) encoder_manager_state: EcdMgrSt,
 
     /// Owns all active capture-source containers.
-    capture_sources: HashMap<CaptureSourceId, CaptureSourceContainer>,
+    pub(super) capture_sources:
+        HashMap<CaptureSourceId, CaptureSourceFor<CapMgrSt, CvtMgrSt, EcdMgrSt>>,
 
     /// The numeric value assigned to the next successfully created stream.
-    next_stream_id: u16,
-}
-
-impl RootContainer {
-    pub(crate) fn new() -> eros::Result<Self> {
-        Ok(Self {
-            capturer_manager_state: CapturerManagerState::new()?,
-            converter_manager_state: ConverterManagerState::new()?,
-            encoder_manager_state: EncoderManagerState::new()?,
-            capture_sources: HashMap::new(),
-            next_stream_id: 0,
-        })
-    }
+    pub(super) next_stream_id: u16,
 }

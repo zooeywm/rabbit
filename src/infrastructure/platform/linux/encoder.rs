@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 
 #[derive(kudi::DepInj)]
-#[target(VideoEncoderImpl)]
-pub(crate) struct VideoEncoderState {
+#[target(LinuxVideoEncoderImpl)]
+pub(crate) struct LinuxVideoEncoderState {
     /// Prevents this state from ever being constructed.
     never: Infallible,
 }

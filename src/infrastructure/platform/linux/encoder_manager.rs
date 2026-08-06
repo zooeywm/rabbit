@@ -1,19 +1,19 @@
 use crate::app::container::root::outbound_port::EncoderManager;
 
-use super::encoder::VideoEncoderState;
+use super::encoder::LinuxVideoEncoderState;
 
 #[derive(kudi::DepInj)]
-#[target(EncoderManagerImpl)]
-pub(crate) struct EncoderManagerState;
+#[target(LinuxEncoderManagerImpl)]
+pub(crate) struct LinuxEncoderManagerState;
 
-impl EncoderManagerState {
+impl LinuxEncoderManagerState {
     pub(crate) fn new() -> eros::Result<Self> {
         eros::bail!("Linux video encoding infrastructure has not been implemented");
     }
 }
 
-impl<Deps> EncoderManager for EncoderManagerImpl<Deps> {
-    type VideoEncoderState = VideoEncoderState;
+impl<Deps> EncoderManager for LinuxEncoderManagerImpl<Deps> {
+    type VideoEncoderState = LinuxVideoEncoderState;
 
     fn create_video_encoder(&mut self) -> eros::Result<Self::VideoEncoderState> {
         eros::bail!("Linux video encoding infrastructure has not been implemented");

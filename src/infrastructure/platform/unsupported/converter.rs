@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 
 #[derive(kudi::DepInj)]
-#[target(EncoderFrameConverterImpl)]
-pub(crate) struct EncoderFrameConverterState {
+#[target(UnsupportedEncoderFrameConverterImpl)]
+pub(crate) struct UnsupportedEncoderFrameConverterState {
     /// Prevents this state from ever being constructed.
     never: Infallible,
 }

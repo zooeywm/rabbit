@@ -3,20 +3,20 @@ use crate::{
     domain::stream::models::vo::CaptureSourceId,
 };
 
-use super::capturer::ScreenCapturerState;
+use super::capturer::UnsupportedScreenCapturerState;
 
 #[derive(kudi::DepInj)]
-#[target(CapturerManagerImpl)]
-pub(crate) struct CapturerManagerState;
+#[target(UnsupportedCapturerManagerImpl)]
+pub(crate) struct UnsupportedCapturerManagerState;
 
-impl CapturerManagerState {
+impl UnsupportedCapturerManagerState {
     pub(crate) fn new() -> eros::Result<Self> {
         eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS,);
     }
 }
 
-impl<Deps> CapturerManager for CapturerManagerImpl<Deps> {
-    type ScreenCapturerState = ScreenCapturerState;
+impl<Deps> CapturerManager for UnsupportedCapturerManagerImpl<Deps> {
+    type ScreenCapturerState = UnsupportedScreenCapturerState;
 
     fn create_screen_capturer(
         &mut self,

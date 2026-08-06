@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 
 #[derive(kudi::DepInj)]
-#[target(ScreenCapturerImpl)]
-pub(crate) struct ScreenCapturerState {
+#[target(UnsupportedScreenCapturerImpl)]
+pub(crate) struct UnsupportedScreenCapturerState {
     /// Prevents this state from ever being constructed.
     never: Infallible,
 }

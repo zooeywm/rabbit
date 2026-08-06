@@ -7,24 +7,9 @@ mod converter_manager;
 mod encoder;
 mod encoder_manager;
 
-pub(crate) use capturer::{
-    FakeScreenCapturerImpl as ScreenCapturerImpl, FakeScreenCapturerState as ScreenCapturerState,
-};
-pub(crate) use capturer_manager::{
-    FakeCapturerManagerImpl as CapturerManagerImpl,
-    FakeCapturerManagerState as CapturerManagerState,
-};
-pub(crate) use converter::{
-    FakeEncoderFrameConverterImpl as EncoderFrameConverterImpl,
-    FakeEncoderFrameConverterState as EncoderFrameConverterState,
-};
-pub(crate) use converter_manager::{
-    FakeConverterManagerImpl as ConverterManagerImpl,
-    FakeConverterManagerState as ConverterManagerState,
-};
-pub(crate) use encoder::{
-    FakeVideoEncoderImpl as VideoEncoderImpl, FakeVideoEncoderState as VideoEncoderState,
-};
-pub(crate) use encoder_manager::{
-    FakeEncoderManagerImpl as EncoderManagerImpl, FakeEncoderManagerState as EncoderManagerState,
-};
+pub(crate) use capturer::{FakeScreenCapturerImpl, FakeScreenCapturerState};
+pub(crate) use capturer_manager::{FakeCapturerManagerImpl, FakeCapturerManagerState};
+pub(crate) use converter::{FakeEncoderFrameConverterImpl, FakeEncoderFrameConverterState};
+pub(crate) use converter_manager::{FakeConverterManagerImpl, FakeConverterManagerState};
+pub(crate) use encoder::{FakeVideoEncoderImpl, FakeVideoEncoderState};
+pub(crate) use encoder_manager::{FakeEncoderManagerImpl, FakeEncoderManagerState};

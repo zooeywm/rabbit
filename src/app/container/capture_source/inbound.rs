@@ -1,10 +1,10 @@
 use super::{super::stream_pipeline::StreamPipelineContainer, CaptureSourceContainer};
-use crate::{domain::stream::models::vo::StreamId, infrastructure::platform::ScreenCapturerState};
+use crate::domain::stream::models::vo::StreamId;
 use eros::Context;
 use std::collections::HashMap;
 
-impl CaptureSourceContainer {
-    pub(crate) fn new(screen_capturer_state: ScreenCapturerState) -> Self {
+impl<CapSt, CvtSt, EcdSt> CaptureSourceContainer<CapSt, CvtSt, EcdSt> {
+    pub(crate) fn new(screen_capturer_state: CapSt) -> Self {
         Self {
             screen_capturer_state,
             stream_pipelines: HashMap::new(),
@@ -19,7 +19,7 @@ impl CaptureSourceContainer {
     pub(crate) fn add_stream(
         &mut self,
         stream_id: StreamId,
-        stream_pipeline: StreamPipelineContainer,
+        stream_pipeline: StreamPipelineContainer<CvtSt, EcdSt>,
     ) -> eros::Result<()> {
         if self.stream_pipelines.contains_key(&stream_id) {
             eros::bail!("Stream pipeline already exists");
