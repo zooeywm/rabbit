@@ -16,6 +16,7 @@ _xwin command *args:
 run: (_cargo "run")
 run_fake: (_cargo "run" "--features" "fake")
 build: (_cargo "build" "--workspace")
+build_all: build (_cargo "build" "--workspace" "--features" "fake") build-xwin
 check: (_cargo "check" "--workspace" "--all-targets")
 lint: (_cargo "clippy" "--workspace" "--all-targets" "--all-features" "--" "-D" "warnings")
 release: (_cargo "build" "--workspace" "--release")
