@@ -8,6 +8,10 @@ use crate::{
             EncoderManager, EncoderManagerStateSpec,
         },
         capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
+        stream_pipeline::{
+            EncodedVideoFrame,
+            outbound_port::{EncoderFrameConverter, VideoEncoder},
+        },
     },
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
@@ -162,6 +166,17 @@ impl<EcdSt> AsMut<UnsupportedEncoderFrameConverterState>
     }
 }
 
+impl<EcdSt> EncoderFrameConverter
+    for StreamPipelineContainer<UnsupportedEncoderFrameConverterState, EcdSt>
+{
+    type CapturedFrame = Infallible;
+    type EncoderInput = Infallible;
+
+    fn convert(&mut self, frame: Self::CapturedFrame) -> eros::Result<Self::EncoderInput> {
+        match frame {}
+    }
+}
+
 impl EncoderManagerStateSpec for UnsupportedEncoderManagerState {
     type VideoEncoderState = UnsupportedVideoEncoderState;
 }
@@ -221,6 +236,18 @@ impl<CvtSt> AsMut<UnsupportedVideoEncoderState>
 {
     fn as_mut(&mut self) -> &mut UnsupportedVideoEncoderState {
         self.video_encoder_state_mut()
+    }
+}
+
+impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, UnsupportedVideoEncoderState> {
+    type EncoderInput = Infallible;
+    type EncodedBuffer = Infallible;
+
+    fn encode(
+        &mut self,
+        input: Self::EncoderInput,
+    ) -> eros::Result<EncodedVideoFrame<Self::EncodedBuffer>> {
+        match input {}
     }
 }
 
