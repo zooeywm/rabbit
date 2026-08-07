@@ -75,7 +75,8 @@ where
         let stream_pipeline_handle = StreamPipelineWorker::spawn::<CapturedFrameFor<CapMgrSt>, _, _>(
             stream_id,
             stream_pipeline_states_constructor,
-        )?;
+        )
+        .await?;
 
         if let Some(screen_capturer_state_constructor) = screen_capturer_state_constructor {
             let capture_worker_handle = match CaptureWorker::spawn::<CapMgrSt::ScreenCapturer, _>(

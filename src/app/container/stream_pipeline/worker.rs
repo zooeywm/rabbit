@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, mpsc::SyncSender},
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 
@@ -19,7 +19,7 @@ pub(crate) struct StreamPipelineWorkerHandle<Frame> {
 }
 
 impl StreamPipelineWorker {
-    pub(crate) fn spawn<Frame, CvtSt, EcdSt>(
+    pub(crate) async fn spawn<Frame, CvtSt, EcdSt>(
         stream_id: StreamId,
         stream_pipeline_states_constructor: impl FnOnce()
         -> eros::Result<(CvtSt, EcdSt)>
@@ -36,7 +36,7 @@ impl StreamPipelineWorker {
     {
         let frame_slot = Arc::new(LatestFrameSlot::new());
         let worker_frame_slot = Arc::clone(&frame_slot);
-        let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
+        let (started_sender, started_receiver) = flume::bounded(1);
 
         let worker_thread = thread::Builder::new()
             .name(format!("stream-pipeline-{}", stream_id.value()))
@@ -49,7 +49,7 @@ impl StreamPipelineWorker {
             })
             .with_context(|| "Failed to spawn stream pipeline worker thread")?;
 
-        if started_receiver.recv().is_err() {
+        if started_receiver.recv_async().await.is_err() {
             join_stream_pipeline_worker(worker_thread)?;
             eros::bail!("Stream pipeline worker stopped before startup completed");
         }
@@ -90,7 +90,7 @@ impl<Frame> StreamPipelineWorkerHandle<Frame> {
 fn run_stream_pipeline_worker<Frame, CvtSt, EcdSt>(
     stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
     frame_slot: Arc<LatestFrameSlot<Frame>>,
-    started_sender: SyncSender<()>,
+    started_sender: flume::Sender<()>,
 ) -> eros::Result<()>
 where
     StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter<CapturedFrame = Frame>
@@ -166,25 +166,30 @@ mod tests {
 
     #[test]
     fn creates_non_send_pipeline_states_on_worker_thread() {
-        let caller_thread_id = thread::current().id();
-        let created_on_worker = Arc::new(AtomicBool::new(false));
-        let worker_flag = Arc::clone(&created_on_worker);
+        let runtime = compio::runtime::Runtime::new().expect("runtime should start");
 
-        let worker = StreamPipelineWorker::spawn::<(), _, _>(StreamId::new(0), move || {
-            worker_flag.store(
-                thread::current().id() != caller_thread_id,
-                Ordering::Relaxed,
-            );
-            Ok((
-                NonSendConverterState::default(),
-                NonSendEncoderState::default(),
-            ))
-        })
-        .expect("worker should start with non-Send pipeline states");
+        runtime.block_on(async {
+            let caller_thread_id = thread::current().id();
+            let created_on_worker = Arc::new(AtomicBool::new(false));
+            let worker_flag = Arc::clone(&created_on_worker);
 
-        assert!(created_on_worker.load(Ordering::Relaxed));
+            let worker = StreamPipelineWorker::spawn::<(), _, _>(StreamId::new(0), move || {
+                worker_flag.store(
+                    thread::current().id() != caller_thread_id,
+                    Ordering::Relaxed,
+                );
+                Ok((
+                    NonSendConverterState::default(),
+                    NonSendEncoderState::default(),
+                ))
+            })
+            .await
+            .expect("worker should start with non-Send pipeline states");
 
-        worker.close();
-        join_stream_pipeline_worker(worker.worker_thread).expect("worker should stop cleanly");
+            assert!(created_on_worker.load(Ordering::Relaxed));
+
+            worker.close();
+            join_stream_pipeline_worker(worker.worker_thread).expect("worker should stop cleanly");
+        });
     }
 }
