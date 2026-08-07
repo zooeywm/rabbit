@@ -77,7 +77,9 @@ where
 {
     let runtime = compio::runtime::Runtime::new()
         .with_context(|| "Failed to create Compio runtime for app")?;
-    let app = app_constructor().with_context(|| "Failed to construct app")?;
+    let app = runtime
+        .enter(app_constructor)
+        .with_context(|| "Failed to construct app")?;
 
     started_sender
         .send(())
