@@ -186,7 +186,7 @@ mod tests {
         ) -> eros::Result<()> {
             match message_receiver.recv_async().await {
                 Ok(AppMessage::Shutdown) | Err(_) => Ok(()),
-                Ok(_) => eros::bail!("NonSendApp received an unexpected command"),
+                Ok(_) => eros::bail!("NonSendApp received an unexpected message"),
             }
         }
     }
