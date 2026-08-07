@@ -343,9 +343,9 @@ mod tests {
 
     impl ScreenCapturerControl for TestScreenCapturerControl {
         fn wake(&self) -> eros::Result<()> {
-            self.0
+            Ok(self.0
                 .send(())
-                .with_context(|| "Test screen capturer stopped before control wakeup")
+                .with_context(|| "Test screen capturer stopped before control wakeup")?)
         }
     }
 

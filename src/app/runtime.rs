@@ -161,3 +161,56 @@ fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()>
         Err(_) => eros::bail!("App thread panicked"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    use super::*;
+
+    struct NonSendApp {
+        _not_send: Rc<()>,
+    }
+
+    impl AppActor for NonSendApp {
+        async fn run(
+            self,
+            _command_sender: Weak<flume::Sender<AppCommand>>,
+            command_receiver: flume::Receiver<AppCommand>,
+        ) -> eros::Result<()> {
+            match command_receiver.recv_async().await {
+                Ok(AppCommand::Shutdown) | Err(_) => Ok(()),
+                Ok(_) => eros::bail!("NonSendApp received an unexpected command"),
+            }
+        }
+    }
+
+    #[test]
+    fn constructs_non_send_app_on_app_thread() {
+        let caller_thread_id = thread::current().id();
+        let created_on_app_thread = Arc::new(AtomicBool::new(false));
+        let app_thread_flag = Arc::clone(&created_on_app_thread);
+
+        let app_handle = AppRuntime::start(move || {
+            app_thread_flag.store(
+                thread::current().id() != caller_thread_id,
+                Ordering::Relaxed,
+            );
+
+            Ok(NonSendApp {
+                _not_send: Rc::new(()),
+            })
+        })
+        .expect("app runtime should accept a non-Send app");
+
+        assert!(created_on_app_thread.load(Ordering::Relaxed));
+
+        app_handle.shutdown().expect("app should stop cleanly");
+    }
+}
