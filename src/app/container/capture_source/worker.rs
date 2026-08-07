@@ -262,15 +262,24 @@ impl<Frame> CaptureWorkerState<Frame> {
 
 impl<Frame: Clone> CaptureWorkerState<Frame> {
     fn deliver_frame(&mut self, frame: Frame) -> CaptureLoopAction {
-        let mut frame_slot_iter = self.frame_slots.values().peekable();
+        let mut closed_stream_ids = Vec::new();
+        let mut frame_slot_iter = self.frame_slots.iter().peekable();
 
-        while let Some(frame_slot) = frame_slot_iter.next() {
+        while let Some((stream_id, frame_slot)) = frame_slot_iter.next() {
             if frame_slot_iter.peek().is_some() {
-                frame_slot.replace(frame.clone());
+                if !frame_slot.replace(frame.clone()) {
+                    closed_stream_ids.push(*stream_id);
+                }
             } else {
-                frame_slot.replace(frame);
+                if !frame_slot.replace(frame) {
+                    closed_stream_ids.push(*stream_id);
+                }
                 break;
             }
+        }
+
+        for stream_id in closed_stream_ids {
+            self.frame_slots.remove(&stream_id);
         }
 
         CaptureLoopAction::Continue {
