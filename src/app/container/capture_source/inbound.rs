@@ -55,4 +55,20 @@ impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
 
         Ok(())
     }
+
+    pub(crate) async fn remove_stream_after_pipeline_exit(
+        &mut self,
+        stream_id: StreamId,
+    ) -> eros::Result<()> {
+        let stream_pipeline_handle = self
+            .stream_pipeline_handles
+            .remove(&stream_id)
+            .with_context(|| "Stream pipeline does not exist")?;
+
+        stream_pipeline_handle.close();
+
+        let _ = self.capture_worker_handle.remove_stream(stream_id).await;
+
+        stream_pipeline_handle.shutdown().await
+    }
 }

@@ -155,6 +155,38 @@ where
         remove_result?;
         shutdown_result
     }
+
+    async fn remove_stream_after_pipeline_exit(
+        &mut self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+    ) -> eros::Result<()> {
+        let (pipeline_result, should_remove_capture_source) = {
+            let capture_source = self
+                .capture_sources
+                .get_mut(&capture_source_id)
+                .with_context(|| "Capture source container does not exist")?;
+            let pipeline_result = capture_source
+                .remove_stream_after_pipeline_exit(stream_id)
+                .await;
+
+            (pipeline_result, capture_source.is_empty())
+        };
+
+        let capture_shutdown_result = if should_remove_capture_source {
+            let capture_source = self
+                .capture_sources
+                .remove(&capture_source_id)
+                .with_context(|| "Capture source container disappeared before shutdown")?;
+
+            capture_source.shutdown().await
+        } else {
+            Ok(())
+        };
+
+        pipeline_result?;
+        capture_shutdown_result
+    }
 }
 
 impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppActor for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
@@ -223,7 +255,7 @@ where
                     }
 
                     let failure = self
-                        .remove_stream(stream_id)
+                        .remove_stream_after_pipeline_exit(capture_source_id, stream_id)
                         .await
                         .err()
                         .unwrap_or_else(|| {
