@@ -13,9 +13,14 @@ impl UnsupportedConverterManagerState {
 impl<Deps> ConverterManager for UnsupportedConverterManagerImpl<Deps> {
     type State = UnsupportedConverterManagerState;
 
-    fn create_encoder_frame_converter(
+    fn encoder_frame_converter_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
-        eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS,);
+    ) -> impl FnOnce() -> eros::Result<
+        <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    >
+    + Send
+    + 'static
+    + use<Deps> {
+        || eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS)
     }
 }

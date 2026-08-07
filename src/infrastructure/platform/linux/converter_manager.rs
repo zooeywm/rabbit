@@ -13,9 +13,14 @@ impl LinuxConverterManagerState {
 impl<Deps> ConverterManager for LinuxConverterManagerImpl<Deps> {
     type State = LinuxConverterManagerState;
 
-    fn create_encoder_frame_converter(
+    fn encoder_frame_converter_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
-        eros::bail!("Linux frame conversion infrastructure has not been implemented");
+    ) -> impl FnOnce() -> eros::Result<
+        <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    >
+    + Send
+    + 'static
+    + use<Deps> {
+        || eros::bail!("Linux frame conversion infrastructure has not been implemented")
     }
 }

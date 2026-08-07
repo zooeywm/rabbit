@@ -1,10 +1,11 @@
 use eros::Context;
 
-use crate::app::container::stream_pipeline::{
-    EncodedVideoFrame, FrameNumber, outbound_port::VideoEncoder,
+use crate::{
+    app::container::stream_pipeline::{
+        EncodedVideoFrame, FrameNumber, outbound_port::VideoEncoder,
+    },
+    infrastructure::fake::converter::FakeEncoderInput,
 };
-
-use super::converter::FakeEncoderInput;
 
 #[derive(kudi::DepInj)]
 #[target(FakeVideoEncoderImpl)]

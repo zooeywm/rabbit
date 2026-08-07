@@ -1,6 +1,7 @@
-use crate::app::container::root::outbound_port::{EncoderManager, EncoderManagerStateSpec};
-
-use super::encoder::FakeVideoEncoderState;
+use crate::{
+    app::container::root::outbound_port::{EncoderManager, EncoderManagerStateSpec},
+    infrastructure::fake::encoder::FakeVideoEncoderState,
+};
 
 #[derive(kudi::DepInj)]
 #[target(FakeEncoderManagerImpl)]
@@ -15,9 +16,12 @@ impl FakeEncoderManagerState {
 impl<Deps> EncoderManager for FakeEncoderManagerImpl<Deps> {
     type State = FakeEncoderManagerState;
 
-    fn create_video_encoder(
+    fn video_encoder_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
-        Ok(FakeVideoEncoderState::new())
+    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
+    + Send
+    + 'static
+    + use<Deps> {
+        || Ok(FakeVideoEncoderState::new())
     }
 }

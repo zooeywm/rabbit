@@ -17,5 +17,5 @@ cfg_if::cfg_if! {
 }
 
 pub(crate) mod platform {
-    pub(crate) use super::selected_platform::*;
+    pub(crate) use crate::infrastructure::selected_platform::*;
 }

@@ -1,32 +1,56 @@
 mod inbound;
+mod screen_capturer_container;
+mod worker;
 
 pub(crate) mod outbound_port;
 
 use std::collections::HashMap;
 
-use crate::domain::stream::models::vo::StreamId;
+use crate::{app::container::StreamPipelineWorkerHandle, domain::stream::models::vo::StreamId};
 
-use super::stream_pipeline::StreamPipelineContainer;
+pub(crate) use screen_capturer_container::ScreenCapturerContainer;
+pub(crate) use worker::{CaptureWorker, CaptureWorkerHandle};
 
-pub(crate) struct CaptureSourceContainer<CapSt, CvtSt, EcdSt> {
-    screen_capturer_state: CapSt,
-
-    stream_pipelines: HashMap<StreamId, StreamPipelineContainer<CvtSt, EcdSt>>,
+pub(crate) struct CaptureSourceContainer<Frame: Clone + Send + 'static> {
+    capture_worker: CaptureWorkerHandle<Frame>,
+    stream_pipelines: HashMap<StreamId, StreamPipelineWorkerHandle<Frame>>,
 }
 
-impl<CapSt, CvtSt, EcdSt> CaptureSourceContainer<CapSt, CvtSt, EcdSt> {
-    pub(crate) fn new(screen_capturer_state: CapSt) -> Self {
+impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
+    pub(crate) fn new(
+        capture_worker: CaptureWorkerHandle<Frame>,
+        initial_stream_id: StreamId,
+        initial_stream_pipeline: StreamPipelineWorkerHandle<Frame>,
+    ) -> Self {
         Self {
-            screen_capturer_state,
-            stream_pipelines: HashMap::new(),
+            capture_worker,
+            stream_pipelines: HashMap::from([(initial_stream_id, initial_stream_pipeline)]),
         }
     }
 
-    pub(crate) fn screen_capturer_state(&self) -> &CapSt {
-        &self.screen_capturer_state
-    }
+    pub(crate) async fn shutdown(self) -> eros::Result<()> {
+        let Self {
+            capture_worker,
+            stream_pipelines,
+        } = self;
 
-    pub(crate) fn screen_capturer_state_mut(&mut self) -> &mut CapSt {
-        &mut self.screen_capturer_state
+        for stream_pipeline in stream_pipelines.values() {
+            stream_pipeline.close();
+        }
+
+        let mut first_error = capture_worker.shutdown().await.err();
+
+        for stream_pipeline in stream_pipelines.into_values() {
+            if let Err(error) = stream_pipeline.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }

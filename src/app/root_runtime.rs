@@ -11,6 +11,10 @@ enum RootCommand {
     Shutdown,
 }
 
+pub(crate) trait RootActor {
+    async fn shutdown(self) -> eros::Result<()>;
+}
+
 pub(super) struct RootHandle {
     command_sender: flume::Sender<RootCommand>,
     root_thread: JoinHandle<eros::Result<()>>,
@@ -21,7 +25,7 @@ impl RootHandle {
         create_root: impl FnOnce() -> eros::Result<Root> + Send + 'static,
     ) -> eros::Result<Self>
     where
-        Root: 'static,
+        Root: RootActor + 'static,
     {
         let (command_sender, command_receiver) = flume::bounded(ROOT_COMMAND_CAPACITY);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
@@ -64,7 +68,7 @@ fn run_root_thread<Root>(
     started_sender: SyncSender<()>,
 ) -> eros::Result<()>
 where
-    Root: 'static,
+    Root: RootActor + 'static,
 {
     let runtime = compio::runtime::Runtime::new()
         .with_context(|| "Failed to create Compio runtime for root")?;
@@ -74,17 +78,21 @@ where
         .send(())
         .with_context(|| "Failed to report root startup")?;
 
-    runtime.block_on(run_root_actor(root, command_receiver));
-
-    Ok(())
+    runtime.block_on(run_root_actor(root, command_receiver))
 }
 
-async fn run_root_actor<Root>(root: Root, command_receiver: flume::Receiver<RootCommand>) {
-    let _root = root;
-
+async fn run_root_actor<Root>(
+    root: Root,
+    command_receiver: flume::Receiver<RootCommand>,
+) -> eros::Result<()>
+where
+    Root: RootActor,
+{
     match command_receiver.recv_async().await {
         Ok(RootCommand::Shutdown) | Err(_) => {}
     }
+
+    root.shutdown().await
 }
 
 fn join_root_thread(root_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {

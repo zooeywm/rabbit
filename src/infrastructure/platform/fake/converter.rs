@@ -1,9 +1,7 @@
 use crate::{
     app::container::stream_pipeline::outbound_port::EncoderFrameConverter,
-    infrastructure::support::media::FrameLease,
+    infrastructure::fake::capturer::FakeCapturedFrame, infrastructure::support::media::FrameLease,
 };
-
-use super::capturer::FakeCapturedFrame;
 
 #[derive(kudi::DepInj)]
 #[target(FakeEncoderFrameConverterImpl)]

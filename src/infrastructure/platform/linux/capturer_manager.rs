@@ -16,10 +16,14 @@ impl LinuxCapturerManagerState {
 impl<Deps> CapturerManager for LinuxCapturerManagerImpl<Deps> {
     type State = LinuxCapturerManagerState;
 
-    fn create_screen_capturer(
+    fn screen_capturer_state_factory(
         &mut self,
         _capture_source_id: CaptureSourceId,
-    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
-        eros::bail!("Linux screen capturer infrastructure has not been implemented");
+    ) -> impl FnOnce()
+        -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
+    + Send
+    + 'static
+    + use<Deps> {
+        || eros::bail!("Linux screen capturer infrastructure has not been implemented")
     }
 }

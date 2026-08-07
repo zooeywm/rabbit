@@ -1,10 +1,12 @@
 mod latest_frame_slot;
 mod model;
+mod worker;
 
 pub(crate) mod outbound_port;
 
 pub(crate) use latest_frame_slot::LatestFrameSlot;
 pub(crate) use model::{EncodedVideoFrame, FrameNumber};
+pub(crate) use worker::{StreamPipelineWorker, StreamPipelineWorkerHandle};
 
 pub(crate) struct StreamPipelineContainer<CvtSt, EcdSt> {
     encoder_frame_converter_state: CvtSt,

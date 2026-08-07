@@ -1,7 +1,7 @@
 use crate::{
     app::container::{
-        CaptureSourceContainer, RootContainer, StreamPipelineContainer,
-        capture_source::outbound_port::{CaptureFramePoolCapacityController, ScreenCapturer},
+        RootContainer, ScreenCapturerContainer, StreamPipelineContainer,
+        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
         root::outbound_port::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
             EncoderManager, EncoderManagerStateSpec,
@@ -11,6 +11,7 @@ use crate::{
             outbound_port::{EncoderFrameConverter, VideoEncoder},
         },
     },
+    domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
         FakeCapturedFrame, FakeCapturerManagerImpl, FakeCapturerManagerState,
         FakeConverterManagerImpl, FakeConverterManagerState, FakeEncoderFrameConverterImpl,
@@ -23,6 +24,7 @@ use crate::{
 
 impl CapturerManagerStateSpec for FakeCapturerManagerState {
     type ScreenCapturerState = FakeScreenCapturerState;
+    type ScreenCapturer = ScreenCapturerContainer<FakeScreenCapturerState>;
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsRef<FakeCapturerManagerState>
@@ -55,51 +57,46 @@ where
 {
     type State = FakeCapturerManagerState;
 
-    fn create_screen_capturer(
+    fn screen_capturer_state_factory(
         &mut self,
-        capture_source_id: crate::domain::stream::models::vo::CaptureSourceId,
-    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
-        CapturerManager::create_screen_capturer(
+        capture_source_id: CaptureSourceId,
+    ) -> impl FnOnce()
+        -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
+    + Send
+    + 'static
+    + use<CvtMgrSt, EcdMgrSt> {
+        CapturerManager::screen_capturer_state_factory(
             FakeCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
         )
     }
 }
 
-impl<CvtSt, EcdSt> AsRef<FakeScreenCapturerState>
-    for CaptureSourceContainer<FakeScreenCapturerState, CvtSt, EcdSt>
-{
-    fn as_ref(&self) -> &FakeScreenCapturerState {
-        self.screen_capturer_state()
-    }
-}
-
-impl<CvtSt, EcdSt> AsMut<FakeScreenCapturerState>
-    for CaptureSourceContainer<FakeScreenCapturerState, CvtSt, EcdSt>
-{
+impl AsMut<FakeScreenCapturerState> for ScreenCapturerContainer<FakeScreenCapturerState> {
     fn as_mut(&mut self) -> &mut FakeScreenCapturerState {
-        self.screen_capturer_state_mut()
+        self.state_mut()
     }
 }
 
-impl<CvtSt, EcdSt> CaptureFramePoolCapacityController
-    for CaptureSourceContainer<FakeScreenCapturerState, CvtSt, EcdSt>
-{
-    fn set_pool_size(&mut self, pool_size: usize) -> eros::Result<()> {
-        CaptureFramePoolCapacityController::set_pool_size(
-            FakeScreenCapturerImpl::inj_ref_mut(self),
-            pool_size,
-        )
-    }
-}
-
-impl<CvtSt, EcdSt> ScreenCapturer
-    for CaptureSourceContainer<FakeScreenCapturerState, CvtSt, EcdSt>
-{
+impl ScreenCapturer for ScreenCapturerContainer<FakeScreenCapturerState> {
     type CapturedFrame = FrameLease<FakeCapturedFrame>;
 
-    fn capture_next(&mut self) -> eros::Result<Self::CapturedFrame> {
-        ScreenCapturer::capture_next(FakeScreenCapturerImpl::inj_ref_mut(self))
+    fn run<OnStarted, OnFrame>(
+        &mut self,
+        initial_consumer_count: usize,
+        on_started: OnStarted,
+        on_frame: OnFrame,
+    ) -> eros::Result<()>
+    where
+        OnStarted: FnOnce() -> eros::Result<()>,
+        OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
+    {
+        ScreenCapturer::run(
+            FakeScreenCapturerImpl::inj_ref_mut(self),
+            initial_consumer_count,
+            on_started,
+            on_frame,
+        )
     }
 }
 
@@ -137,12 +134,17 @@ where
 {
     type State = FakeConverterManagerState;
 
-    fn create_encoder_frame_converter(
+    fn encoder_frame_converter_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
-        ConverterManager::create_encoder_frame_converter(FakeConverterManagerImpl::inj_ref_mut(
-            self,
-        ))
+    ) -> impl FnOnce() -> eros::Result<
+        <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    >
+    + Send
+    + 'static
+    + use<CapMgrSt, EcdMgrSt> {
+        ConverterManager::encoder_frame_converter_state_factory(
+            FakeConverterManagerImpl::inj_ref_mut(self),
+        )
     }
 }
 
@@ -207,10 +209,13 @@ where
 {
     type State = FakeEncoderManagerState;
 
-    fn create_video_encoder(
+    fn video_encoder_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
-        EncoderManager::create_video_encoder(FakeEncoderManagerImpl::inj_ref_mut(self))
+    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
+    + Send
+    + 'static
+    + use<CapMgrSt, CvtMgrSt> {
+        EncoderManager::video_encoder_state_factory(FakeEncoderManagerImpl::inj_ref_mut(self))
     }
 }
 

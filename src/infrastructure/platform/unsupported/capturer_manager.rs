@@ -16,10 +16,14 @@ impl UnsupportedCapturerManagerState {
 impl<Deps> CapturerManager for UnsupportedCapturerManagerImpl<Deps> {
     type State = UnsupportedCapturerManagerState;
 
-    fn create_screen_capturer(
+    fn screen_capturer_state_factory(
         &mut self,
         _capture_source_id: CaptureSourceId,
-    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
-        eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS,);
+    ) -> impl FnOnce()
+        -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
+    + Send
+    + 'static
+    + use<Deps> {
+        || eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS)
     }
 }

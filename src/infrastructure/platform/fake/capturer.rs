@@ -1,7 +1,5 @@
 use crate::{
-    app::container::capture_source::outbound_port::{
-        CaptureFramePoolCapacityController, ScreenCapturer,
-    },
+    app::container::capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
     infrastructure::support::media::{FrameLease, FramePool},
 };
 
@@ -13,28 +11,17 @@ pub(crate) struct FakeCapturedFrame {
 #[derive(kudi::DepInj)]
 #[target(FakeScreenCapturerImpl)]
 pub(crate) struct FakeScreenCapturerState {
-    pub(super) frame_pool: FramePool<FakeCapturedFrame>,
+    frame_pool: FramePool<FakeCapturedFrame>,
 
-    pub(super) next_capture_sequence: u64,
+    next_capture_sequence: u64,
 }
 
 impl FakeScreenCapturerState {
-    pub(crate) fn new(pool_size: usize) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            frame_pool: FramePool::new(pool_size),
+            frame_pool: FramePool::new(0),
             next_capture_sequence: 0,
         }
-    }
-}
-
-impl<Deps> CaptureFramePoolCapacityController for FakeScreenCapturerImpl<Deps>
-where
-    Deps: AsMut<FakeScreenCapturerState>,
-{
-    fn set_pool_size(&mut self, pool_size: usize) -> eros::Result<()> {
-        let state = self.prj_ref_mut().as_mut();
-        state.frame_pool.set_pool_size(pool_size);
-        Ok(())
     }
 }
 
@@ -44,11 +31,45 @@ where
 {
     type CapturedFrame = FrameLease<FakeCapturedFrame>;
 
-    fn capture_next(&mut self) -> eros::Result<Self::CapturedFrame> {
-        let state = self.prj_ref_mut().as_mut();
-        let mut frame = state.frame_pool.blocking_acquire();
-        frame.capture_sequence = state.next_capture_sequence;
-        state.next_capture_sequence += 1;
-        Ok(frame)
+    fn run<OnStarted, OnFrame>(
+        &mut self,
+        initial_consumer_count: usize,
+        on_started: OnStarted,
+        mut on_frame: OnFrame,
+    ) -> eros::Result<()>
+    where
+        OnStarted: FnOnce() -> eros::Result<()>,
+        OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
+    {
+        self.prj_ref_mut()
+            .as_mut()
+            .frame_pool
+            .set_pool_size(frame_pool_size(initial_consumer_count));
+
+        on_started()?;
+
+        loop {
+            let frame = {
+                let state = self.prj_ref_mut().as_mut();
+                let mut frame = state.frame_pool.blocking_acquire();
+                frame.capture_sequence = state.next_capture_sequence;
+                state.next_capture_sequence += 1;
+                frame
+            };
+
+            match on_frame(frame)? {
+                CaptureLoopAction::Continue { consumer_count } => {
+                    self.prj_ref_mut()
+                        .as_mut()
+                        .frame_pool
+                        .set_pool_size(frame_pool_size(consumer_count));
+                }
+                CaptureLoopAction::Stop => return Ok(()),
+            }
+        }
     }
+}
+
+fn frame_pool_size(consumer_count: usize) -> usize {
+    consumer_count + 2
 }

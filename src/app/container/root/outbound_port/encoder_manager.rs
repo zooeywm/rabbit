@@ -1,11 +1,14 @@
 pub(crate) trait EncoderManagerStateSpec {
-    type VideoEncoderState;
+    type VideoEncoderState: 'static;
 }
 
 pub(crate) trait EncoderManager {
     type State: EncoderManagerStateSpec;
 
-    fn create_video_encoder(
+    fn video_encoder_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>;
+    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
+    + Send
+    + 'static
+    + use<Self>;
 }

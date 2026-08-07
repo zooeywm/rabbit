@@ -1,6 +1,7 @@
-use crate::app::container::root::outbound_port::{ConverterManager, ConverterManagerStateSpec};
-
-use super::converter::FakeEncoderFrameConverterState;
+use crate::{
+    app::container::root::outbound_port::{ConverterManager, ConverterManagerStateSpec},
+    infrastructure::fake::converter::FakeEncoderFrameConverterState,
+};
 
 #[derive(kudi::DepInj)]
 #[target(FakeConverterManagerImpl)]
@@ -15,9 +16,14 @@ impl FakeConverterManagerState {
 impl<Deps> ConverterManager for FakeConverterManagerImpl<Deps> {
     type State = FakeConverterManagerState;
 
-    fn create_encoder_frame_converter(
+    fn encoder_frame_converter_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
-        Ok(FakeEncoderFrameConverterState::new())
+    ) -> impl FnOnce() -> eros::Result<
+        <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    >
+    + Send
+    + 'static
+    + use<Deps> {
+        || Ok(FakeEncoderFrameConverterState::new())
     }
 }

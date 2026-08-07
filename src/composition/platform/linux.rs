@@ -1,8 +1,11 @@
+use std::convert::Infallible;
+
 use crate::{
     app::{
         self,
         container::{
-            CaptureSourceContainer, RootContainer, StreamPipelineContainer,
+            RootContainer, ScreenCapturerContainer, StreamPipelineContainer,
+            capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
             root::outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
@@ -13,12 +16,14 @@ use crate::{
     infrastructure::platform::{
         LinuxCapturerManagerImpl, LinuxCapturerManagerState, LinuxConverterManagerImpl,
         LinuxConverterManagerState, LinuxEncoderFrameConverterState, LinuxEncoderManagerImpl,
-        LinuxEncoderManagerState, LinuxScreenCapturerState, LinuxVideoEncoderState,
+        LinuxEncoderManagerState, LinuxScreenCapturerImpl, LinuxScreenCapturerState,
+        LinuxVideoEncoderState,
     },
 };
 
 impl CapturerManagerStateSpec for LinuxCapturerManagerState {
     type ScreenCapturerState = LinuxScreenCapturerState;
+    type ScreenCapturer = ScreenCapturerContainer<LinuxScreenCapturerState>;
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsRef<LinuxCapturerManagerState>
@@ -51,30 +56,40 @@ where
 {
     type State = LinuxCapturerManagerState;
 
-    fn create_screen_capturer(
+    fn screen_capturer_state_factory(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
-        CapturerManager::create_screen_capturer(
+    ) -> impl FnOnce()
+        -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
+    + Send
+    + 'static
+    + use<CvtMgrSt, EcdMgrSt> {
+        CapturerManager::screen_capturer_state_factory(
             LinuxCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
         )
     }
 }
 
-impl<CvtSt, EcdSt> AsRef<LinuxScreenCapturerState>
-    for CaptureSourceContainer<LinuxScreenCapturerState, CvtSt, EcdSt>
-{
-    fn as_ref(&self) -> &LinuxScreenCapturerState {
-        self.screen_capturer_state()
-    }
-}
+impl ScreenCapturer for ScreenCapturerContainer<LinuxScreenCapturerState> {
+    type CapturedFrame = Infallible;
 
-impl<CvtSt, EcdSt> AsMut<LinuxScreenCapturerState>
-    for CaptureSourceContainer<LinuxScreenCapturerState, CvtSt, EcdSt>
-{
-    fn as_mut(&mut self) -> &mut LinuxScreenCapturerState {
-        self.screen_capturer_state_mut()
+    fn run<OnStarted, OnFrame>(
+        &mut self,
+        initial_consumer_count: usize,
+        on_started: OnStarted,
+        on_frame: OnFrame,
+    ) -> eros::Result<()>
+    where
+        OnStarted: FnOnce() -> eros::Result<()>,
+        OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
+    {
+        ScreenCapturer::run(
+            LinuxScreenCapturerImpl::inj_ref_mut(self),
+            initial_consumer_count,
+            on_started,
+            on_frame,
+        )
     }
 }
 
@@ -112,12 +127,17 @@ where
 {
     type State = LinuxConverterManagerState;
 
-    fn create_encoder_frame_converter(
+    fn encoder_frame_converter_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
-        ConverterManager::create_encoder_frame_converter(LinuxConverterManagerImpl::inj_ref_mut(
-            self,
-        ))
+    ) -> impl FnOnce() -> eros::Result<
+        <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    >
+    + Send
+    + 'static
+    + use<CapMgrSt, EcdMgrSt> {
+        ConverterManager::encoder_frame_converter_state_factory(
+            LinuxConverterManagerImpl::inj_ref_mut(self),
+        )
     }
 }
 
@@ -171,10 +191,13 @@ where
 {
     type State = LinuxEncoderManagerState;
 
-    fn create_video_encoder(
+    fn video_encoder_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
-        EncoderManager::create_video_encoder(LinuxEncoderManagerImpl::inj_ref_mut(self))
+    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
+    + Send
+    + 'static
+    + use<CapMgrSt, CvtMgrSt> {
+        EncoderManager::video_encoder_state_factory(LinuxEncoderManagerImpl::inj_ref_mut(self))
     }
 }
 

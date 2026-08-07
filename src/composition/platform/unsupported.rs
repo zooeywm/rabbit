@@ -1,8 +1,11 @@
+use std::convert::Infallible;
+
 use crate::{
     app::{
         self,
         container::{
-            CaptureSourceContainer, RootContainer, StreamPipelineContainer,
+            RootContainer, ScreenCapturerContainer, StreamPipelineContainer,
+            capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
             root::outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
@@ -14,13 +17,14 @@ use crate::{
         UnsupportedCapturerManagerImpl, UnsupportedCapturerManagerState,
         UnsupportedConverterManagerImpl, UnsupportedConverterManagerState,
         UnsupportedEncoderFrameConverterState, UnsupportedEncoderManagerImpl,
-        UnsupportedEncoderManagerState, UnsupportedScreenCapturerState,
-        UnsupportedVideoEncoderState,
+        UnsupportedEncoderManagerState, UnsupportedScreenCapturerImpl,
+        UnsupportedScreenCapturerState, UnsupportedVideoEncoderState,
     },
 };
 
 impl CapturerManagerStateSpec for UnsupportedCapturerManagerState {
     type ScreenCapturerState = UnsupportedScreenCapturerState;
+    type ScreenCapturer = ScreenCapturerContainer<UnsupportedScreenCapturerState>;
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsRef<UnsupportedCapturerManagerState>
@@ -53,30 +57,40 @@ where
 {
     type State = UnsupportedCapturerManagerState;
 
-    fn create_screen_capturer(
+    fn screen_capturer_state_factory(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState> {
-        CapturerManager::create_screen_capturer(
+    ) -> impl FnOnce()
+        -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
+    + Send
+    + 'static
+    + use<CvtMgrSt, EcdMgrSt> {
+        CapturerManager::screen_capturer_state_factory(
             UnsupportedCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
         )
     }
 }
 
-impl<CvtSt, EcdSt> AsRef<UnsupportedScreenCapturerState>
-    for CaptureSourceContainer<UnsupportedScreenCapturerState, CvtSt, EcdSt>
-{
-    fn as_ref(&self) -> &UnsupportedScreenCapturerState {
-        self.screen_capturer_state()
-    }
-}
+impl ScreenCapturer for ScreenCapturerContainer<UnsupportedScreenCapturerState> {
+    type CapturedFrame = Infallible;
 
-impl<CvtSt, EcdSt> AsMut<UnsupportedScreenCapturerState>
-    for CaptureSourceContainer<UnsupportedScreenCapturerState, CvtSt, EcdSt>
-{
-    fn as_mut(&mut self) -> &mut UnsupportedScreenCapturerState {
-        self.screen_capturer_state_mut()
+    fn run<OnStarted, OnFrame>(
+        &mut self,
+        initial_consumer_count: usize,
+        on_started: OnStarted,
+        on_frame: OnFrame,
+    ) -> eros::Result<()>
+    where
+        OnStarted: FnOnce() -> eros::Result<()>,
+        OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
+    {
+        ScreenCapturer::run(
+            UnsupportedScreenCapturerImpl::inj_ref_mut(self),
+            initial_consumer_count,
+            on_started,
+            on_frame,
+        )
     }
 }
 
@@ -114,10 +128,15 @@ where
 {
     type State = UnsupportedConverterManagerState;
 
-    fn create_encoder_frame_converter(
+    fn encoder_frame_converter_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState> {
-        ConverterManager::create_encoder_frame_converter(
+    ) -> impl FnOnce() -> eros::Result<
+        <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    >
+    + Send
+    + 'static
+    + use<CapMgrSt, EcdMgrSt> {
+        ConverterManager::encoder_frame_converter_state_factory(
             UnsupportedConverterManagerImpl::inj_ref_mut(self),
         )
     }
@@ -173,10 +192,15 @@ where
 {
     type State = UnsupportedEncoderManagerState;
 
-    fn create_video_encoder(
+    fn video_encoder_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
-        EncoderManager::create_video_encoder(UnsupportedEncoderManagerImpl::inj_ref_mut(self))
+    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
+    + Send
+    + 'static
+    + use<CapMgrSt, CvtMgrSt> {
+        EncoderManager::video_encoder_state_factory(UnsupportedEncoderManagerImpl::inj_ref_mut(
+            self,
+        ))
     }
 }
 

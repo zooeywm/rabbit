@@ -1,4 +1,4 @@
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::sync::{Condvar, Mutex};
 
 struct LatestFrameSlotState<Frame> {
     frame: Option<Frame>,

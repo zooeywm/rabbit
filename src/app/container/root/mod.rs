@@ -4,17 +4,18 @@ pub(crate) mod outbound_port;
 
 use std::collections::HashMap;
 
+use crate::app::root_runtime::RootActor;
 use crate::{app::container::CaptureSourceContainer, domain::stream::models::vo::CaptureSourceId};
 
 use self::outbound_port::{
     CapturerManagerStateSpec, ConverterManagerStateSpec, EncoderManagerStateSpec,
 };
+use crate::app::container::capture_source::outbound_port::ScreenCapturer;
 
-type CaptureSourceFor<CapMgrSt, CvtMgrSt, EcdMgrSt> = CaptureSourceContainer<
-    <CapMgrSt as CapturerManagerStateSpec>::ScreenCapturerState,
-    <CvtMgrSt as ConverterManagerStateSpec>::EncoderFrameConverterState,
-    <EcdMgrSt as EncoderManagerStateSpec>::VideoEncoderState,
->;
+type CapturedFrameFor<CapMgrSt> =
+    <<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer as ScreenCapturer>::CapturedFrame;
+
+type CaptureSourceFor<CapMgrSt> = CaptureSourceContainer<CapturedFrameFor<CapMgrSt>>;
 
 pub(crate) struct RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
@@ -28,7 +29,7 @@ where
 
     encoder_manager_state: EcdMgrSt,
 
-    capture_sources: HashMap<CaptureSourceId, CaptureSourceFor<CapMgrSt, CvtMgrSt, EcdMgrSt>>,
+    capture_sources: HashMap<CaptureSourceId, CaptureSourceFor<CapMgrSt>>,
 
     next_stream_id: u16,
 }
@@ -75,5 +76,29 @@ where
 
     pub(crate) fn encoder_manager_state_mut(&mut self) -> &mut EcdMgrSt {
         &mut self.encoder_manager_state
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> RootActor for RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+{
+    async fn shutdown(self) -> eros::Result<()> {
+        let mut first_error = None;
+
+        for capture_source in self.capture_sources.into_values() {
+            if let Err(error) = capture_source.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }

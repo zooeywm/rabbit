@@ -13,9 +13,12 @@ impl UnsupportedEncoderManagerState {
 impl<Deps> EncoderManager for UnsupportedEncoderManagerImpl<Deps> {
     type State = UnsupportedEncoderManagerState;
 
-    fn create_video_encoder(
+    fn video_encoder_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
-        eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS,);
+    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
+    + Send
+    + 'static
+    + use<Deps> {
+        || eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS)
     }
 }

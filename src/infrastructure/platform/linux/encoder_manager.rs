@@ -13,9 +13,12 @@ impl LinuxEncoderManagerState {
 impl<Deps> EncoderManager for LinuxEncoderManagerImpl<Deps> {
     type State = LinuxEncoderManagerState;
 
-    fn create_video_encoder(
+    fn video_encoder_state_factory(
         &mut self,
-    ) -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState> {
-        eros::bail!("Linux video encoding infrastructure has not been implemented");
+    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
+    + Send
+    + 'static
+    + use<Deps> {
+        || eros::bail!("Linux video encoding infrastructure has not been implemented")
     }
 }
