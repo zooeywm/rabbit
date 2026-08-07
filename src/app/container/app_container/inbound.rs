@@ -1,6 +1,7 @@
 use eros::Context;
 
 use crate::{
+    app::runtime::{AppActor, AppCommand},
     app::container::app_container::outbound_port::{
         CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
         EncoderManager, EncoderManagerStateSpec,
@@ -148,5 +149,43 @@ where
 
         remove_result?;
         shutdown_result
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppActor for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+    Self: CapturerManager<State = CapMgrSt>
+        + ConverterManager<State = CvtMgrSt>
+        + EncoderManager<State = EcdMgrSt>,
+    StreamPipelineFor<CvtMgrSt, EcdMgrSt>:
+        EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+            + VideoEncoder<
+                EncoderInput = <StreamPipelineFor<CvtMgrSt, EcdMgrSt> as EncoderFrameConverter>::EncoderInput,
+            >
+            + 'static,
+{
+    async fn run(mut self, command_receiver: flume::Receiver<AppCommand>) -> eros::Result<()> {
+        loop {
+            match command_receiver.recv_async().await {
+                Ok(AppCommand::StartStream {
+                    capture_source_id,
+                    response_sender,
+                }) => {
+                    let _ = response_sender.send(self.start_stream(capture_source_id).await);
+                }
+                Ok(AppCommand::RemoveStream {
+                    stream_id,
+                    response_sender,
+                }) => {
+                    let _ = response_sender.send(self.remove_stream(stream_id).await);
+                }
+                Ok(AppCommand::Shutdown) | Err(_) => break,
+            }
+        }
+
+        self.shutdown().await
     }
 }

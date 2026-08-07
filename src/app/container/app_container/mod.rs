@@ -4,7 +4,6 @@ pub(crate) mod outbound_port;
 
 use std::collections::HashMap;
 
-use crate::app::runtime::AppActor;
 use crate::{app::container::CaptureSourceContainer, domain::stream::models::vo::CaptureSourceId};
 
 use self::outbound_port::{
@@ -79,13 +78,13 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppActor for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
 {
-    async fn shutdown(self) -> eros::Result<()> {
+    pub(crate) async fn shutdown(self) -> eros::Result<()> {
         let mut first_error = None;
 
         for capture_source in self.capture_sources.into_values() {

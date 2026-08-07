@@ -6,19 +6,30 @@ use std::{
 
 use eros::Context;
 
-const APP_COMMAND_CAPACITY: usize = 1;
+use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
 
-enum AppCommand {
+pub(crate) enum AppCommand {
+    StartStream {
+        capture_source_id: CaptureSourceId,
+        response_sender: flume::Sender<eros::Result<StreamId>>,
+    },
+    RemoveStream {
+        stream_id: StreamId,
+        response_sender: flume::Sender<eros::Result<()>>,
+    },
     Shutdown,
 }
 
 pub(crate) trait AppActor {
-    fn shutdown(self) -> impl Future<Output = eros::Result<()>>;
+    fn run(
+        self,
+        command_receiver: flume::Receiver<AppCommand>,
+    ) -> impl Future<Output = eros::Result<()>>;
 }
 
 pub(super) struct AppRuntime;
 
-pub(super) struct AppHandle {
+pub(crate) struct AppHandle {
     command_sender: flume::Sender<AppCommand>,
     app_thread: JoinHandle<eros::Result<()>>,
 }
@@ -30,7 +41,7 @@ impl AppRuntime {
     where
         App: AppActor + 'static,
     {
-        let (command_sender, command_receiver) = flume::bounded(APP_COMMAND_CAPACITY);
+        let (command_sender, command_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
 
         let app_thread = thread::Builder::new()
@@ -51,6 +62,41 @@ impl AppRuntime {
 }
 
 impl AppHandle {
+    pub(crate) async fn start_stream(
+        &self,
+        capture_source_id: CaptureSourceId,
+    ) -> eros::Result<StreamId> {
+        let (response_sender, response_receiver) = flume::bounded(1);
+
+        self.command_sender
+            .send(AppCommand::StartStream {
+                capture_source_id,
+                response_sender,
+            })
+            .with_context(|| "App actor stopped before stream could be started")?;
+
+        response_receiver
+            .recv_async()
+            .await
+            .with_context(|| "App actor stopped while starting stream")?
+    }
+
+    pub(crate) async fn remove_stream(&self, stream_id: StreamId) -> eros::Result<()> {
+        let (response_sender, response_receiver) = flume::bounded(1);
+
+        self.command_sender
+            .send(AppCommand::RemoveStream {
+                stream_id,
+                response_sender,
+            })
+            .with_context(|| "App actor stopped before stream could be removed")?;
+
+        response_receiver
+            .recv_async()
+            .await
+            .with_context(|| "App actor stopped while removing stream")?
+    }
+
     pub(super) fn shutdown(self) -> eros::Result<()> {
         let Self {
             command_sender,
@@ -85,21 +131,7 @@ where
         .send(())
         .with_context(|| "Failed to report app startup")?;
 
-    runtime.block_on(run_app_actor(app, command_receiver))
-}
-
-async fn run_app_actor<App>(
-    app: App,
-    command_receiver: flume::Receiver<AppCommand>,
-) -> eros::Result<()>
-where
-    App: AppActor,
-{
-    match command_receiver.recv_async().await {
-        Ok(AppCommand::Shutdown) | Err(_) => {}
-    }
-
-    app.shutdown().await
+    runtime.block_on(app.run(command_receiver))
 }
 
 fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {
