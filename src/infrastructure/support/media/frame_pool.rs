@@ -23,6 +23,8 @@ struct FramePoolState<Frame> {
 
     /// The index from which the next allocation search begins.
     next_index: usize,
+
+    wake_requested: bool,
 }
 
 struct FrameSlot<Frame> {
@@ -39,6 +41,10 @@ struct FrameSlot<Frame> {
 
 pub(crate) struct FrameLease<Frame> {
     inner: Arc<FrameLeaseInner<Frame>>,
+}
+
+pub(crate) struct FramePoolWaker<Frame> {
+    inner: Arc<FramePoolInner<Frame>>,
 }
 
 struct FrameLeaseInner<Frame> {
@@ -67,6 +73,7 @@ impl<Frame: Default> FramePool<Frame> {
                     slots,
                     next_slot_id: pool_size,
                     next_index: 0,
+                    wake_requested: false,
                 }),
                 frame_available: Condvar::new(),
             }),
@@ -184,10 +191,30 @@ impl<Frame: Default> FramePool<Frame> {
 
 impl<Frame> FramePool<Frame> {
     pub(crate) fn blocking_acquire(&self) -> FrameLease<Frame> {
-        let (slot_id, frame) = {
+        self.blocking_acquire_inner(false)
+            .expect("a non-interruptible frame acquire cannot be woken")
+    }
+
+    pub(crate) fn blocking_acquire_interruptibly(&self) -> Option<FrameLease<Frame>> {
+        self.blocking_acquire_inner(true)
+    }
+
+    pub(crate) fn waker(&self) -> FramePoolWaker<Frame> {
+        FramePoolWaker {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn blocking_acquire_inner(&self, interruptible: bool) -> Option<FrameLease<Frame>> {
+        let acquired = {
             let mut state = self.inner.state.lock().expect("frame pool mutex poisoned");
 
             loop {
+                if interruptible && state.wake_requested {
+                    state.wake_requested = false;
+                    break None;
+                }
+
                 let slot_count = state.slots.len();
                 let mut acquired = None;
 
@@ -223,7 +250,7 @@ impl<Frame> FramePool<Frame> {
                         state.next_index = 0;
                     }
 
-                    break (slot_id, frame);
+                    break Some((slot_id, frame));
                 }
 
                 state = self
@@ -234,13 +261,26 @@ impl<Frame> FramePool<Frame> {
             }
         };
 
-        FrameLease {
+        let (slot_id, frame) = acquired?;
+
+        Some(FrameLease {
             inner: Arc::new(FrameLeaseInner {
                 frame: Some(frame),
                 pool: Arc::clone(&self.inner),
                 slot_id,
             }),
-        }
+        })
+    }
+}
+
+impl<Frame> FramePoolWaker<Frame> {
+    pub(crate) fn wake(&self) {
+        self.inner
+            .state
+            .lock()
+            .expect("frame pool mutex poisoned")
+            .wake_requested = true;
+        self.inner.frame_available.notify_all();
     }
 }
 

@@ -6,7 +6,7 @@ use crate::{
     app::container::capture_source::outbound_port::{
         CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
     },
-    infrastructure::support::media::{FrameLease, FramePool},
+    infrastructure::support::media::{FrameLease, FramePool, FramePoolWaker},
 };
 
 #[derive(Default)]
@@ -41,14 +41,16 @@ impl FakeScreenCapturerState {
 
 struct FakeScreenCapturerControl {
     control_sender: flume::Sender<()>,
+    frame_pool_waker: FramePoolWaker<FakeCapturedFrame>,
 }
 
 impl ScreenCapturerControl for FakeScreenCapturerControl {
     fn wake(&self) -> eros::Result<()> {
-        Ok(self
-            .control_sender
+        self.control_sender
             .send(())
-            .with_context(|| "Fake screen capturer stopped before control wakeup")?)
+            .with_context(|| "Fake screen capturer stopped before control wakeup")?;
+        self.frame_pool_waker.wake();
+        Ok(())
     }
 }
 
@@ -61,6 +63,7 @@ where
     fn control(&self) -> eros::Result<Arc<dyn ScreenCapturerControl>> {
         Ok(Arc::new(FakeScreenCapturerControl {
             control_sender: self.prj_ref().as_ref().control_sender.clone(),
+            frame_pool_waker: self.prj_ref().as_ref().frame_pool.waker(),
         }))
     }
 
@@ -98,7 +101,9 @@ where
 
             let frame = {
                 let state = self.prj_ref_mut().as_mut();
-                let mut frame = state.frame_pool.blocking_acquire();
+                let Some(mut frame) = state.frame_pool.blocking_acquire_interruptibly() else {
+                    continue;
+                };
                 frame.capture_sequence = state.next_capture_sequence;
                 state.next_capture_sequence += 1;
                 frame
