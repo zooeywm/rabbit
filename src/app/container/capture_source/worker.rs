@@ -17,14 +17,14 @@ use crate::{
 enum CaptureCommand<Frame> {
     AddStream {
         stream_id: StreamId,
-        slot: Arc<LatestFrameSlot<Frame>>,
+        frame_slot: Arc<LatestFrameSlot<Frame>>,
         response_sender: flume::Sender<eros::Result<()>>,
     },
     RemoveStream {
         stream_id: StreamId,
         response_sender: flume::Sender<eros::Result<()>>,
     },
-    Stop,
+    Shutdown,
 }
 
 pub(crate) struct CaptureWorker;
@@ -38,7 +38,7 @@ impl CaptureWorker {
     pub(crate) async fn spawn<Capturer, State>(
         screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
         initial_stream_id: StreamId,
-        initial_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
+        initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     ) -> eros::Result<CaptureWorkerHandle<Capturer::CapturedFrame>>
     where
         Capturer: ScreenCapturer + From<State> + 'static,
@@ -52,7 +52,7 @@ impl CaptureWorker {
                 run_capture_worker::<Capturer, State>(
                     screen_capturer_state_constructor,
                     initial_stream_id,
-                    initial_slot,
+                    initial_frame_slot,
                     command_receiver,
                     started_sender,
                 )
@@ -75,7 +75,7 @@ impl<Frame> CaptureWorkerHandle<Frame> {
     pub(crate) async fn add_stream(
         &self,
         stream_id: StreamId,
-        slot: Arc<LatestFrameSlot<Frame>>,
+        frame_slot: Arc<LatestFrameSlot<Frame>>,
     ) -> eros::Result<()> {
         let (response_sender, response_receiver) = flume::bounded(1);
 
@@ -83,7 +83,7 @@ impl<Frame> CaptureWorkerHandle<Frame> {
             .command_sender
             .send(CaptureCommand::AddStream {
                 stream_id,
-                slot,
+                frame_slot,
                 response_sender,
             })
             .is_err()
@@ -123,7 +123,7 @@ impl<Frame> CaptureWorkerHandle<Frame> {
             worker_thread,
         } = self;
 
-        let _ = command_sender.send(CaptureCommand::Stop);
+        let _ = command_sender.send(CaptureCommand::Shutdown);
 
         match compio::runtime::spawn_blocking(move || join_capture_worker(worker_thread)).await {
             Ok(result) => result,
@@ -135,19 +135,19 @@ impl<Frame> CaptureWorkerHandle<Frame> {
 fn run_capture_worker<Capturer, State>(
     screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State>,
     initial_stream_id: StreamId,
-    initial_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
+    initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
     started_sender: flume::Sender<()>,
 ) -> eros::Result<()>
 where
     Capturer: ScreenCapturer + From<State> + 'static,
 {
-    let state = screen_capturer_state_constructor()?;
-    let mut capturer = Capturer::from(state);
-    let mut slots = HashMap::from([(initial_stream_id, initial_slot)]);
+    let screen_capturer_state = screen_capturer_state_constructor()?;
+    let mut screen_capturer = Capturer::from(screen_capturer_state);
+    let mut frame_slots = HashMap::from([(initial_stream_id, initial_frame_slot)]);
 
-    capturer.run(
-        slots.len(),
+    screen_capturer.run(
+        frame_slots.len(),
         move || {
             started_sender
                 .send(())
@@ -155,18 +155,18 @@ where
             Ok(())
         },
         move |frame| {
-            if process_commands(&command_receiver, &mut slots) {
+            if process_commands(&command_receiver, &mut frame_slots) {
                 return Ok(CaptureLoopAction::Stop);
             }
 
-            let consumer_count = slots.len();
-            let mut slot_iter = slots.values().peekable();
+            let consumer_count = frame_slots.len();
+            let mut frame_slot_iter = frame_slots.values().peekable();
 
-            while let Some(slot) = slot_iter.next() {
-                if slot_iter.peek().is_some() {
-                    slot.replace(frame.clone());
+            while let Some(frame_slot) = frame_slot_iter.next() {
+                if frame_slot_iter.peek().is_some() {
+                    frame_slot.replace(frame.clone());
                 } else {
-                    slot.replace(frame);
+                    frame_slot.replace(frame);
                     break;
                 }
             }
@@ -182,18 +182,18 @@ where
 
 fn process_commands<Frame>(
     command_receiver: &flume::Receiver<CaptureCommand<Frame>>,
-    slots: &mut HashMap<StreamId, Arc<LatestFrameSlot<Frame>>>,
+    frame_slots: &mut HashMap<StreamId, Arc<LatestFrameSlot<Frame>>>,
 ) -> bool {
     loop {
         match command_receiver.try_recv() {
             Ok(CaptureCommand::AddStream {
                 stream_id,
-                slot,
+                frame_slot,
                 response_sender,
             }) => {
-                let result = match slots.entry(stream_id) {
+                let result = match frame_slots.entry(stream_id) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(slot);
+                        entry.insert(frame_slot);
                         Ok(())
                     }
                     std::collections::hash_map::Entry::Occupied(_) => {
@@ -206,14 +206,14 @@ fn process_commands<Frame>(
                 stream_id,
                 response_sender,
             }) => {
-                let result = if slots.remove(&stream_id).is_some() {
+                let result = if frame_slots.remove(&stream_id).is_some() {
                     Ok(())
                 } else {
                     Err(eros::error!("Stream does not exist in capture worker"))
                 };
                 let _ = response_sender.send(result);
             }
-            Ok(CaptureCommand::Stop) | Err(flume::TryRecvError::Disconnected) => return true,
+            Ok(CaptureCommand::Shutdown) | Err(flume::TryRecvError::Disconnected) => return true,
             Err(flume::TryRecvError::Empty) => return false,
         }
     }

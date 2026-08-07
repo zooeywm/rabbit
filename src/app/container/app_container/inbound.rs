@@ -72,35 +72,39 @@ where
             };
 
         let stream_pipeline_states_constructor = self.compose_stream_pipeline_states();
-        let stream_pipeline = StreamPipelineWorker::spawn::<CapturedFrameFor<CapMgrSt>, _, _>(
+        let stream_pipeline_handle = StreamPipelineWorker::spawn::<CapturedFrameFor<CapMgrSt>, _, _>(
             stream_id,
             stream_pipeline_states_constructor,
         )?;
 
         if let Some(screen_capturer_state_constructor) = screen_capturer_state_constructor {
-            let capture_worker = match CaptureWorker::spawn::<CapMgrSt::ScreenCapturer, _>(
+            let capture_worker_handle = match CaptureWorker::spawn::<CapMgrSt::ScreenCapturer, _>(
                 screen_capturer_state_constructor,
                 stream_id,
-                stream_pipeline.slot(),
+                stream_pipeline_handle.frame_slot(),
             )
             .await
             {
-                Ok(capture_worker) => capture_worker,
+                Ok(capture_worker_handle) => capture_worker_handle,
                 Err(error) => {
-                    let _ = stream_pipeline.shutdown().await;
+                    let _ = stream_pipeline_handle.shutdown().await;
                     return Err(error);
                 }
             };
 
             self.capture_sources.insert(
                 capture_source_id,
-                CaptureSourceContainer::new(capture_worker, stream_id, stream_pipeline),
+                CaptureSourceContainer::new(
+                    capture_worker_handle,
+                    stream_id,
+                    stream_pipeline_handle,
+                ),
             );
         } else {
             self.capture_sources
                 .get_mut(&capture_source_id)
                 .with_context(|| "Capture source container disappeared while adding stream")?
-                .add_stream(stream_id, stream_pipeline)
+                .add_stream(stream_id, stream_pipeline_handle)
                 .await?;
         }
 
@@ -120,14 +124,14 @@ where
             })
             .with_context(|| "Stream does not exist")?;
 
-        let remove_capture_source = self
+        let should_remove_capture_source = self
             .capture_sources
             .get_mut(&capture_source_id)
             .with_context(|| "Capture source container disappeared while removing stream")?
             .remove_stream(stream_id)
             .await?;
 
-        if remove_capture_source {
+        if should_remove_capture_source {
             let capture_source = self
                 .capture_sources
                 .remove(&capture_source_id)

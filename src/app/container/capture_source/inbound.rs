@@ -7,47 +7,48 @@ use crate::{
 
 impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
     pub(crate) fn contains_stream(&self, stream_id: StreamId) -> bool {
-        self.stream_pipelines.contains_key(&stream_id)
+        self.stream_pipeline_handles.contains_key(&stream_id)
     }
 
     pub(crate) async fn add_stream(
         &mut self,
         stream_id: StreamId,
-        stream_pipeline: StreamPipelineWorkerHandle<Frame>,
+        stream_pipeline_handle: StreamPipelineWorkerHandle<Frame>,
     ) -> eros::Result<()> {
-        if self.stream_pipelines.contains_key(&stream_id) {
-            stream_pipeline.shutdown().await?;
+        if self.stream_pipeline_handles.contains_key(&stream_id) {
+            stream_pipeline_handle.shutdown().await?;
             eros::bail!("Stream pipeline already exists");
         }
 
         if let Err(error) = self
-            .capture_worker
-            .add_stream(stream_id, stream_pipeline.slot())
+            .capture_worker_handle
+            .add_stream(stream_id, stream_pipeline_handle.frame_slot())
             .await
         {
-            let _ = stream_pipeline.shutdown().await;
+            let _ = stream_pipeline_handle.shutdown().await;
             return Err(error);
         }
 
-        self.stream_pipelines.insert(stream_id, stream_pipeline);
+        self.stream_pipeline_handles
+            .insert(stream_id, stream_pipeline_handle);
 
         Ok(())
     }
 
     pub(crate) async fn remove_stream(&mut self, stream_id: StreamId) -> eros::Result<bool> {
-        let stream_pipeline = self
-            .stream_pipelines
+        let stream_pipeline_handle = self
+            .stream_pipeline_handles
             .remove(&stream_id)
             .with_context(|| "Stream pipeline does not exist")?;
 
-        stream_pipeline.close();
+        stream_pipeline_handle.close();
 
-        let remove_result = self.capture_worker.remove_stream(stream_id).await;
-        let shutdown_result = stream_pipeline.shutdown().await;
+        let remove_result = self.capture_worker_handle.remove_stream(stream_id).await;
+        let shutdown_result = stream_pipeline_handle.shutdown().await;
 
         remove_result?;
         shutdown_result?;
 
-        Ok(self.stream_pipelines.is_empty())
+        Ok(self.stream_pipeline_handles.is_empty())
     }
 }

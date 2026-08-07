@@ -14,7 +14,7 @@ use crate::domain::stream::models::vo::StreamId;
 pub(crate) struct StreamPipelineWorker;
 
 pub(crate) struct StreamPipelineWorkerHandle<Frame> {
-    slot: Arc<LatestFrameSlot<Frame>>,
+    frame_slot: Arc<LatestFrameSlot<Frame>>,
     worker_thread: JoinHandle<eros::Result<()>>,
 }
 
@@ -34,8 +34,8 @@ impl StreamPipelineWorker {
             >
             + 'static,
     {
-        let slot = Arc::new(LatestFrameSlot::new());
-        let worker_slot = Arc::clone(&slot);
+        let frame_slot = Arc::new(LatestFrameSlot::new());
+        let worker_frame_slot = Arc::clone(&frame_slot);
         let (started_sender, started_receiver) = std::sync::mpsc::sync_channel(1);
 
         let worker_thread = thread::Builder::new()
@@ -43,7 +43,7 @@ impl StreamPipelineWorker {
             .spawn(move || {
                 run_stream_pipeline_worker(
                     stream_pipeline_states_constructor,
-                    worker_slot,
+                    worker_frame_slot,
                     started_sender,
                 )
             })
@@ -55,28 +55,28 @@ impl StreamPipelineWorker {
         }
 
         Ok(StreamPipelineWorkerHandle {
-            slot,
+            frame_slot,
             worker_thread,
         })
     }
 }
 
 impl<Frame> StreamPipelineWorkerHandle<Frame> {
-    pub(crate) fn slot(&self) -> Arc<LatestFrameSlot<Frame>> {
-        Arc::clone(&self.slot)
+    pub(crate) fn frame_slot(&self) -> Arc<LatestFrameSlot<Frame>> {
+        Arc::clone(&self.frame_slot)
     }
 
     pub(crate) fn close(&self) {
-        self.slot.close();
+        self.frame_slot.close();
     }
 
     pub(crate) async fn shutdown(self) -> eros::Result<()> {
         let Self {
-            slot,
+            frame_slot,
             worker_thread,
         } = self;
 
-        slot.close();
+        frame_slot.close();
 
         match compio::runtime::spawn_blocking(move || join_stream_pipeline_worker(worker_thread))
             .await
@@ -89,7 +89,7 @@ impl<Frame> StreamPipelineWorkerHandle<Frame> {
 
 fn run_stream_pipeline_worker<Frame, CvtSt, EcdSt>(
     stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
-    slot: Arc<LatestFrameSlot<Frame>>,
+    frame_slot: Arc<LatestFrameSlot<Frame>>,
     started_sender: SyncSender<()>,
 ) -> eros::Result<()>
 where
@@ -98,16 +98,18 @@ where
             EncoderInput = <StreamPipelineContainer<CvtSt, EcdSt> as EncoderFrameConverter>::EncoderInput,
         >,
 {
-    let (converter_state, encoder_state) = stream_pipeline_states_constructor()?;
-    let mut pipeline = StreamPipelineContainer::new(converter_state, encoder_state);
+    let (encoder_frame_converter_state, video_encoder_state) =
+        stream_pipeline_states_constructor()?;
+    let mut stream_pipeline =
+        StreamPipelineContainer::new(encoder_frame_converter_state, video_encoder_state);
 
     started_sender
         .send(())
         .with_context(|| "Failed to report stream pipeline worker startup")?;
 
-    while let Some(frame) = slot.blocking_take() {
-        let encoder_input = EncoderFrameConverter::convert(&mut pipeline, frame)?;
-        let _encoded_frame = VideoEncoder::encode(&mut pipeline, encoder_input)?;
+    while let Some(frame) = frame_slot.blocking_take() {
+        let encoder_input = EncoderFrameConverter::convert(&mut stream_pipeline, frame)?;
+        let _encoded_frame = VideoEncoder::encode(&mut stream_pipeline, encoder_input)?;
     }
 
     Ok(())
