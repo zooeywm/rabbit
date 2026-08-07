@@ -45,9 +45,10 @@ struct FakeScreenCapturerControl {
 
 impl ScreenCapturerControl for FakeScreenCapturerControl {
     fn wake(&self) -> eros::Result<()> {
-        self.control_sender
+        Ok(self
+            .control_sender
             .send(())
-            .with_context(|| "Fake screen capturer stopped before control wakeup")
+            .with_context(|| "Fake screen capturer stopped before control wakeup")?)
     }
 }
 
@@ -83,13 +84,7 @@ where
         on_started()?;
 
         loop {
-            while self
-                .prj_ref()
-                .as_ref()
-                .control_receiver
-                .try_recv()
-                .is_ok()
-            {
+            while self.prj_ref().as_ref().control_receiver.try_recv().is_ok() {
                 match on_control()? {
                     CaptureLoopAction::Continue { consumer_count } => {
                         self.prj_ref_mut()
