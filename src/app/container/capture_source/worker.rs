@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    rc::Rc,
+    sync::{Arc, Weak},
     thread::{self, JoinHandle},
 };
 
@@ -19,23 +21,31 @@ use crate::{
 
 struct CaptureWorkerState<Frame> {
     frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Frame>>>,
-    shutdown_requested: bool,
 }
 
-struct CaptureWorkerShared<Frame> {
-    state: Mutex<CaptureWorkerState<Frame>>,
+enum CaptureCommand<Frame> {
+    AddStream {
+        stream_id: StreamId,
+        frame_slot: Arc<LatestFrameSlot<Frame>>,
+        response_sender: flume::Sender<eros::Result<()>>,
+    },
+    RemoveStream {
+        stream_id: StreamId,
+        response_sender: flume::Sender<eros::Result<()>>,
+    },
+    Shutdown,
 }
 
 struct CaptureWorkerExitGuard<Frame> {
     capture_source_id: CaptureSourceId,
-    shared: Arc<CaptureWorkerShared<Frame>>,
+    state: Rc<RefCell<CaptureWorkerState<Frame>>>,
     app_command_sender: Weak<flume::Sender<AppCommand>>,
 }
 
 pub(crate) struct CaptureWorker;
 
 pub(crate) struct CaptureWorkerHandle<Frame> {
-    shared: Arc<CaptureWorkerShared<Frame>>,
+    command_sender: flume::Sender<CaptureCommand<Frame>>,
     control: Arc<dyn ScreenCapturerControl>,
     worker_thread: JoinHandle<eros::Result<()>>,
 }
@@ -51,23 +61,19 @@ impl CaptureWorker {
     where
         Capturer: ScreenCapturer + From<State> + 'static,
     {
-        let shared = Arc::new(CaptureWorkerShared::new(initial_stream_id, initial_frame_slot));
-        let worker_shared = Arc::clone(&shared);
-        let exit_shared = Arc::clone(&shared);
+        let (command_sender, command_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = flume::bounded(1);
 
         let worker_thread = thread::Builder::new()
             .name("capture".to_owned())
             .spawn(move || {
-                let _exit_guard = CaptureWorkerExitGuard {
-                    capture_source_id,
-                    shared: exit_shared,
-                    app_command_sender,
-                };
-
                 run_capture_worker::<Capturer, State>(
+                    capture_source_id,
                     screen_capturer_state_constructor,
-                    worker_shared,
+                    initial_stream_id,
+                    initial_frame_slot,
+                    command_receiver,
+                    app_command_sender,
                     started_sender,
                 )
             })
@@ -82,7 +88,7 @@ impl CaptureWorker {
         };
 
         Ok(CaptureWorkerHandle {
-            shared,
+            command_sender,
             control,
             worker_thread,
         })
@@ -90,34 +96,69 @@ impl CaptureWorker {
 }
 
 impl<Frame> CaptureWorkerHandle<Frame> {
-    pub(crate) fn add_stream(
+    pub(crate) async fn add_stream(
         &self,
         stream_id: StreamId,
         frame_slot: Arc<LatestFrameSlot<Frame>>,
     ) -> eros::Result<()> {
-        self.shared.add_stream(stream_id, frame_slot)?;
+        let (response_sender, response_receiver) = flume::bounded(1);
 
-        if let Err(error) = self.control.wake() {
-            let _ = self.shared.remove_stream(stream_id);
-            return Err(error);
+        if self
+            .command_sender
+            .send(CaptureCommand::AddStream {
+                stream_id,
+                frame_slot,
+                response_sender,
+            })
+            .is_err()
+        {
+            eros::bail!("Capture worker stopped before stream could be added");
         }
 
-        Ok(())
+        self.control.wake()?;
+
+        response_receiver
+            .recv_async()
+            .await
+            .with_context(|| "Capture worker stopped while adding stream")?
     }
 
-    pub(crate) fn remove_stream(&self, stream_id: StreamId) -> eros::Result<()> {
-        self.shared.remove_stream(stream_id)?;
-        self.control.wake()
+    pub(crate) async fn remove_stream(&self, stream_id: StreamId) -> eros::Result<()> {
+        let (response_sender, response_receiver) = flume::bounded(1);
+
+        if self
+            .command_sender
+            .send(CaptureCommand::RemoveStream {
+                stream_id,
+                response_sender,
+            })
+            .is_err()
+        {
+            eros::bail!("Capture worker stopped before stream could be removed");
+        }
+
+        self.control.wake()?;
+
+        response_receiver
+            .recv_async()
+            .await
+            .with_context(|| "Capture worker stopped while removing stream")?
     }
 
     pub(crate) async fn shutdown(self) -> eros::Result<()> {
         let Self {
-            shared,
+            command_sender,
             control,
             worker_thread,
         } = self;
 
-        shared.request_shutdown();
+        let send_result = if command_sender.send(CaptureCommand::Shutdown).is_ok() {
+            Ok(())
+        } else {
+            Err(eros::error!(
+                "Capture worker stopped before receiving shutdown"
+            ))
+        };
         let wake_result = control.wake();
 
         let join_result = match compio::runtime::spawn_blocking(move || {
@@ -130,6 +171,7 @@ impl<Frame> CaptureWorkerHandle<Frame> {
         };
 
         join_result?;
+        send_result?;
         wake_result
     }
 
@@ -143,7 +185,7 @@ impl<Frame> CaptureWorkerHandle<Frame> {
 
 impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
     fn drop(&mut self) {
-        self.shared.close_frame_slots();
+        self.state.borrow().close_frame_slots();
         if let Some(app_command_sender) = self.app_command_sender.upgrade() {
             let _ = app_command_sender.send(AppCommand::CaptureWorkerExited {
                 capture_source_id: self.capture_source_id,
@@ -153,147 +195,122 @@ impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
 }
 
 fn run_capture_worker<Capturer, State>(
+    capture_source_id: CaptureSourceId,
     screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State>,
-    shared: Arc<CaptureWorkerShared<Capturer::CapturedFrame>>,
+    initial_stream_id: StreamId,
+    initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
+    command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
+    app_command_sender: Weak<flume::Sender<AppCommand>>,
     started_sender: flume::Sender<Arc<dyn ScreenCapturerControl>>,
 ) -> eros::Result<()>
 where
     Capturer: ScreenCapturer + From<State> + 'static,
 {
+    let state = Rc::new(RefCell::new(CaptureWorkerState::new(
+        initial_stream_id,
+        initial_frame_slot,
+    )));
+    let _exit_guard = CaptureWorkerExitGuard {
+        capture_source_id,
+        state: Rc::clone(&state),
+        app_command_sender,
+    };
     let screen_capturer_state = screen_capturer_state_constructor()?;
     let mut screen_capturer = Capturer::from(screen_capturer_state);
     let control = screen_capturer.control()?;
-    let control_shared = Arc::clone(&shared);
-    let frame_shared = Arc::clone(&shared);
+    let control_state = Rc::clone(&state);
+    let frame_state = Rc::clone(&state);
 
     screen_capturer.run(
-        shared.consumer_count(),
+        state.borrow().consumer_count(),
         move || {
             started_sender
                 .send(control)
                 .with_context(|| "Failed to report capture worker startup")?;
             Ok(())
         },
-        move || Ok(control_shared.capture_loop_action()),
-        move |frame| Ok(frame_shared.deliver_frame(frame)),
+        move || {
+            Ok(process_commands(
+                &command_receiver,
+                &mut control_state.borrow_mut(),
+            ))
+        },
+        move |frame| Ok(frame_state.borrow_mut().deliver_frame(frame)),
     )
 }
 
-impl<Frame> CaptureWorkerShared<Frame> {
+impl<Frame> CaptureWorkerState<Frame> {
     fn new(
         initial_stream_id: StreamId,
         initial_frame_slot: Arc<LatestFrameSlot<Frame>>,
     ) -> Self {
         Self {
-            state: Mutex::new(CaptureWorkerState {
-                frame_slots: HashMap::from([(initial_stream_id, initial_frame_slot)]),
-                shutdown_requested: false,
-            }),
+            frame_slots: HashMap::from([(initial_stream_id, initial_frame_slot)]),
         }
     }
 
     fn consumer_count(&self) -> usize {
-        self.state
-            .lock()
-            .expect("capture worker state mutex poisoned")
-            .frame_slots
-            .len()
-    }
-
-    fn add_stream(
-        &self,
-        stream_id: StreamId,
-        frame_slot: Arc<LatestFrameSlot<Frame>>,
-    ) -> eros::Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("capture worker state mutex poisoned");
-
-        if state.shutdown_requested {
-            eros::bail!("Capture worker is shutting down");
-        }
-
-        match state.frame_slots.entry(stream_id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(frame_slot);
-                Ok(())
-            }
-            std::collections::hash_map::Entry::Occupied(_) => {
-                eros::bail!("Stream already exists in capture worker")
-            }
-        }
-    }
-
-    fn remove_stream(&self, stream_id: StreamId) -> eros::Result<()> {
-        let removed = self
-            .state
-            .lock()
-            .expect("capture worker state mutex poisoned")
-            .frame_slots
-            .remove(&stream_id);
-
-        if removed.is_some() {
-            Ok(())
-        } else {
-            eros::bail!("Stream does not exist in capture worker")
-        }
-    }
-
-    fn request_shutdown(&self) {
-        self.state
-            .lock()
-            .expect("capture worker state mutex poisoned")
-            .shutdown_requested = true;
-    }
-
-    fn capture_loop_action(&self) -> CaptureLoopAction {
-        let state = self
-            .state
-            .lock()
-            .expect("capture worker state mutex poisoned");
-
-        if state.shutdown_requested {
-            CaptureLoopAction::Stop
-        } else {
-            CaptureLoopAction::Continue {
-                consumer_count: state.frame_slots.len(),
-            }
-        }
+        self.frame_slots.len()
     }
 
     fn close_frame_slots(&self) {
-        let frame_slots = self
-            .state
-            .lock()
-            .expect("capture worker state mutex poisoned")
-            .frame_slots
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-
-        for frame_slot in frame_slots {
+        for frame_slot in self.frame_slots.values() {
             frame_slot.close();
         }
     }
 }
 
-impl<Frame: Clone> CaptureWorkerShared<Frame> {
-    fn deliver_frame(&self, frame: Frame) -> CaptureLoopAction {
-        let mut state = self
-            .state
-            .lock()
-            .expect("capture worker state mutex poisoned");
-
-        state
-            .frame_slots
+impl<Frame: Clone> CaptureWorkerState<Frame> {
+    fn deliver_frame(&mut self, frame: Frame) -> CaptureLoopAction {
+        self.frame_slots
             .retain(|_, frame_slot| frame_slot.replace(frame.clone()));
 
-        if state.shutdown_requested {
-            CaptureLoopAction::Stop
-        } else {
-            CaptureLoopAction::Continue {
-                consumer_count: state.frame_slots.len(),
+        CaptureLoopAction::Continue {
+            consumer_count: self.frame_slots.len(),
+        }
+    }
+}
+
+fn process_commands<Frame>(
+    command_receiver: &flume::Receiver<CaptureCommand<Frame>>,
+    state: &mut CaptureWorkerState<Frame>,
+) -> CaptureLoopAction {
+    loop {
+        match command_receiver.try_recv() {
+            Ok(CaptureCommand::AddStream {
+                stream_id,
+                frame_slot,
+                response_sender,
+            }) => {
+                let result = match state.frame_slots.entry(stream_id) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(frame_slot);
+                        Ok(())
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        Err(eros::error!("Stream already exists in capture worker"))
+                    }
+                };
+                let _ = response_sender.send(result);
+            }
+            Ok(CaptureCommand::RemoveStream {
+                stream_id,
+                response_sender,
+            }) => {
+                let result = if state.frame_slots.remove(&stream_id).is_some() {
+                    Ok(())
+                } else {
+                    Err(eros::error!("Stream does not exist in capture worker"))
+                };
+                let _ = response_sender.send(result);
+            }
+            Ok(CaptureCommand::Shutdown) | Err(flume::TryRecvError::Disconnected) => {
+                return CaptureLoopAction::Stop;
+            }
+            Err(flume::TryRecvError::Empty) => {
+                return CaptureLoopAction::Continue {
+                    consumer_count: state.frame_slots.len(),
+                };
             }
         }
     }

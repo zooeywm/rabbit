@@ -27,6 +27,7 @@ impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
         if let Err(error) = self
             .capture_worker_handle
             .add_stream(stream_id, stream_pipeline_handle.frame_slot())
+            .await
         {
             let _ = stream_pipeline_handle.shutdown().await;
             return Err(error);
@@ -46,7 +47,7 @@ impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
 
         stream_pipeline_handle.close();
 
-        let remove_result = self.capture_worker_handle.remove_stream(stream_id);
+        let remove_result = self.capture_worker_handle.remove_stream(stream_id).await;
         let shutdown_result = stream_pipeline_handle.shutdown().await;
 
         remove_result?;
