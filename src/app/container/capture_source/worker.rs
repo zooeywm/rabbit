@@ -185,12 +185,12 @@ impl<Frame> CaptureWorkerHandle<Frame> {
 
 impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
     fn drop(&mut self) {
-        self.state.borrow().close_frame_slots();
         if let Some(app_command_sender) = self.app_command_sender.upgrade() {
             let _ = app_command_sender.send(AppCommand::CaptureWorkerExited {
                 capture_source_id: self.capture_source_id,
             });
         }
+        self.state.borrow().close_frame_slots();
     }
 }
 
