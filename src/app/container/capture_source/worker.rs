@@ -262,8 +262,16 @@ impl<Frame> CaptureWorkerState<Frame> {
 
 impl<Frame: Clone> CaptureWorkerState<Frame> {
     fn deliver_frame(&mut self, frame: Frame) -> CaptureLoopAction {
-        self.frame_slots
-            .retain(|_, frame_slot| frame_slot.replace(frame.clone()));
+        let mut frame_slot_iter = self.frame_slots.values().peekable();
+
+        while let Some(frame_slot) = frame_slot_iter.next() {
+            if frame_slot_iter.peek().is_some() {
+                frame_slot.replace(frame.clone());
+            } else {
+                frame_slot.replace(frame);
+                break;
+            }
+        }
 
         CaptureLoopAction::Continue {
             consumer_count: self.frame_slots.len(),
