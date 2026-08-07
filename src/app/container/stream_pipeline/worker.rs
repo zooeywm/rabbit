@@ -21,7 +21,10 @@ pub(crate) struct StreamPipelineWorkerHandle<Frame> {
 impl StreamPipelineWorker {
     pub(crate) fn spawn<Frame, CvtSt, EcdSt>(
         stream_id: StreamId,
-        create_pipeline_states: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)> + Send + 'static,
+        stream_pipeline_states_constructor: impl FnOnce()
+        -> eros::Result<(CvtSt, EcdSt)>
+        + Send
+        + 'static,
     ) -> eros::Result<StreamPipelineWorkerHandle<Frame>>
     where
         Frame: Send + 'static,
@@ -38,7 +41,11 @@ impl StreamPipelineWorker {
         let worker_thread = thread::Builder::new()
             .name(format!("stream-pipeline-{}", stream_id.value()))
             .spawn(move || {
-                run_stream_pipeline_worker(create_pipeline_states, worker_slot, started_sender)
+                run_stream_pipeline_worker(
+                    stream_pipeline_states_constructor,
+                    worker_slot,
+                    started_sender,
+                )
             })
             .with_context(|| "Failed to spawn stream pipeline worker thread")?;
 
@@ -81,7 +88,7 @@ impl<Frame> StreamPipelineWorkerHandle<Frame> {
 }
 
 fn run_stream_pipeline_worker<Frame, CvtSt, EcdSt>(
-    create_pipeline_states: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
+    stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
     slot: Arc<LatestFrameSlot<Frame>>,
     started_sender: SyncSender<()>,
 ) -> eros::Result<()>
@@ -91,7 +98,7 @@ where
             EncoderInput = <StreamPipelineContainer<CvtSt, EcdSt> as EncoderFrameConverter>::EncoderInput,
         >,
 {
-    let (converter_state, encoder_state) = create_pipeline_states()?;
+    let (converter_state, encoder_state) = stream_pipeline_states_constructor()?;
     let mut pipeline = StreamPipelineContainer::new(converter_state, encoder_state);
 
     started_sender

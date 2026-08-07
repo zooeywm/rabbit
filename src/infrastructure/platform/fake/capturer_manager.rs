@@ -17,7 +17,7 @@ impl FakeCapturerManagerState {
 impl<Deps> CapturerManager for FakeCapturerManagerImpl<Deps> {
     type State = FakeCapturerManagerState;
 
-    fn screen_capturer_state_factory(
+    fn compose_screen_capturer_state(
         &mut self,
         _capture_source_id: CaptureSourceId,
     ) -> impl FnOnce()

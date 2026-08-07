@@ -9,7 +9,7 @@ use eros::Context;
 use runtime::{AppActor, AppRuntime};
 
 pub(crate) fn run<App>(
-    create_app: impl FnOnce() -> eros::Result<App> + Send + 'static,
+    app_constructor: impl FnOnce() -> eros::Result<App> + Send + 'static,
 ) -> eros::Result<()>
 where
     App: AppActor + 'static,
@@ -20,7 +20,7 @@ where
     let config = Config::load(&project_dirs)?;
     let _logging_guard = logging::init(&project_dirs, &config.logging)?;
 
-    let app_handle = AppRuntime::start(create_app)?;
+    let app_handle = AppRuntime::start(app_constructor)?;
 
     tracing::trace!("rabbit started");
     tracing::debug!("rabbit started");

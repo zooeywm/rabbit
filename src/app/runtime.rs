@@ -25,7 +25,7 @@ pub(super) struct AppHandle {
 
 impl AppRuntime {
     pub(super) fn start<App>(
-        create_app: impl FnOnce() -> eros::Result<App> + Send + 'static,
+        app_constructor: impl FnOnce() -> eros::Result<App> + Send + 'static,
     ) -> eros::Result<AppHandle>
     where
         App: AppActor + 'static,
@@ -35,7 +35,7 @@ impl AppRuntime {
 
         let app_thread = thread::Builder::new()
             .name("app".to_owned())
-            .spawn(move || run_app_thread(create_app, command_receiver, started_sender))
+            .spawn(move || run_app_thread(app_constructor, command_receiver, started_sender))
             .with_context(|| "Failed to spawn app thread")?;
 
         if started_receiver.recv().is_err() {
@@ -68,7 +68,7 @@ impl AppHandle {
 }
 
 fn run_app_thread<App>(
-    create_app: impl FnOnce() -> eros::Result<App>,
+    app_constructor: impl FnOnce() -> eros::Result<App>,
     command_receiver: flume::Receiver<AppCommand>,
     started_sender: SyncSender<()>,
 ) -> eros::Result<()>
@@ -77,7 +77,7 @@ where
 {
     let runtime = compio::runtime::Runtime::new()
         .with_context(|| "Failed to create Compio runtime for app")?;
-    let app = create_app().with_context(|| "Failed to create app container")?;
+    let app = app_constructor().with_context(|| "Failed to create app container")?;
 
     started_sender
         .send(())

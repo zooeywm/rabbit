@@ -5,7 +5,7 @@ pub(crate) trait ConverterManagerStateSpec {
 pub(crate) trait ConverterManager {
     type State: ConverterManagerStateSpec;
 
-    fn encoder_frame_converter_state_factory(
+    fn compose_encoder_frame_converter_state(
         &mut self,
     ) -> impl FnOnce() -> eros::Result<
         <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,

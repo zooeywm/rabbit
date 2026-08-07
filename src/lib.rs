@@ -13,8 +13,8 @@ impl RabbitApp {
     }
 
     pub fn run(self) -> eros::Result<()> {
-        let create_app = composition::create_app();
+        let app_constructor = composition::compose_app();
 
-        app::run(create_app)
+        app::run(app_constructor)
     }
 }

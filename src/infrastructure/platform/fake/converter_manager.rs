@@ -16,7 +16,7 @@ impl FakeConverterManagerState {
 impl<Deps> ConverterManager for FakeConverterManagerImpl<Deps> {
     type State = FakeConverterManagerState;
 
-    fn encoder_frame_converter_state_factory(
+    fn compose_encoder_frame_converter_state(
         &mut self,
     ) -> impl FnOnce() -> eros::Result<
         <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,

@@ -9,7 +9,7 @@ pub(crate) trait CapturerManagerStateSpec {
 pub(crate) trait CapturerManager {
     type State: CapturerManagerStateSpec;
 
-    fn screen_capturer_state_factory(
+    fn compose_screen_capturer_state(
         &mut self,
         capture_source_id: CaptureSourceId,
     ) -> impl FnOnce()

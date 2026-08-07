@@ -11,7 +11,7 @@ cfg_if::cfg_if! {
     }
 }
 
-pub(super) fn create_app()
+pub(super) fn compose_app()
 -> impl FnOnce() -> eros::Result<selected_platform::PlatformApp> + Send + 'static {
-    selected_platform::create_app()
+    selected_platform::compose_app()
 }

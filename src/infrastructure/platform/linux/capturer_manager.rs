@@ -16,7 +16,7 @@ impl LinuxCapturerManagerState {
 impl<Deps> CapturerManager for LinuxCapturerManagerImpl<Deps> {
     type State = LinuxCapturerManagerState;
 
-    fn screen_capturer_state_factory(
+    fn compose_screen_capturer_state(
         &mut self,
         _capture_source_id: CaptureSourceId,
     ) -> impl FnOnce()

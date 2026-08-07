@@ -36,7 +36,7 @@ pub(crate) struct CaptureWorkerHandle<Frame> {
 
 impl CaptureWorker {
     pub(crate) async fn spawn<Capturer, State>(
-        create_state: impl FnOnce() -> eros::Result<State> + Send + 'static,
+        screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
         initial_stream_id: StreamId,
         initial_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     ) -> eros::Result<CaptureWorkerHandle<Capturer::CapturedFrame>>
@@ -50,7 +50,7 @@ impl CaptureWorker {
             .name("capture".to_owned())
             .spawn(move || {
                 run_capture_worker::<Capturer, State>(
-                    create_state,
+                    screen_capturer_state_constructor,
                     initial_stream_id,
                     initial_slot,
                     command_receiver,
@@ -133,7 +133,7 @@ impl<Frame> CaptureWorkerHandle<Frame> {
 }
 
 fn run_capture_worker<Capturer, State>(
-    create_state: impl FnOnce() -> eros::Result<State>,
+    screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State>,
     initial_stream_id: StreamId,
     initial_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
@@ -142,7 +142,7 @@ fn run_capture_worker<Capturer, State>(
 where
     Capturer: ScreenCapturer + From<State> + 'static,
 {
-    let state = create_state()?;
+    let state = screen_capturer_state_constructor()?;
     let mut capturer = Capturer::from(state);
     let mut slots = HashMap::from([(initial_stream_id, initial_slot)]);
 

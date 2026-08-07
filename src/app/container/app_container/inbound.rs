@@ -33,7 +33,7 @@ where
             >
             + 'static,
 {
-    fn stream_pipeline_state_factory(
+    fn compose_stream_pipeline_states(
         &mut self,
     ) -> impl FnOnce()
     -> eros::Result<(
@@ -42,10 +42,16 @@ where
     )>
     + Send
     + 'static {
-        let create_converter_state = self.encoder_frame_converter_state_factory();
-        let create_encoder_state = self.video_encoder_state_factory();
+        let encoder_frame_converter_state_constructor =
+            self.compose_encoder_frame_converter_state();
+        let video_encoder_state_constructor = self.compose_video_encoder_state();
 
-        move || Ok((create_converter_state()?, create_encoder_state()?))
+        move || {
+            Ok((
+                encoder_frame_converter_state_constructor()?,
+                video_encoder_state_constructor()?,
+            ))
+        }
     }
 
     pub(crate) async fn start_stream(
@@ -58,22 +64,22 @@ where
             .checked_add(1)
             .with_context(|| "Stream ID space is exhausted")?;
 
-        let create_screen_capturer_state = if self.capture_sources.contains_key(&capture_source_id)
-        {
-            None
-        } else {
-            Some(self.screen_capturer_state_factory(capture_source_id))
-        };
+        let screen_capturer_state_constructor =
+            if self.capture_sources.contains_key(&capture_source_id) {
+                None
+            } else {
+                Some(self.compose_screen_capturer_state(capture_source_id))
+            };
 
-        let create_pipeline_states = self.stream_pipeline_state_factory();
+        let stream_pipeline_states_constructor = self.compose_stream_pipeline_states();
         let stream_pipeline = StreamPipelineWorker::spawn::<CapturedFrameFor<CapMgrSt>, _, _>(
             stream_id,
-            create_pipeline_states,
+            stream_pipeline_states_constructor,
         )?;
 
-        if let Some(create_screen_capturer_state) = create_screen_capturer_state {
+        if let Some(screen_capturer_state_constructor) = screen_capturer_state_constructor {
             let capture_worker = match CaptureWorker::spawn::<CapMgrSt::ScreenCapturer, _>(
-                create_screen_capturer_state,
+                screen_capturer_state_constructor,
                 stream_id,
                 stream_pipeline.slot(),
             )

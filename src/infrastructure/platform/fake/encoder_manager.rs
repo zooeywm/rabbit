@@ -16,7 +16,7 @@ impl FakeEncoderManagerState {
 impl<Deps> EncoderManager for FakeEncoderManagerImpl<Deps> {
     type State = FakeEncoderManagerState;
 
-    fn video_encoder_state_factory(
+    fn compose_video_encoder_state(
         &mut self,
     ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
     + Send

@@ -57,7 +57,7 @@ where
 {
     type State = FakeCapturerManagerState;
 
-    fn screen_capturer_state_factory(
+    fn compose_screen_capturer_state(
         &mut self,
         capture_source_id: CaptureSourceId,
     ) -> impl FnOnce()
@@ -65,7 +65,7 @@ where
     + Send
     + 'static
     + use<CvtMgrSt, EcdMgrSt> {
-        CapturerManager::screen_capturer_state_factory(
+        CapturerManager::compose_screen_capturer_state(
             FakeCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
         )
@@ -134,7 +134,7 @@ where
 {
     type State = FakeConverterManagerState;
 
-    fn encoder_frame_converter_state_factory(
+    fn compose_encoder_frame_converter_state(
         &mut self,
     ) -> impl FnOnce() -> eros::Result<
         <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
@@ -142,7 +142,7 @@ where
     + Send
     + 'static
     + use<CapMgrSt, EcdMgrSt> {
-        ConverterManager::encoder_frame_converter_state_factory(
+        ConverterManager::compose_encoder_frame_converter_state(
             FakeConverterManagerImpl::inj_ref_mut(self),
         )
     }
@@ -209,13 +209,13 @@ where
 {
     type State = FakeEncoderManagerState;
 
-    fn video_encoder_state_factory(
+    fn compose_video_encoder_state(
         &mut self,
     ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
     + Send
     + 'static
     + use<CapMgrSt, CvtMgrSt> {
-        EncoderManager::video_encoder_state_factory(FakeEncoderManagerImpl::inj_ref_mut(self))
+        EncoderManager::compose_video_encoder_state(FakeEncoderManagerImpl::inj_ref_mut(self))
     }
 }
 
@@ -246,7 +246,7 @@ impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, FakeVideoEncoderStat
 pub(super) type PlatformApp =
     AppContainer<FakeCapturerManagerState, FakeConverterManagerState, FakeEncoderManagerState>;
 
-pub(super) fn create_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
+pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
     || {
         Ok(AppContainer::new(
             FakeCapturerManagerState::new()?,
