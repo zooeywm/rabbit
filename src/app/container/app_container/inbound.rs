@@ -1,7 +1,7 @@
 use eros::Context;
 
 use crate::{
-    app::runtime::{AppActor, AppCommand},
+    app::runtime::{AppActor, AppMessage},
     app::container::app_container::outbound_port::{
         CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
         EncoderManager, EncoderManagerStateSpec,
@@ -58,7 +58,7 @@ where
     pub(crate) async fn start_stream(
         &mut self,
         capture_source_id: CaptureSourceId,
-        app_command_sender: &std::sync::Weak<flume::Sender<AppCommand>>,
+        app_message_sender: &std::sync::Weak<flume::Sender<AppMessage>>,
     ) -> eros::Result<StreamId> {
         let stream_id = StreamId::new(self.next_stream_id);
         let next_stream_id = self
@@ -78,7 +78,7 @@ where
             capture_source_id,
             stream_id,
             stream_pipeline_states_constructor,
-            app_command_sender.clone(),
+            app_message_sender.clone(),
         )
         .await?;
 
@@ -88,7 +88,7 @@ where
                 screen_capturer_state_constructor,
                 stream_id,
                 stream_pipeline_handle.frame_slot(),
-                app_command_sender.clone(),
+                app_message_sender.clone(),
             )
             .await
             {
@@ -206,27 +206,27 @@ where
 {
     async fn run(
         mut self,
-        app_command_sender: std::sync::Weak<flume::Sender<AppCommand>>,
-        command_receiver: flume::Receiver<AppCommand>,
+        app_message_sender: std::sync::Weak<flume::Sender<AppMessage>>,
+        message_receiver: flume::Receiver<AppMessage>,
     ) -> eros::Result<()> {
         loop {
-            match command_receiver.recv_async().await {
-                Ok(AppCommand::StartStream {
+            match message_receiver.recv_async().await {
+                Ok(AppMessage::StartStream {
                     capture_source_id,
                     response_sender,
                 }) => {
                     let _ = response_sender.send(
-                        self.start_stream(capture_source_id, &app_command_sender)
+                        self.start_stream(capture_source_id, &app_message_sender)
                             .await,
                     );
                 }
-                Ok(AppCommand::RemoveStream {
+                Ok(AppMessage::RemoveStream {
                     stream_id,
                     response_sender,
                 }) => {
                     let _ = response_sender.send(self.remove_stream(stream_id).await);
                 }
-                Ok(AppCommand::CaptureWorkerExited { capture_source_id }) => {
+                Ok(AppMessage::CaptureWorkerExited { capture_source_id }) => {
                     let Some(capture_source) = self.capture_sources.remove(&capture_source_id)
                     else {
                         continue;
@@ -241,7 +241,7 @@ where
                     let _ = self.shutdown().await;
                     return Err(failure);
                 }
-                Ok(AppCommand::StreamPipelineWorkerExited {
+                Ok(AppMessage::StreamPipelineWorkerExited {
                     capture_source_id,
                     stream_id,
                 }) => {
@@ -265,7 +265,7 @@ where
                     let _ = self.shutdown().await;
                     return Err(failure);
                 }
-                Ok(AppCommand::Shutdown) | Err(_) => break,
+                Ok(AppMessage::Shutdown) | Err(_) => break,
             }
         }
 

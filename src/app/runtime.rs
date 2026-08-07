@@ -11,7 +11,7 @@ use eros::Context;
 
 use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
 
-pub(crate) enum AppCommand {
+pub(crate) enum AppMessage {
     StartStream {
         capture_source_id: CaptureSourceId,
         response_sender: flume::Sender<eros::Result<StreamId>>,
@@ -33,15 +33,15 @@ pub(crate) enum AppCommand {
 pub(crate) trait AppActor {
     fn run(
         self,
-        command_sender: Weak<flume::Sender<AppCommand>>,
-        command_receiver: flume::Receiver<AppCommand>,
+        message_sender: Weak<flume::Sender<AppMessage>>,
+        message_receiver: flume::Receiver<AppMessage>,
     ) -> impl Future<Output = eros::Result<()>>;
 }
 
 pub(super) struct AppRuntime;
 
 pub(crate) struct AppHandle {
-    command_sender: Arc<flume::Sender<AppCommand>>,
+    message_sender: Arc<flume::Sender<AppMessage>>,
     app_thread: JoinHandle<eros::Result<()>>,
 }
 
@@ -52,18 +52,18 @@ impl AppRuntime {
     where
         App: AppActor + 'static,
     {
-        let (command_sender, command_receiver) = flume::unbounded();
-        let command_sender = Arc::new(command_sender);
+        let (message_sender, message_receiver) = flume::unbounded();
+        let message_sender = Arc::new(message_sender);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
-        let actor_command_sender = Arc::downgrade(&command_sender);
+        let actor_message_sender = Arc::downgrade(&message_sender);
 
         let app_thread = thread::Builder::new()
             .name("app".to_owned())
             .spawn(move || {
                 run_app_thread(
                     app_constructor,
-                    actor_command_sender,
-                    command_receiver,
+                    actor_message_sender,
+                    message_receiver,
                     started_sender,
                 )
             })
@@ -75,7 +75,7 @@ impl AppRuntime {
         }
 
         Ok(AppHandle {
-            command_sender,
+            message_sender,
             app_thread,
         })
     }
@@ -88,8 +88,8 @@ impl AppHandle {
     ) -> eros::Result<StreamId> {
         let (response_sender, response_receiver) = flume::bounded(1);
 
-        self.command_sender
-            .send(AppCommand::StartStream {
+        self.message_sender
+            .send(AppMessage::StartStream {
                 capture_source_id,
                 response_sender,
             })
@@ -104,8 +104,8 @@ impl AppHandle {
     pub(crate) async fn remove_stream(&self, stream_id: StreamId) -> eros::Result<()> {
         let (response_sender, response_receiver) = flume::bounded(1);
 
-        self.command_sender
-            .send(AppCommand::RemoveStream {
+        self.message_sender
+            .send(AppMessage::RemoveStream {
                 stream_id,
                 response_sender,
             })
@@ -119,11 +119,11 @@ impl AppHandle {
 
     pub(super) fn shutdown(self) -> eros::Result<()> {
         let Self {
-            command_sender,
+            message_sender,
             app_thread,
         } = self;
 
-        let send_result = command_sender.send(AppCommand::Shutdown);
+        let send_result = message_sender.send(AppMessage::Shutdown);
 
         join_app_thread(app_thread)?;
 
@@ -135,8 +135,8 @@ impl AppHandle {
 
 fn run_app_thread<App>(
     app_constructor: impl FnOnce() -> eros::Result<App>,
-    command_sender: Weak<flume::Sender<AppCommand>>,
-    command_receiver: flume::Receiver<AppCommand>,
+    message_sender: Weak<flume::Sender<AppMessage>>,
+    message_receiver: flume::Receiver<AppMessage>,
     started_sender: SyncSender<()>,
 ) -> eros::Result<()>
 where
@@ -152,7 +152,7 @@ where
         .send(())
         .with_context(|| "Failed to report app startup")?;
 
-    runtime.block_on(app.run(command_sender, command_receiver))
+    runtime.block_on(app.run(message_sender, message_receiver))
 }
 
 fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {
@@ -181,11 +181,11 @@ mod tests {
     impl AppActor for NonSendApp {
         async fn run(
             self,
-            _command_sender: Weak<flume::Sender<AppCommand>>,
-            command_receiver: flume::Receiver<AppCommand>,
+            _message_sender: Weak<flume::Sender<AppMessage>>,
+            message_receiver: flume::Receiver<AppMessage>,
         ) -> eros::Result<()> {
-            match command_receiver.recv_async().await {
-                Ok(AppCommand::Shutdown) | Err(_) => Ok(()),
+            match message_receiver.recv_async().await {
+                Ok(AppMessage::Shutdown) | Err(_) => Ok(()),
                 Ok(_) => eros::bail!("NonSendApp received an unexpected command"),
             }
         }

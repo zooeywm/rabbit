@@ -15,7 +15,7 @@ use crate::{
             CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
         },
     },
-    app::runtime::AppCommand,
+    app::runtime::AppMessage,
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
@@ -39,7 +39,7 @@ enum CaptureCommand<Frame> {
 struct CaptureWorkerExitGuard<Frame> {
     capture_source_id: CaptureSourceId,
     state: Rc<RefCell<CaptureWorkerState<Frame>>>,
-    app_command_sender: Weak<flume::Sender<AppCommand>>,
+    app_message_sender: Weak<flume::Sender<AppMessage>>,
 }
 
 pub(crate) struct CaptureWorker;
@@ -56,7 +56,7 @@ impl CaptureWorker {
         screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
         initial_stream_id: StreamId,
         initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
-        app_command_sender: Weak<flume::Sender<AppCommand>>,
+        app_message_sender: Weak<flume::Sender<AppMessage>>,
     ) -> eros::Result<CaptureWorkerHandle<Capturer::CapturedFrame>>
     where
         Capturer: ScreenCapturer + From<State> + 'static,
@@ -73,7 +73,7 @@ impl CaptureWorker {
                     initial_stream_id,
                     initial_frame_slot,
                     command_receiver,
-                    app_command_sender,
+                    app_message_sender,
                     started_sender,
                 )
             })
@@ -185,8 +185,8 @@ impl<Frame> CaptureWorkerHandle<Frame> {
 
 impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
     fn drop(&mut self) {
-        if let Some(app_command_sender) = self.app_command_sender.upgrade() {
-            let _ = app_command_sender.send(AppCommand::CaptureWorkerExited {
+        if let Some(app_message_sender) = self.app_message_sender.upgrade() {
+            let _ = app_message_sender.send(AppMessage::CaptureWorkerExited {
                 capture_source_id: self.capture_source_id,
             });
         }
@@ -200,7 +200,7 @@ fn run_capture_worker<Capturer, State>(
     initial_stream_id: StreamId,
     initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
-    app_command_sender: Weak<flume::Sender<AppCommand>>,
+    app_message_sender: Weak<flume::Sender<AppMessage>>,
     started_sender: flume::Sender<Arc<dyn ScreenCapturerControl>>,
 ) -> eros::Result<()>
 where
@@ -213,7 +213,7 @@ where
     let _exit_guard = CaptureWorkerExitGuard {
         capture_source_id,
         state: Rc::clone(&state),
-        app_command_sender,
+        app_message_sender,
     };
     let screen_capturer_state = screen_capturer_state_constructor()?;
     let mut screen_capturer = Capturer::from(screen_capturer_state);
@@ -416,8 +416,8 @@ mod tests {
             let caller_thread_id = thread::current().id();
             let created_on_worker = Arc::new(AtomicBool::new(false));
             let worker_flag = Arc::clone(&created_on_worker);
-            let (app_command_sender, app_command_receiver) = flume::unbounded();
-            let app_command_sender = Arc::new(app_command_sender);
+            let (app_message_sender, app_message_receiver) = flume::unbounded();
+            let app_message_sender = Arc::new(app_message_sender);
             let frame_slot = Arc::new(LatestFrameSlot::new());
 
             let worker = CaptureWorker::spawn::<TestCapturer, _>(
@@ -431,7 +431,7 @@ mod tests {
                 },
                 StreamId::new(0),
                 Arc::clone(&frame_slot),
-                Arc::downgrade(&app_command_sender),
+                Arc::downgrade(&app_message_sender),
             )
             .await
             .expect("worker should start with a non-Send capturer state");
@@ -442,8 +442,8 @@ mod tests {
 
             assert!(frame_slot.blocking_take().is_none());
             assert!(matches!(
-                app_command_receiver.recv(),
-                Ok(AppCommand::CaptureWorkerExited { capture_source_id })
+                app_message_receiver.recv(),
+                Ok(AppMessage::CaptureWorkerExited { capture_source_id })
                     if capture_source_id == CaptureSourceId::new(0)
             ));
         });

@@ -10,7 +10,7 @@ use crate::app::{
         LatestFrameSlot, StreamPipelineContainer,
         outbound_port::{EncoderFrameConverter, VideoEncoder},
     },
-    runtime::AppCommand,
+    runtime::AppMessage,
 };
 use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
 
@@ -25,7 +25,7 @@ struct StreamPipelineWorkerExitGuard<Frame> {
     capture_source_id: CaptureSourceId,
     stream_id: StreamId,
     frame_slot: Arc<LatestFrameSlot<Frame>>,
-    app_command_sender: Weak<flume::Sender<AppCommand>>,
+    app_message_sender: Weak<flume::Sender<AppMessage>>,
 }
 
 impl StreamPipelineWorker {
@@ -36,7 +36,7 @@ impl StreamPipelineWorker {
         -> eros::Result<(CvtSt, EcdSt)>
         + Send
         + 'static,
-        app_command_sender: Weak<flume::Sender<AppCommand>>,
+        app_message_sender: Weak<flume::Sender<AppMessage>>,
     ) -> eros::Result<StreamPipelineWorkerHandle<Frame>>
     where
         Frame: Send + 'static,
@@ -58,7 +58,7 @@ impl StreamPipelineWorker {
                     capture_source_id,
                     stream_id,
                     frame_slot: exit_frame_slot,
-                    app_command_sender,
+                    app_message_sender,
                 };
 
                 run_stream_pipeline_worker(
@@ -84,8 +84,8 @@ impl StreamPipelineWorker {
 impl<Frame> Drop for StreamPipelineWorkerExitGuard<Frame> {
     fn drop(&mut self) {
         self.frame_slot.close();
-        if let Some(app_command_sender) = self.app_command_sender.upgrade() {
-            let _ = app_command_sender.send(AppCommand::StreamPipelineWorkerExited {
+        if let Some(app_message_sender) = self.app_message_sender.upgrade() {
+            let _ = app_message_sender.send(AppMessage::StreamPipelineWorkerExited {
                 capture_source_id: self.capture_source_id,
                 stream_id: self.stream_id,
             });
@@ -204,8 +204,8 @@ mod tests {
             let caller_thread_id = thread::current().id();
             let created_on_worker = Arc::new(AtomicBool::new(false));
             let worker_flag = Arc::clone(&created_on_worker);
-            let (app_command_sender, app_command_receiver) = flume::unbounded();
-            let app_command_sender = Arc::new(app_command_sender);
+            let (app_message_sender, app_message_receiver) = flume::unbounded();
+            let app_message_sender = Arc::new(app_message_sender);
 
             let worker = StreamPipelineWorker::spawn::<(), _, _>(
                 CaptureSourceId::new(0),
@@ -220,7 +220,7 @@ mod tests {
                         NonSendEncoderState::default(),
                     ))
                 },
-                Arc::downgrade(&app_command_sender),
+                Arc::downgrade(&app_message_sender),
             )
             .await
             .expect("worker should start with non-Send pipeline states");
@@ -231,8 +231,8 @@ mod tests {
             join_stream_pipeline_worker(worker.worker_thread).expect("worker should stop cleanly");
 
             assert!(matches!(
-                app_command_receiver.recv(),
-                Ok(AppCommand::StreamPipelineWorkerExited {
+                app_message_receiver.recv(),
+                Ok(AppMessage::StreamPipelineWorkerExited {
                     capture_source_id,
                     stream_id,
                 }) if capture_source_id == CaptureSourceId::new(0)
