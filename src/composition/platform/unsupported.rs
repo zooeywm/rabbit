@@ -1,16 +1,13 @@
 use std::convert::Infallible;
 
 use crate::{
-    app::{
-        self,
-        container::{
-            RootContainer, ScreenCapturerContainer, StreamPipelineContainer,
-            capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
-            root::outbound_port::{
-                CapturerManager, CapturerManagerStateSpec, ConverterManager,
-                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-            },
+    app::container::{
+        AppContainer, ScreenCapturerContainer, StreamPipelineContainer,
+        app_container::outbound_port::{
+            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec,
         },
+        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
     },
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
@@ -28,7 +25,7 @@ impl CapturerManagerStateSpec for UnsupportedCapturerManagerState {
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsRef<UnsupportedCapturerManagerState>
-    for RootContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -39,7 +36,7 @@ where
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsMut<UnsupportedCapturerManagerState>
-    for RootContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -50,7 +47,7 @@ where
 }
 
 impl<CvtMgrSt, EcdMgrSt> CapturerManager
-    for RootContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -99,7 +96,7 @@ impl ConverterManagerStateSpec for UnsupportedConverterManagerState {
 }
 
 impl<CapMgrSt, EcdMgrSt> AsRef<UnsupportedConverterManagerState>
-    for RootContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -110,7 +107,7 @@ where
 }
 
 impl<CapMgrSt, EcdMgrSt> AsMut<UnsupportedConverterManagerState>
-    for RootContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -121,7 +118,7 @@ where
 }
 
 impl<CapMgrSt, EcdMgrSt> ConverterManager
-    for RootContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -163,7 +160,7 @@ impl EncoderManagerStateSpec for UnsupportedEncoderManagerState {
 }
 
 impl<CapMgrSt, CvtMgrSt> AsRef<UnsupportedEncoderManagerState>
-    for RootContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -174,7 +171,7 @@ where
 }
 
 impl<CapMgrSt, CvtMgrSt> AsMut<UnsupportedEncoderManagerState>
-    for RootContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -185,7 +182,7 @@ where
 }
 
 impl<CapMgrSt, CvtMgrSt> EncoderManager
-    for RootContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -220,12 +217,18 @@ impl<CvtSt> AsMut<UnsupportedVideoEncoderState>
     }
 }
 
-pub(super) fn run() -> eros::Result<()> {
-    app::run(|| {
-        Ok(RootContainer::new(
+pub(super) type PlatformApp = AppContainer<
+    UnsupportedCapturerManagerState,
+    UnsupportedConverterManagerState,
+    UnsupportedEncoderManagerState,
+>;
+
+pub(super) fn create_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
+    || {
+        Ok(AppContainer::new(
             UnsupportedCapturerManagerState::new()?,
             UnsupportedConverterManagerState::new()?,
             UnsupportedEncoderManagerState::new()?,
         ))
-    })
+    }
 }

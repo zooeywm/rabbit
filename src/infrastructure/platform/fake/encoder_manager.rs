@@ -1,5 +1,5 @@
 use crate::{
-    app::container::root::outbound_port::{EncoderManager, EncoderManagerStateSpec},
+    app::container::app_container::outbound_port::{EncoderManager, EncoderManagerStateSpec},
     infrastructure::fake::encoder::FakeVideoEncoderState,
 };
 

@@ -1,3 +1,3 @@
 fn main() -> eros::Result<()> {
-    rabbit::run()
+    rabbit::RabbitApp::new().run()
 }

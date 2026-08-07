@@ -1,18 +1,18 @@
 mod config;
 pub(crate) mod container;
 mod logging;
-mod root_runtime;
+mod runtime;
 
 use config::Config;
 use directories::ProjectDirs;
 use eros::Context;
-use root_runtime::{RootActor, RootHandle};
+use runtime::{AppActor, AppRuntime};
 
-pub(crate) fn run<Root>(
-    create_root: impl FnOnce() -> eros::Result<Root> + Send + 'static,
+pub(crate) fn run<App>(
+    create_app: impl FnOnce() -> eros::Result<App> + Send + 'static,
 ) -> eros::Result<()>
 where
-    Root: RootActor + 'static,
+    App: AppActor + 'static,
 {
     let project_dirs = ProjectDirs::from("", "", "rabbit")
         .with_context(|| "Failed looking for app project dir")?;
@@ -20,7 +20,7 @@ where
     let config = Config::load(&project_dirs)?;
     let _logging_guard = logging::init(&project_dirs, &config.logging)?;
 
-    let root_handle = RootHandle::start(create_root)?;
+    let app_handle = AppRuntime::start(create_app)?;
 
     tracing::trace!("rabbit started");
     tracing::debug!("rabbit started");
@@ -28,5 +28,5 @@ where
     tracing::warn!("rabbit started");
     tracing::error!("rabbit started");
 
-    root_handle.shutdown()
+    app_handle.shutdown()
 }

@@ -1,5 +1,5 @@
 use crate::{
-    app::container::root::outbound_port::{ConverterManager, ConverterManagerStateSpec},
+    app::container::app_container::outbound_port::{ConverterManager, ConverterManagerStateSpec},
     infrastructure::fake::converter::FakeEncoderFrameConverterState,
 };
 

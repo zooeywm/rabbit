@@ -4,6 +4,17 @@ mod domain;
 mod infrastructure;
 mod presentation;
 
-pub fn run() -> eros::Result<()> {
-    composition::run()
+#[derive(Default)]
+pub struct RabbitApp;
+
+impl RabbitApp {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn run(self) -> eros::Result<()> {
+        let create_app = composition::create_app();
+
+        app::run(create_app)
+    }
 }

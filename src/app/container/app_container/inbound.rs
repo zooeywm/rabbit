@@ -1,13 +1,13 @@
 use eros::Context;
 
 use crate::{
-    app::container::root::outbound_port::{
+    app::container::app_container::outbound_port::{
         CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
         EncoderManager, EncoderManagerStateSpec,
     },
     app::container::{
         CaptureSourceContainer, CaptureWorker, StreamPipelineContainer, StreamPipelineWorker,
-        root::{CapturedFrameFor, RootContainer},
+        app_container::{AppContainer, CapturedFrameFor},
         stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
@@ -18,7 +18,7 @@ type StreamPipelineFor<CvtMgrSt, EcdMgrSt> = StreamPipelineContainer<
     <EcdMgrSt as EncoderManagerStateSpec>::VideoEncoderState,
 >;
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,

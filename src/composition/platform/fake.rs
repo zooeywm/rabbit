@@ -1,11 +1,11 @@
 use crate::{
     app::container::{
-        RootContainer, ScreenCapturerContainer, StreamPipelineContainer,
-        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
-        root::outbound_port::{
+        AppContainer, ScreenCapturerContainer, StreamPipelineContainer,
+        app_container::outbound_port::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
             EncoderManager, EncoderManagerStateSpec,
         },
+        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
         stream_pipeline::{
             EncodedVideoFrame,
             outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -28,7 +28,7 @@ impl CapturerManagerStateSpec for FakeCapturerManagerState {
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsRef<FakeCapturerManagerState>
-    for RootContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -39,7 +39,7 @@ where
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsMut<FakeCapturerManagerState>
-    for RootContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -50,7 +50,7 @@ where
 }
 
 impl<CvtMgrSt, EcdMgrSt> CapturerManager
-    for RootContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -105,7 +105,7 @@ impl ConverterManagerStateSpec for FakeConverterManagerState {
 }
 
 impl<CapMgrSt, EcdMgrSt> AsRef<FakeConverterManagerState>
-    for RootContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -116,7 +116,7 @@ where
 }
 
 impl<CapMgrSt, EcdMgrSt> AsMut<FakeConverterManagerState>
-    for RootContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -127,7 +127,7 @@ where
 }
 
 impl<CapMgrSt, EcdMgrSt> ConverterManager
-    for RootContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -180,7 +180,7 @@ impl EncoderManagerStateSpec for FakeEncoderManagerState {
 }
 
 impl<CapMgrSt, CvtMgrSt> AsRef<FakeEncoderManagerState>
-    for RootContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -191,7 +191,7 @@ where
 }
 
 impl<CapMgrSt, CvtMgrSt> AsMut<FakeEncoderManagerState>
-    for RootContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -202,7 +202,7 @@ where
 }
 
 impl<CapMgrSt, CvtMgrSt> EncoderManager
-    for RootContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -243,12 +243,15 @@ impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, FakeVideoEncoderStat
     }
 }
 
-pub(super) fn run() -> eros::Result<()> {
-    crate::app::run(|| {
-        Ok(RootContainer::new(
+pub(super) type PlatformApp =
+    AppContainer<FakeCapturerManagerState, FakeConverterManagerState, FakeEncoderManagerState>;
+
+pub(super) fn create_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
+    || {
+        Ok(AppContainer::new(
             FakeCapturerManagerState::new()?,
             FakeConverterManagerState::new()?,
             FakeEncoderManagerState::new()?,
         ))
-    })
+    }
 }

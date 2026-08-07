@@ -11,6 +11,7 @@ cfg_if::cfg_if! {
     }
 }
 
-pub(crate) fn run() -> eros::Result<()> {
-    selected_platform::run()
+pub(super) fn create_app()
+-> impl FnOnce() -> eros::Result<selected_platform::PlatformApp> + Send + 'static {
+    selected_platform::create_app()
 }

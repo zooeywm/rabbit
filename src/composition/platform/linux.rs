@@ -1,16 +1,13 @@
 use std::convert::Infallible;
 
 use crate::{
-    app::{
-        self,
-        container::{
-            RootContainer, ScreenCapturerContainer, StreamPipelineContainer,
-            capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
-            root::outbound_port::{
-                CapturerManager, CapturerManagerStateSpec, ConverterManager,
-                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-            },
+    app::container::{
+        AppContainer, ScreenCapturerContainer, StreamPipelineContainer,
+        app_container::outbound_port::{
+            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec,
         },
+        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
     },
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
@@ -27,7 +24,7 @@ impl CapturerManagerStateSpec for LinuxCapturerManagerState {
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsRef<LinuxCapturerManagerState>
-    for RootContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -38,7 +35,7 @@ where
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsMut<LinuxCapturerManagerState>
-    for RootContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -49,7 +46,7 @@ where
 }
 
 impl<CvtMgrSt, EcdMgrSt> CapturerManager
-    for RootContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
+    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
 where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -98,7 +95,7 @@ impl ConverterManagerStateSpec for LinuxConverterManagerState {
 }
 
 impl<CapMgrSt, EcdMgrSt> AsRef<LinuxConverterManagerState>
-    for RootContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -109,7 +106,7 @@ where
 }
 
 impl<CapMgrSt, EcdMgrSt> AsMut<LinuxConverterManagerState>
-    for RootContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -120,7 +117,7 @@ where
 }
 
 impl<CapMgrSt, EcdMgrSt> ConverterManager
-    for RootContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
+    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
@@ -162,7 +159,7 @@ impl EncoderManagerStateSpec for LinuxEncoderManagerState {
 }
 
 impl<CapMgrSt, CvtMgrSt> AsRef<LinuxEncoderManagerState>
-    for RootContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -173,7 +170,7 @@ where
 }
 
 impl<CapMgrSt, CvtMgrSt> AsMut<LinuxEncoderManagerState>
-    for RootContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -184,7 +181,7 @@ where
 }
 
 impl<CapMgrSt, CvtMgrSt> EncoderManager
-    for RootContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -217,12 +214,15 @@ impl<CvtSt> AsMut<LinuxVideoEncoderState>
     }
 }
 
-pub(super) fn run() -> eros::Result<()> {
-    app::run(|| {
-        Ok(RootContainer::new(
+pub(super) type PlatformApp =
+    AppContainer<LinuxCapturerManagerState, LinuxConverterManagerState, LinuxEncoderManagerState>;
+
+pub(super) fn create_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
+    || {
+        Ok(AppContainer::new(
             LinuxCapturerManagerState::new()?,
             LinuxConverterManagerState::new()?,
             LinuxEncoderManagerState::new()?,
         ))
-    })
+    }
 }

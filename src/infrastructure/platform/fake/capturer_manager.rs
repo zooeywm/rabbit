@@ -1,5 +1,5 @@
 use crate::{
-    app::container::root::outbound_port::{CapturerManager, CapturerManagerStateSpec},
+    app::container::app_container::outbound_port::{CapturerManager, CapturerManagerStateSpec},
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::FakeScreenCapturerState,
 };

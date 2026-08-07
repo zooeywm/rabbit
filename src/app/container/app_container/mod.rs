@@ -4,7 +4,7 @@ pub(crate) mod outbound_port;
 
 use std::collections::HashMap;
 
-use crate::app::root_runtime::RootActor;
+use crate::app::runtime::AppActor;
 use crate::{app::container::CaptureSourceContainer, domain::stream::models::vo::CaptureSourceId};
 
 use self::outbound_port::{
@@ -17,7 +17,7 @@ type CapturedFrameFor<CapMgrSt> =
 
 type CaptureSourceFor<CapMgrSt> = CaptureSourceContainer<CapturedFrameFor<CapMgrSt>>;
 
-pub(crate) struct RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+pub(crate) struct AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -34,7 +34,7 @@ where
     next_stream_id: u16,
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -79,7 +79,7 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> RootActor for RootContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppActor for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
