@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     thread::{self, JoinHandle},
 };
 
@@ -13,7 +13,8 @@ use crate::{
             CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
         },
     },
-    domain::stream::models::vo::StreamId,
+    app::runtime::AppCommand,
+    domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
 struct CaptureWorkerState<Frame> {
@@ -23,6 +24,12 @@ struct CaptureWorkerState<Frame> {
 
 struct CaptureWorkerShared<Frame> {
     state: Mutex<CaptureWorkerState<Frame>>,
+}
+
+struct CaptureWorkerExitGuard<Frame> {
+    capture_source_id: CaptureSourceId,
+    shared: Arc<CaptureWorkerShared<Frame>>,
+    app_command_sender: Weak<flume::Sender<AppCommand>>,
 }
 
 pub(crate) struct CaptureWorker;
@@ -35,20 +42,29 @@ pub(crate) struct CaptureWorkerHandle<Frame> {
 
 impl CaptureWorker {
     pub(crate) async fn spawn<Capturer, State>(
+        capture_source_id: CaptureSourceId,
         screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
         initial_stream_id: StreamId,
         initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
+        app_command_sender: Weak<flume::Sender<AppCommand>>,
     ) -> eros::Result<CaptureWorkerHandle<Capturer::CapturedFrame>>
     where
         Capturer: ScreenCapturer + From<State> + 'static,
     {
         let shared = Arc::new(CaptureWorkerShared::new(initial_stream_id, initial_frame_slot));
         let worker_shared = Arc::clone(&shared);
+        let exit_shared = Arc::clone(&shared);
         let (started_sender, started_receiver) = flume::bounded(1);
 
         let worker_thread = thread::Builder::new()
             .name("capture".to_owned())
             .spawn(move || {
+                let _exit_guard = CaptureWorkerExitGuard {
+                    capture_source_id,
+                    shared: exit_shared,
+                    app_command_sender,
+                };
+
                 run_capture_worker::<Capturer, State>(
                     screen_capturer_state_constructor,
                     worker_shared,
@@ -115,6 +131,24 @@ impl<Frame> CaptureWorkerHandle<Frame> {
 
         join_result?;
         wake_result
+    }
+
+    pub(crate) async fn join(self) -> eros::Result<()> {
+        match compio::runtime::spawn_blocking(move || join_capture_worker(self.worker_thread)).await {
+            Ok(result) => result,
+            Err(_) => eros::bail!("Capture worker join task failed"),
+        }
+    }
+}
+
+impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
+    fn drop(&mut self) {
+        self.shared.close_frame_slots();
+        if let Some(app_command_sender) = self.app_command_sender.upgrade() {
+            let _ = app_command_sender.send(AppCommand::CaptureWorkerExited {
+                capture_source_id: self.capture_source_id,
+            });
+        }
     }
 }
 
@@ -225,6 +259,21 @@ impl<Frame> CaptureWorkerShared<Frame> {
             CaptureLoopAction::Continue {
                 consumer_count: state.frame_slots.len(),
             }
+        }
+    }
+
+    fn close_frame_slots(&self) {
+        let frame_slots = self
+            .state
+            .lock()
+            .expect("capture worker state mutex poisoned")
+            .frame_slots
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for frame_slot in frame_slots {
+            frame_slot.close();
         }
     }
 }
@@ -350,8 +399,12 @@ mod tests {
             let caller_thread_id = thread::current().id();
             let created_on_worker = Arc::new(AtomicBool::new(false));
             let worker_flag = Arc::clone(&created_on_worker);
+            let (app_command_sender, app_command_receiver) = flume::unbounded();
+            let app_command_sender = Arc::new(app_command_sender);
+            let frame_slot = Arc::new(LatestFrameSlot::new());
 
             let worker = CaptureWorker::spawn::<TestCapturer, _>(
+                CaptureSourceId::new(0),
                 move || {
                     worker_flag.store(
                         thread::current().id() != caller_thread_id,
@@ -360,7 +413,8 @@ mod tests {
                     Ok(NonSendCapturerState::default())
                 },
                 StreamId::new(0),
-                Arc::new(LatestFrameSlot::new()),
+                Arc::clone(&frame_slot),
+                Arc::downgrade(&app_command_sender),
             )
             .await
             .expect("worker should start with a non-Send capturer state");
@@ -368,6 +422,13 @@ mod tests {
             assert!(created_on_worker.load(Ordering::Relaxed));
 
             worker.shutdown().await.expect("worker should stop cleanly");
+
+            assert!(frame_slot.blocking_take().is_none());
+            assert!(matches!(
+                app_command_receiver.recv(),
+                Ok(AppCommand::CaptureWorkerExited { capture_source_id })
+                    if capture_source_id == CaptureSourceId::new(0)
+            ));
         });
     }
 }

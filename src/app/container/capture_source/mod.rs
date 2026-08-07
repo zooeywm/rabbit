@@ -56,4 +56,30 @@ impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
             None => Ok(()),
         }
     }
+
+    pub(crate) async fn shutdown_after_capture_worker_exit(self) -> eros::Result<()> {
+        let Self {
+            capture_worker_handle,
+            stream_pipeline_handles,
+        } = self;
+
+        for stream_pipeline_handle in stream_pipeline_handles.values() {
+            stream_pipeline_handle.close();
+        }
+
+        let mut first_error = capture_worker_handle.join().await.err();
+
+        for stream_pipeline_handle in stream_pipeline_handles.into_values() {
+            if let Err(error) = stream_pipeline_handle.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
 }

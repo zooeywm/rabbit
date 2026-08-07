@@ -1,6 +1,9 @@
 use std::{
     future::Future,
-    sync::mpsc::{self, SyncSender},
+    sync::{
+        Arc, Weak,
+        mpsc::{self, SyncSender},
+    },
     thread::{self, JoinHandle},
 };
 
@@ -17,12 +20,20 @@ pub(crate) enum AppCommand {
         stream_id: StreamId,
         response_sender: flume::Sender<eros::Result<()>>,
     },
+    CaptureWorkerExited {
+        capture_source_id: CaptureSourceId,
+    },
+    StreamPipelineWorkerExited {
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+    },
     Shutdown,
 }
 
 pub(crate) trait AppActor {
     fn run(
         self,
+        command_sender: Weak<flume::Sender<AppCommand>>,
         command_receiver: flume::Receiver<AppCommand>,
     ) -> impl Future<Output = eros::Result<()>>;
 }
@@ -30,7 +41,7 @@ pub(crate) trait AppActor {
 pub(super) struct AppRuntime;
 
 pub(crate) struct AppHandle {
-    command_sender: flume::Sender<AppCommand>,
+    command_sender: Arc<flume::Sender<AppCommand>>,
     app_thread: JoinHandle<eros::Result<()>>,
 }
 
@@ -42,11 +53,20 @@ impl AppRuntime {
         App: AppActor + 'static,
     {
         let (command_sender, command_receiver) = flume::unbounded();
+        let command_sender = Arc::new(command_sender);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let actor_command_sender = Arc::downgrade(&command_sender);
 
         let app_thread = thread::Builder::new()
             .name("app".to_owned())
-            .spawn(move || run_app_thread(app_constructor, command_receiver, started_sender))
+            .spawn(move || {
+                run_app_thread(
+                    app_constructor,
+                    actor_command_sender,
+                    command_receiver,
+                    started_sender,
+                )
+            })
             .with_context(|| "Failed to spawn app thread")?;
 
         if started_receiver.recv().is_err() {
@@ -115,6 +135,7 @@ impl AppHandle {
 
 fn run_app_thread<App>(
     app_constructor: impl FnOnce() -> eros::Result<App>,
+    command_sender: Weak<flume::Sender<AppCommand>>,
     command_receiver: flume::Receiver<AppCommand>,
     started_sender: SyncSender<()>,
 ) -> eros::Result<()>
@@ -131,7 +152,7 @@ where
         .send(())
         .with_context(|| "Failed to report app startup")?;
 
-    runtime.block_on(app.run(command_receiver))
+    runtime.block_on(app.run(command_sender, command_receiver))
 }
 
 fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {

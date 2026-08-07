@@ -58,6 +58,7 @@ where
     pub(crate) async fn start_stream(
         &mut self,
         capture_source_id: CaptureSourceId,
+        app_command_sender: &std::sync::Weak<flume::Sender<AppCommand>>,
     ) -> eros::Result<StreamId> {
         let stream_id = StreamId::new(self.next_stream_id);
         let next_stream_id = self
@@ -74,16 +75,20 @@ where
 
         let stream_pipeline_states_constructor = self.compose_stream_pipeline_states();
         let stream_pipeline_handle = StreamPipelineWorker::spawn::<CapturedFrameFor<CapMgrSt>, _, _>(
+            capture_source_id,
             stream_id,
             stream_pipeline_states_constructor,
+            app_command_sender.clone(),
         )
         .await?;
 
         if let Some(screen_capturer_state_constructor) = screen_capturer_state_constructor {
             let capture_worker_handle = match CaptureWorker::spawn::<CapMgrSt::ScreenCapturer, _>(
+                capture_source_id,
                 screen_capturer_state_constructor,
                 stream_id,
                 stream_pipeline_handle.frame_slot(),
+                app_command_sender.clone(),
             )
             .await
             {
@@ -167,20 +172,66 @@ where
             >
             + 'static,
 {
-    async fn run(mut self, command_receiver: flume::Receiver<AppCommand>) -> eros::Result<()> {
+    async fn run(
+        mut self,
+        app_command_sender: std::sync::Weak<flume::Sender<AppCommand>>,
+        command_receiver: flume::Receiver<AppCommand>,
+    ) -> eros::Result<()> {
         loop {
             match command_receiver.recv_async().await {
                 Ok(AppCommand::StartStream {
                     capture_source_id,
                     response_sender,
                 }) => {
-                    let _ = response_sender.send(self.start_stream(capture_source_id).await);
+                    let _ = response_sender.send(
+                        self.start_stream(capture_source_id, &app_command_sender)
+                            .await,
+                    );
                 }
                 Ok(AppCommand::RemoveStream {
                     stream_id,
                     response_sender,
                 }) => {
                     let _ = response_sender.send(self.remove_stream(stream_id).await);
+                }
+                Ok(AppCommand::CaptureWorkerExited { capture_source_id }) => {
+                    let Some(capture_source) = self.capture_sources.remove(&capture_source_id)
+                    else {
+                        continue;
+                    };
+
+                    let failure = capture_source
+                        .shutdown_after_capture_worker_exit()
+                        .await
+                        .err()
+                        .unwrap_or_else(|| eros::error!("Capture worker exited unexpectedly"));
+
+                    let _ = self.shutdown().await;
+                    return Err(failure);
+                }
+                Ok(AppCommand::StreamPipelineWorkerExited {
+                    capture_source_id,
+                    stream_id,
+                }) => {
+                    let is_current_worker = self
+                        .capture_sources
+                        .get(&capture_source_id)
+                        .is_some_and(|capture_source| capture_source.contains_stream(stream_id));
+
+                    if !is_current_worker {
+                        continue;
+                    }
+
+                    let failure = self
+                        .remove_stream(stream_id)
+                        .await
+                        .err()
+                        .unwrap_or_else(|| {
+                            eros::error!("Stream pipeline worker exited unexpectedly")
+                        });
+
+                    let _ = self.shutdown().await;
+                    return Err(failure);
                 }
                 Ok(AppCommand::Shutdown) | Err(_) => break,
             }
