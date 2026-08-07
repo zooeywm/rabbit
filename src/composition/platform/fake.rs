@@ -5,7 +5,7 @@ use crate::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
             EncoderManager, EncoderManagerStateSpec,
         },
-        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
+        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
         stream_pipeline::{
             EncodedVideoFrame,
             outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -78,23 +78,36 @@ impl AsMut<FakeScreenCapturerState> for ScreenCapturerContainer<FakeScreenCaptur
     }
 }
 
+impl AsRef<FakeScreenCapturerState> for ScreenCapturerContainer<FakeScreenCapturerState> {
+    fn as_ref(&self) -> &FakeScreenCapturerState {
+        self.state()
+    }
+}
+
 impl ScreenCapturer for ScreenCapturerContainer<FakeScreenCapturerState> {
     type CapturedFrame = FrameLease<FakeCapturedFrame>;
 
-    fn run<OnStarted, OnFrame>(
+    fn control(&self) -> eros::Result<std::sync::Arc<dyn ScreenCapturerControl>> {
+        ScreenCapturer::control(FakeScreenCapturerImpl::inj_ref(self))
+    }
+
+    fn run<OnStarted, OnControl, OnFrame>(
         &mut self,
         initial_consumer_count: usize,
         on_started: OnStarted,
+        on_control: OnControl,
         on_frame: OnFrame,
     ) -> eros::Result<()>
     where
         OnStarted: FnOnce() -> eros::Result<()>,
+        OnControl: FnMut() -> eros::Result<CaptureLoopAction>,
         OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
     {
         ScreenCapturer::run(
             FakeScreenCapturerImpl::inj_ref_mut(self),
             initial_consumer_count,
             on_started,
+            on_control,
             on_frame,
         )
     }

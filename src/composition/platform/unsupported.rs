@@ -7,7 +7,7 @@ use crate::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
             EncoderManager, EncoderManagerStateSpec,
         },
-        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer},
+        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
     },
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
@@ -72,20 +72,27 @@ where
 impl ScreenCapturer for ScreenCapturerContainer<UnsupportedScreenCapturerState> {
     type CapturedFrame = Infallible;
 
-    fn run<OnStarted, OnFrame>(
+    fn control(&self) -> eros::Result<std::sync::Arc<dyn ScreenCapturerControl>> {
+        ScreenCapturer::control(UnsupportedScreenCapturerImpl::inj_ref(self))
+    }
+
+    fn run<OnStarted, OnControl, OnFrame>(
         &mut self,
         initial_consumer_count: usize,
         on_started: OnStarted,
+        on_control: OnControl,
         on_frame: OnFrame,
     ) -> eros::Result<()>
     where
         OnStarted: FnOnce() -> eros::Result<()>,
+        OnControl: FnMut() -> eros::Result<CaptureLoopAction>,
         OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
     {
         ScreenCapturer::run(
             UnsupportedScreenCapturerImpl::inj_ref_mut(self),
             initial_consumer_count,
             on_started,
+            on_control,
             on_frame,
         )
     }
