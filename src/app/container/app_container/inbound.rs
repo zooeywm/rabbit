@@ -124,22 +124,28 @@ where
             })
             .with_context(|| "Stream does not exist")?;
 
-        let should_remove_capture_source = self
-            .capture_sources
-            .get_mut(&capture_source_id)
-            .with_context(|| "Capture source container disappeared while removing stream")?
-            .remove_stream(stream_id)
-            .await?;
+        let (remove_result, should_remove_capture_source) = {
+            let capture_source = self
+                .capture_sources
+                .get_mut(&capture_source_id)
+                .with_context(|| "Capture source container disappeared while removing stream")?;
+            let remove_result = capture_source.remove_stream(stream_id).await;
 
-        if should_remove_capture_source {
+            (remove_result, capture_source.is_empty())
+        };
+
+        let shutdown_result = if should_remove_capture_source {
             let capture_source = self
                 .capture_sources
                 .remove(&capture_source_id)
                 .with_context(|| "Capture source container disappeared before shutdown")?;
 
-            capture_source.shutdown().await?;
-        }
+            capture_source.shutdown().await
+        } else {
+            Ok(())
+        };
 
-        Ok(())
+        remove_result?;
+        shutdown_result
     }
 }

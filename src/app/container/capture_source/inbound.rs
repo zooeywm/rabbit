@@ -10,6 +10,10 @@ impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
         self.stream_pipeline_handles.contains_key(&stream_id)
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.stream_pipeline_handles.is_empty()
+    }
+
     pub(crate) async fn add_stream(
         &mut self,
         stream_id: StreamId,
@@ -35,7 +39,7 @@ impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
         Ok(())
     }
 
-    pub(crate) async fn remove_stream(&mut self, stream_id: StreamId) -> eros::Result<bool> {
+    pub(crate) async fn remove_stream(&mut self, stream_id: StreamId) -> eros::Result<()> {
         let stream_pipeline_handle = self
             .stream_pipeline_handles
             .remove(&stream_id)
@@ -49,6 +53,6 @@ impl<Frame: Clone + Send + 'static> CaptureSourceContainer<Frame> {
         remove_result?;
         shutdown_result?;
 
-        Ok(self.stream_pipeline_handles.is_empty())
+        Ok(())
     }
 }
