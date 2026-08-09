@@ -4,15 +4,36 @@ mod logging;
 mod runtime;
 
 use config::Config;
+use container::{
+    root::{
+        AppContainer,
+        outbound_port::{
+            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec,
+        },
+    },
+    stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
+};
 use directories::ProjectDirs;
 use eros::Context;
-use runtime::{AppActor, AppRuntime};
+use runtime::AppRuntime;
 
-pub(crate) fn run<App>(
-    app_constructor: impl FnOnce() -> eros::Result<App> + Send + 'static,
+use crate::app::container::root::{CapturedFrameFor, EncoderInputFor, StreamPipelineFor};
+
+pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt>(
+    app_constructor: impl FnOnce() -> eros::Result<AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>>
+    + Send
+    + 'static,
 ) -> eros::Result<()>
 where
-    App: AppActor + 'static,
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
+        + ConverterManager<State = CvtMgrSt>
+        + EncoderManager<State = EcdMgrSt>,
+    StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+        + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
 {
     let project_dirs = ProjectDirs::from("", "", "rabbit")
         .with_context(|| "Failed looking for app project dir")?;

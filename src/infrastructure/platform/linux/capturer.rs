@@ -1,6 +1,6 @@
 use std::{convert::Infallible, sync::Arc};
 
-use crate::app::container::capture_source::outbound_port::{
+use crate::app::container::screen_capture::outbound_port::{
     CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
 };
 

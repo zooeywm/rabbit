@@ -2,15 +2,20 @@ use std::convert::Infallible;
 
 use crate::{
     app::container::{
-        AppContainer, ScreenCapturerContainer, StreamPipelineContainer,
-        app_container::outbound_port::{
-            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
-            EncoderManager, EncoderManagerStateSpec,
+        root::{
+            AppContainer,
+            outbound_port::{
+                CapturerManager, CapturerManagerStateSpec, ConverterManager,
+                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
+            },
         },
-        capture_source::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
+        screen_capture::{
+            ScreenCaptureContainer,
+            outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
+        },
         stream_pipeline::{
-            EncodedVideoFrame,
-            outbound_port::{EncoderFrameConverter, VideoEncoder},
+            StreamPipelineContainer,
+            outbound_port::{EncodedVideoFrame, EncoderFrameConverter, VideoEncoder},
         },
     },
     domain::stream::models::vo::CaptureSourceId,
@@ -24,14 +29,11 @@ use crate::{
 
 impl CapturerManagerStateSpec for LinuxCapturerManagerState {
     type ScreenCapturerState = LinuxScreenCapturerState;
-    type ScreenCapturer = ScreenCapturerContainer<LinuxScreenCapturerState>;
+    type ScreenCapturer = ScreenCaptureContainer<LinuxScreenCapturerState>;
 }
 
 impl<CvtMgrSt, EcdMgrSt> AsRef<LinuxCapturerManagerState>
     for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
-where
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     fn as_ref(&self) -> &LinuxCapturerManagerState {
         self.capturer_manager_state()
@@ -40,9 +42,6 @@ where
 
 impl<CvtMgrSt, EcdMgrSt> AsMut<LinuxCapturerManagerState>
     for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
-where
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     fn as_mut(&mut self) -> &mut LinuxCapturerManagerState {
         self.capturer_manager_state_mut()
@@ -51,9 +50,6 @@ where
 
 impl<CvtMgrSt, EcdMgrSt> CapturerManager
     for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt>
-where
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     type State = LinuxCapturerManagerState;
 
@@ -72,7 +68,7 @@ where
     }
 }
 
-impl ScreenCapturer for ScreenCapturerContainer<LinuxScreenCapturerState> {
+impl ScreenCapturer for ScreenCaptureContainer<LinuxScreenCapturerState> {
     type CapturedFrame = Infallible;
 
     fn control(&self) -> eros::Result<std::sync::Arc<dyn ScreenCapturerControl>> {
@@ -109,7 +105,6 @@ impl<CapMgrSt, EcdMgrSt> AsRef<LinuxConverterManagerState>
     for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     fn as_ref(&self) -> &LinuxConverterManagerState {
         self.converter_manager_state()
@@ -120,7 +115,6 @@ impl<CapMgrSt, EcdMgrSt> AsMut<LinuxConverterManagerState>
     for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     fn as_mut(&mut self) -> &mut LinuxConverterManagerState {
         self.converter_manager_state_mut()
@@ -131,7 +125,6 @@ impl<CapMgrSt, EcdMgrSt> ConverterManager
     for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     type State = LinuxConverterManagerState;
 
@@ -184,7 +177,6 @@ impl<CapMgrSt, CvtMgrSt> AsRef<LinuxEncoderManagerState>
     for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
 {
     fn as_ref(&self) -> &LinuxEncoderManagerState {
         self.encoder_manager_state()
@@ -195,7 +187,6 @@ impl<CapMgrSt, CvtMgrSt> AsMut<LinuxEncoderManagerState>
     for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
 {
     fn as_mut(&mut self) -> &mut LinuxEncoderManagerState {
         self.encoder_manager_state_mut()
@@ -206,7 +197,6 @@ impl<CapMgrSt, CvtMgrSt> EncoderManager
     for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
 {
     type State = LinuxEncoderManagerState;
 

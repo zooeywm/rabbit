@@ -3,7 +3,7 @@ use std::sync::Arc;
 use eros::Context;
 
 use crate::{
-    app::container::capture_source::outbound_port::{
+    app::container::screen_capture::outbound_port::{
         CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
     },
     infrastructure::support::media::{FrameLease, FramePool, FramePoolWaker},

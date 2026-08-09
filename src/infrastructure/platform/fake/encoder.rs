@@ -1,8 +1,8 @@
 use eros::Context;
 
 use crate::{
-    app::container::stream_pipeline::{
-        EncodedVideoFrame, FrameNumber, outbound_port::VideoEncoder,
+    app::container::stream_pipeline::outbound_port::{
+        EncodedVideoFrame, FrameNumber, VideoEncoder,
     },
     infrastructure::fake::converter::FakeEncoderInput,
 };

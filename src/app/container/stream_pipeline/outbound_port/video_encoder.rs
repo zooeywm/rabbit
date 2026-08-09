@@ -1,4 +1,4 @@
-use crate::app::container::stream_pipeline::model::EncodedVideoFrame;
+use crate::app::container::stream_pipeline::outbound_port::EncodedVideoFrame;
 
 pub(crate) trait VideoEncoder {
     type EncoderInput;

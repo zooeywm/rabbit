@@ -1,8 +1,11 @@
-pub(crate) struct ScreenCapturerContainer<State> {
+pub(crate) mod inbound;
+pub(crate) mod outbound_port;
+
+pub(crate) struct ScreenCaptureContainer<State> {
     state: State,
 }
 
-impl<State> ScreenCapturerContainer<State> {
+impl<State> ScreenCaptureContainer<State> {
     pub(crate) fn state(&self) -> &State {
         &self.state
     }
@@ -12,7 +15,7 @@ impl<State> ScreenCapturerContainer<State> {
     }
 }
 
-impl<State> From<State> for ScreenCapturerContainer<State> {
+impl<State> From<State> for ScreenCaptureContainer<State> {
     fn from(state: State) -> Self {
         Self { state }
     }

@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Weak},
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 
@@ -7,12 +7,19 @@ use eros::Context;
 
 use crate::app::{
     container::stream_pipeline::{
-        LatestFrameSlot, StreamPipelineContainer,
+        StreamPipelineContainer,
+        inbound::LatestFrameSlot,
         outbound_port::{EncoderFrameConverter, VideoEncoder},
     },
     runtime::AppMessage,
 };
 use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
+
+type PipelineFrameFor<CvtSt, EcdSt> =
+    <StreamPipelineContainer<CvtSt, EcdSt> as EncoderFrameConverter>::CapturedFrame;
+
+type EncoderInputFor<CvtSt, EcdSt> =
+    <StreamPipelineContainer<CvtSt, EcdSt> as EncoderFrameConverter>::EncoderInput;
 
 pub(crate) struct StreamPipelineWorker;
 
@@ -25,25 +32,22 @@ struct StreamPipelineWorkerExitGuard<Frame> {
     capture_source_id: CaptureSourceId,
     stream_id: StreamId,
     frame_slot: Arc<LatestFrameSlot<Frame>>,
-    app_message_sender: Weak<flume::Sender<AppMessage>>,
+    app_message_sender: flume::Sender<AppMessage>,
 }
 
 impl StreamPipelineWorker {
-    pub(crate) async fn spawn<Frame, CvtSt, EcdSt>(
+    pub(crate) async fn spawn<CvtSt, EcdSt>(
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
-        stream_pipeline_states_constructor: impl FnOnce()
-        -> eros::Result<(CvtSt, EcdSt)>
+        stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>
         + Send
         + 'static,
-        app_message_sender: Weak<flume::Sender<AppMessage>>,
-    ) -> eros::Result<StreamPipelineWorkerHandle<Frame>>
+        app_message_sender: flume::Sender<AppMessage>,
+    ) -> eros::Result<StreamPipelineWorkerHandle<PipelineFrameFor<CvtSt, EcdSt>>>
     where
-        Frame: Send + 'static,
-        StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter<CapturedFrame = Frame>
-            + VideoEncoder<
-                EncoderInput = <StreamPipelineContainer<CvtSt, EcdSt> as EncoderFrameConverter>::EncoderInput,
-            >
+        PipelineFrameFor<CvtSt, EcdSt>: Send + 'static,
+        StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter
+            + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
             + 'static,
     {
         let frame_slot = Arc::new(LatestFrameSlot::new());
@@ -84,12 +88,12 @@ impl StreamPipelineWorker {
 impl<Frame> Drop for StreamPipelineWorkerExitGuard<Frame> {
     fn drop(&mut self) {
         self.frame_slot.close();
-        if let Some(app_message_sender) = self.app_message_sender.upgrade() {
-            let _ = app_message_sender.send(AppMessage::StreamPipelineWorkerExited {
+        let _ = self
+            .app_message_sender
+            .send(AppMessage::StreamPipelineWorkerExited {
                 capture_source_id: self.capture_source_id,
                 stream_id: self.stream_id,
             });
-        }
     }
 }
 
@@ -119,16 +123,14 @@ impl<Frame> StreamPipelineWorkerHandle<Frame> {
     }
 }
 
-fn run_stream_pipeline_worker<Frame, CvtSt, EcdSt>(
+fn run_stream_pipeline_worker<CvtSt, EcdSt>(
     stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
-    frame_slot: Arc<LatestFrameSlot<Frame>>,
+    frame_slot: Arc<LatestFrameSlot<PipelineFrameFor<CvtSt, EcdSt>>>,
     started_sender: flume::Sender<()>,
 ) -> eros::Result<()>
 where
-    StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter<CapturedFrame = Frame>
-        + VideoEncoder<
-            EncoderInput = <StreamPipelineContainer<CvtSt, EcdSt> as EncoderFrameConverter>::EncoderInput,
-        >,
+    StreamPipelineContainer<CvtSt, EcdSt>:
+        EncoderFrameConverter + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>,
 {
     let (encoder_frame_converter_state, video_encoder_state) =
         stream_pipeline_states_constructor()?;
@@ -167,7 +169,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::app::container::stream_pipeline::EncodedVideoFrame;
+    use crate::app::container::stream_pipeline::outbound_port::EncodedVideoFrame;
 
     #[derive(Default)]
     struct NonSendConverterState(PhantomData<Rc<()>>);
@@ -205,9 +207,8 @@ mod tests {
             let created_on_worker = Arc::new(AtomicBool::new(false));
             let worker_flag = Arc::clone(&created_on_worker);
             let (app_message_sender, app_message_receiver) = flume::unbounded();
-            let app_message_sender = Arc::new(app_message_sender);
 
-            let worker = StreamPipelineWorker::spawn::<(), _, _>(
+            let worker = StreamPipelineWorker::spawn(
                 CaptureSourceId::new(0),
                 StreamId::new(0),
                 move || {
@@ -220,7 +221,7 @@ mod tests {
                         NonSendEncoderState::default(),
                     ))
                 },
-                Arc::downgrade(&app_message_sender),
+                app_message_sender,
             )
             .await
             .expect("worker should start with non-Send pipeline states");

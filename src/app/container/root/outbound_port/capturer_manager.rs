@@ -1,4 +1,4 @@
-use crate::app::container::capture_source::outbound_port::ScreenCapturer;
+use crate::app::container::screen_capture::outbound_port::ScreenCapturer;
 use crate::domain::stream::models::vo::CaptureSourceId;
 
 pub(crate) trait CapturerManagerStateSpec {

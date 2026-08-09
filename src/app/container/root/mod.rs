@@ -4,40 +4,45 @@ pub(crate) mod outbound_port;
 
 use std::collections::HashMap;
 
-use crate::{app::container::CaptureSourceContainer, domain::stream::models::vo::CaptureSourceId};
-
-use self::outbound_port::{
-    CapturerManagerStateSpec, ConverterManagerStateSpec, EncoderManagerStateSpec,
+use crate::{
+    app::container::{
+        root::outbound_port::{
+            CapturerManagerStateSpec, ConverterManagerStateSpec, EncoderManagerStateSpec,
+        },
+        screen_capture::outbound_port::ScreenCapturer,
+        stream_pipeline::{StreamPipelineContainer, outbound_port::EncoderFrameConverter},
+    },
+    domain::stream::models::vo::CaptureSourceId,
 };
-use crate::app::container::capture_source::outbound_port::ScreenCapturer;
+use inbound::CaptureSourceRuntime;
 
-type CapturedFrameFor<CapMgrSt> =
+pub(crate) type CapturedFrameFor<CapMgrSt> =
     <<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer as ScreenCapturer>::CapturedFrame;
 
-type CaptureSourceFor<CapMgrSt> = CaptureSourceContainer<CapturedFrameFor<CapMgrSt>>;
+pub(crate) type StreamPipelineFor<CvtMgrSt, EcdMgrSt> = StreamPipelineContainer<
+    <CvtMgrSt as ConverterManagerStateSpec>::EncoderFrameConverterState,
+    <EcdMgrSt as EncoderManagerStateSpec>::VideoEncoderState,
+>;
+
+pub(crate) type EncoderInputFor<CvtMgrSt, EcdMgrSt> =
+    <StreamPipelineFor<CvtMgrSt, EcdMgrSt> as EncoderFrameConverter>::EncoderInput;
+
+type CaptureSourceRuntimeFor<CapMgrSt> = CaptureSourceRuntime<CapturedFrameFor<CapMgrSt>>;
 
 pub(crate) struct AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     capturer_manager_state: CapMgrSt,
-
     converter_manager_state: CvtMgrSt,
-
     encoder_manager_state: EcdMgrSt,
-
-    capture_sources: HashMap<CaptureSourceId, CaptureSourceFor<CapMgrSt>>,
-
+    capture_source_runtimes: HashMap<CaptureSourceId, CaptureSourceRuntimeFor<CapMgrSt>>,
     next_stream_id: u16,
 }
 
 impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
 {
     pub(crate) fn new(
         capturer_manager_state: CapMgrSt,
@@ -48,7 +53,7 @@ where
             capturer_manager_state,
             converter_manager_state,
             encoder_manager_state,
-            capture_sources: HashMap::new(),
+            capture_source_runtimes: HashMap::new(),
             next_stream_id: 0,
         }
     }
@@ -76,19 +81,12 @@ where
     pub(crate) fn encoder_manager_state_mut(&mut self) -> &mut EcdMgrSt {
         &mut self.encoder_manager_state
     }
-}
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
-{
     pub(crate) async fn shutdown(self) -> eros::Result<()> {
         let mut first_error = None;
 
-        for capture_source in self.capture_sources.into_values() {
-            if let Err(error) = capture_source.shutdown().await
+        for capture_source_runtime in self.capture_source_runtimes.into_values() {
+            if let Err(error) = capture_source_runtime.shutdown().await
                 && first_error.is_none()
             {
                 first_error = Some(error);

@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
-    sync::{Arc, Weak},
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 
@@ -10,10 +10,8 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        LatestFrameSlot,
-        capture_source::outbound_port::{
-            CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
-        },
+        screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
+        stream_pipeline::inbound::LatestFrameSlot,
     },
     app::runtime::AppMessage,
     domain::stream::models::vo::{CaptureSourceId, StreamId},
@@ -39,7 +37,7 @@ enum CaptureCommand<Frame> {
 struct CaptureWorkerExitGuard<Frame> {
     capture_source_id: CaptureSourceId,
     state: Rc<RefCell<CaptureWorkerState<Frame>>>,
-    app_message_sender: Weak<flume::Sender<AppMessage>>,
+    app_message_sender: flume::Sender<AppMessage>,
 }
 
 pub(crate) struct CaptureWorker;
@@ -56,7 +54,7 @@ impl CaptureWorker {
         screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
         initial_stream_id: StreamId,
         initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
-        app_message_sender: Weak<flume::Sender<AppMessage>>,
+        app_message_sender: flume::Sender<AppMessage>,
     ) -> eros::Result<CaptureWorkerHandle<Capturer::CapturedFrame>>
     where
         Capturer: ScreenCapturer + From<State> + 'static,
@@ -161,14 +159,12 @@ impl<Frame> CaptureWorkerHandle<Frame> {
         };
         let wake_result = control.wake();
 
-        let join_result = match compio::runtime::spawn_blocking(move || {
-            join_capture_worker(worker_thread)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => eros::bail!("Capture worker join task failed"),
-        };
+        let join_result =
+            match compio::runtime::spawn_blocking(move || join_capture_worker(worker_thread)).await
+            {
+                Ok(result) => result,
+                Err(_) => eros::bail!("Capture worker join task failed"),
+            };
 
         join_result?;
         send_result?;
@@ -176,7 +172,8 @@ impl<Frame> CaptureWorkerHandle<Frame> {
     }
 
     pub(crate) async fn join(self) -> eros::Result<()> {
-        match compio::runtime::spawn_blocking(move || join_capture_worker(self.worker_thread)).await {
+        match compio::runtime::spawn_blocking(move || join_capture_worker(self.worker_thread)).await
+        {
             Ok(result) => result,
             Err(_) => eros::bail!("Capture worker join task failed"),
         }
@@ -185,11 +182,11 @@ impl<Frame> CaptureWorkerHandle<Frame> {
 
 impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
     fn drop(&mut self) {
-        if let Some(app_message_sender) = self.app_message_sender.upgrade() {
-            let _ = app_message_sender.send(AppMessage::CaptureWorkerExited {
+        let _ = self
+            .app_message_sender
+            .send(AppMessage::CaptureWorkerExited {
                 capture_source_id: self.capture_source_id,
             });
-        }
         self.state.borrow().close_frame_slots();
     }
 }
@@ -200,7 +197,7 @@ fn run_capture_worker<Capturer, State>(
     initial_stream_id: StreamId,
     initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
-    app_message_sender: Weak<flume::Sender<AppMessage>>,
+    app_message_sender: flume::Sender<AppMessage>,
     started_sender: flume::Sender<Arc<dyn ScreenCapturerControl>>,
 ) -> eros::Result<()>
 where
@@ -220,9 +217,10 @@ where
     let control = screen_capturer.control()?;
     let control_state = Rc::clone(&state);
     let frame_state = Rc::clone(&state);
+    let initial_consumer_count = state.borrow().consumer_count();
 
     screen_capturer.run(
-        state.borrow().consumer_count(),
+        initial_consumer_count,
         move || {
             started_sender
                 .send(control)
@@ -240,10 +238,7 @@ where
 }
 
 impl<Frame> CaptureWorkerState<Frame> {
-    fn new(
-        initial_stream_id: StreamId,
-        initial_frame_slot: Arc<LatestFrameSlot<Frame>>,
-    ) -> Self {
+    fn new(initial_stream_id: StreamId, initial_frame_slot: Arc<LatestFrameSlot<Frame>>) -> Self {
         Self {
             frame_slots: HashMap::from([(initial_stream_id, initial_frame_slot)]),
         }
@@ -377,7 +372,8 @@ mod tests {
 
     impl ScreenCapturerControl for TestScreenCapturerControl {
         fn wake(&self) -> eros::Result<()> {
-            Ok(self.0
+            Ok(self
+                .0
                 .send(())
                 .with_context(|| "Test screen capturer stopped before control wakeup")?)
         }
@@ -434,7 +430,6 @@ mod tests {
             let created_on_worker = Arc::new(AtomicBool::new(false));
             let worker_flag = Arc::clone(&created_on_worker);
             let (app_message_sender, app_message_receiver) = flume::unbounded();
-            let app_message_sender = Arc::new(app_message_sender);
             let frame_slot = Arc::new(LatestFrameSlot::new());
 
             let worker = CaptureWorker::spawn::<TestCapturer, _>(
@@ -448,7 +443,7 @@ mod tests {
                 },
                 StreamId::new(0),
                 Arc::clone(&frame_slot),
-                Arc::downgrade(&app_message_sender),
+                app_message_sender,
             )
             .await
             .expect("worker should start with a non-Send capturer state");

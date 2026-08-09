@@ -1,15 +1,23 @@
 use std::{
-    future::Future,
-    sync::{
-        Arc, Weak,
-        mpsc::{self, SyncSender},
-    },
+    sync::mpsc,
     thread::{self, JoinHandle},
 };
 
 use eros::Context;
 
-use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
+use crate::{
+    app::container::{
+        root::{
+            AppContainer, CapturedFrameFor, EncoderInputFor, StreamPipelineFor,
+            outbound_port::{
+                CapturerManager, CapturerManagerStateSpec, ConverterManager,
+                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
+            },
+        },
+        stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
+    },
+    domain::stream::models::vo::{CaptureSourceId, StreamId},
+};
 
 pub(crate) enum AppMessage {
     StartStream {
@@ -30,42 +38,47 @@ pub(crate) enum AppMessage {
     Shutdown,
 }
 
-pub(crate) trait AppActor {
-    fn run(
-        self,
-        message_sender: Weak<flume::Sender<AppMessage>>,
-        message_receiver: flume::Receiver<AppMessage>,
-    ) -> impl Future<Output = eros::Result<()>>;
-}
-
 pub(super) struct AppRuntime;
 
 pub(crate) struct AppHandle {
-    message_sender: Arc<flume::Sender<AppMessage>>,
+    message_sender: flume::Sender<AppMessage>,
     app_thread: JoinHandle<eros::Result<()>>,
 }
 
 impl AppRuntime {
-    pub(super) fn start<App>(
-        app_constructor: impl FnOnce() -> eros::Result<App> + Send + 'static,
+    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt>(
+        app_constructor: impl FnOnce() -> eros::Result<AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>>
+        + Send
+        + 'static,
     ) -> eros::Result<AppHandle>
     where
-        App: AppActor + 'static,
+        CapMgrSt: CapturerManagerStateSpec,
+        CvtMgrSt: ConverterManagerStateSpec,
+        EcdMgrSt: EncoderManagerStateSpec,
+        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
+            + ConverterManager<State = CvtMgrSt>
+            + EncoderManager<State = EcdMgrSt>,
+        StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+            + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
     {
         let (message_sender, message_receiver) = flume::unbounded();
-        let message_sender = Arc::new(message_sender);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
-        let actor_message_sender = Arc::downgrade(&message_sender);
+        let app_message_sender = message_sender.clone();
 
         let app_thread = thread::Builder::new()
             .name("app".to_owned())
             .spawn(move || {
-                run_app_thread(
-                    app_constructor,
-                    actor_message_sender,
-                    message_receiver,
-                    started_sender,
-                )
+                let runtime = compio::runtime::Runtime::new()
+                    .with_context(|| "Failed to create Compio runtime for app")?;
+                let app = runtime
+                    .enter(app_constructor)
+                    .with_context(|| "Failed to construct app")?;
+
+                started_sender
+                    .send(())
+                    .with_context(|| "Failed to report app startup")?;
+
+                runtime.block_on(app.run(app_message_sender, message_receiver))
             })
             .with_context(|| "Failed to spawn app thread")?;
 
@@ -93,12 +106,12 @@ impl AppHandle {
                 capture_source_id,
                 response_sender,
             })
-            .with_context(|| "App actor stopped before stream could be started")?;
+            .with_context(|| "App stopped before stream could be started")?;
 
         response_receiver
             .recv_async()
             .await
-            .with_context(|| "App actor stopped while starting stream")?
+            .with_context(|| "App stopped while starting stream")?
     }
 
     pub(crate) async fn remove_stream(&self, stream_id: StreamId) -> eros::Result<()> {
@@ -109,12 +122,12 @@ impl AppHandle {
                 stream_id,
                 response_sender,
             })
-            .with_context(|| "App actor stopped before stream could be removed")?;
+            .with_context(|| "App stopped before stream could be removed")?;
 
         response_receiver
             .recv_async()
             .await
-            .with_context(|| "App actor stopped while removing stream")?
+            .with_context(|| "App stopped while removing stream")?
     }
 
     pub(super) fn shutdown(self) -> eros::Result<()> {
@@ -127,32 +140,10 @@ impl AppHandle {
 
         join_app_thread(app_thread)?;
 
-        send_result.with_context(|| "App actor stopped before receiving shutdown")?;
+        send_result.with_context(|| "App stopped before receiving shutdown")?;
 
         Ok(())
     }
-}
-
-fn run_app_thread<App>(
-    app_constructor: impl FnOnce() -> eros::Result<App>,
-    message_sender: Weak<flume::Sender<AppMessage>>,
-    message_receiver: flume::Receiver<AppMessage>,
-    started_sender: SyncSender<()>,
-) -> eros::Result<()>
-where
-    App: AppActor + 'static,
-{
-    let runtime = compio::runtime::Runtime::new()
-        .with_context(|| "Failed to create Compio runtime for app")?;
-    let app = runtime
-        .enter(app_constructor)
-        .with_context(|| "Failed to construct app")?;
-
-    started_sender
-        .send(())
-        .with_context(|| "Failed to report app startup")?;
-
-    runtime.block_on(app.run(message_sender, message_receiver))
 }
 
 fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {
@@ -173,26 +164,123 @@ mod tests {
     };
 
     use super::*;
+    use crate::app::container::{
+        screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
+        stream_pipeline::{StreamPipelineContainer, outbound_port::EncodedVideoFrame},
+    };
 
-    struct NonSendApp {
+    struct TestCapturerManagerState {
         _not_send: Rc<()>,
     }
 
-    impl AppActor for NonSendApp {
-        async fn run(
-            self,
-            _message_sender: Weak<flume::Sender<AppMessage>>,
-            message_receiver: flume::Receiver<AppMessage>,
-        ) -> eros::Result<()> {
-            match message_receiver.recv_async().await {
-                Ok(AppMessage::Shutdown) | Err(_) => Ok(()),
-                Ok(_) => eros::bail!("NonSendApp received an unexpected message"),
-            }
+    struct TestCapturerState;
+    struct TestCapturer;
+    struct TestControl;
+    struct TestConverterManagerState;
+    struct TestEncoderManagerState;
+
+    impl CapturerManagerStateSpec for TestCapturerManagerState {
+        type ScreenCapturerState = TestCapturerState;
+        type ScreenCapturer = TestCapturer;
+    }
+
+    impl From<TestCapturerState> for TestCapturer {
+        fn from(_state: TestCapturerState) -> Self {
+            Self
+        }
+    }
+
+    impl ScreenCapturerControl for TestControl {
+        fn wake(&self) -> eros::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl ScreenCapturer for TestCapturer {
+        type CapturedFrame = ();
+
+        fn control(&self) -> eros::Result<Arc<dyn ScreenCapturerControl>> {
+            Ok(Arc::new(TestControl))
+        }
+
+        fn run<OnStarted, OnControl, OnFrame>(
+            &mut self,
+            _initial_consumer_count: usize,
+            _on_started: OnStarted,
+            _on_control: OnControl,
+            _on_frame: OnFrame,
+        ) -> eros::Result<()>
+        where
+            OnStarted: FnOnce() -> eros::Result<()>,
+            OnControl: FnMut() -> eros::Result<CaptureLoopAction>,
+            OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
+        {
+            unreachable!("the runtime test does not start capture")
+        }
+    }
+
+    impl ConverterManagerStateSpec for TestConverterManagerState {
+        type EncoderFrameConverterState = ();
+    }
+
+    impl EncoderManagerStateSpec for TestEncoderManagerState {
+        type VideoEncoderState = ();
+    }
+
+    type TestApp =
+        AppContainer<TestCapturerManagerState, TestConverterManagerState, TestEncoderManagerState>;
+
+    impl CapturerManager for TestApp {
+        type State = TestCapturerManagerState;
+
+        fn compose_screen_capturer_state(
+            &mut self,
+            _capture_source_id: CaptureSourceId,
+        ) -> impl FnOnce() -> eros::Result<TestCapturerState> + Send + 'static + use<> {
+            || Ok(TestCapturerState)
+        }
+    }
+
+    impl ConverterManager for TestApp {
+        type State = TestConverterManagerState;
+
+        fn compose_encoder_frame_converter_state(
+            &mut self,
+        ) -> impl FnOnce() -> eros::Result<()> + Send + 'static + use<> {
+            || Ok(())
+        }
+    }
+
+    impl EncoderManager for TestApp {
+        type State = TestEncoderManagerState;
+
+        fn compose_video_encoder_state(
+            &mut self,
+        ) -> impl FnOnce() -> eros::Result<()> + Send + 'static + use<> {
+            || Ok(())
+        }
+    }
+
+    impl EncoderFrameConverter for StreamPipelineContainer<(), ()> {
+        type CapturedFrame = ();
+        type EncoderInput = ();
+
+        fn convert(&mut self, _frame: ()) -> eros::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl VideoEncoder for StreamPipelineContainer<(), ()> {
+        type EncoderInput = ();
+        type EncodedBuffer = ();
+
+        fn encode(&mut self, _input: ()) -> eros::Result<EncodedVideoFrame<()>> {
+            unreachable!("the runtime test does not encode frames")
         }
     }
 
     #[test]
-    fn constructs_non_send_app_on_app_thread() {
+    fn constructs_app_on_app_thread() {
         let caller_thread_id = thread::current().id();
         let created_on_app_thread = Arc::new(AtomicBool::new(false));
         let app_thread_flag = Arc::clone(&created_on_app_thread);
@@ -202,12 +290,15 @@ mod tests {
                 thread::current().id() != caller_thread_id,
                 Ordering::Relaxed,
             );
-
-            Ok(NonSendApp {
-                _not_send: Rc::new(()),
-            })
+            Ok(TestApp::new(
+                TestCapturerManagerState {
+                    _not_send: Rc::new(()),
+                },
+                TestConverterManagerState,
+                TestEncoderManagerState,
+            ))
         })
-        .expect("app runtime should accept a non-Send app");
+        .expect("app runtime should start");
 
         assert!(created_on_app_thread.load(Ordering::Relaxed));
 
