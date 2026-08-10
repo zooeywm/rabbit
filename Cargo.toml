@@ -29,6 +29,14 @@ cfg-if = "1.0"
 compio = "0.19"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 
+# For UI
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+  "font-kit",
+  "wayland",
+] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+
 [features]
 default = []
 fake = []
