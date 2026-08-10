@@ -1,8 +1,11 @@
+use std::time::Instant;
+
 use eros::Context;
 
 use crate::{
-    app::container::screen_capture::outbound_port::{
-        CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
+    app::container::{
+        root::outbound_port::MetricsRecorder,
+        screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
     },
     infrastructure::support::media::{FrameLease, FramePool, FramePoolWaker},
 };
@@ -54,7 +57,7 @@ impl ScreenCapturerControl for FakeScreenCapturerControl {
 
 impl<Deps> ScreenCapturer for FakeScreenCapturerImpl<Deps>
 where
-    Deps: AsRef<FakeScreenCapturerState> + AsMut<FakeScreenCapturerState>,
+    Deps: AsRef<FakeScreenCapturerState> + AsMut<FakeScreenCapturerState> + MetricsRecorder,
 {
     type CapturedFrame = FrameLease<FakeCapturedFrame>;
     type Control = FakeScreenCapturerControl;
@@ -98,6 +101,7 @@ where
                 }
             }
 
+            let capture_started_at = Instant::now();
             let frame = {
                 let state = self.prj_ref_mut().as_mut();
                 let Some(mut frame) = state.frame_pool.blocking_acquire_interruptibly() else {
@@ -107,6 +111,9 @@ where
                 state.next_capture_sequence += 1;
                 frame
             };
+
+            self.prj_ref()
+                .record_captured_frame(capture_started_at.elapsed());
 
             match on_frame(frame)? {
                 CaptureLoopAction::Continue { consumer_count } => {

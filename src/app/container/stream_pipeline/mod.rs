@@ -1,14 +1,29 @@
 pub(crate) mod inbound;
 pub(crate) mod outbound_port;
 
+use crate::{
+    app::container::root::outbound_port::MetricsTarget,
+    domain::stream::models::vo::{CaptureSourceId, StreamId},
+};
+
 pub(crate) struct StreamPipelineContainer<CvtSt, EcdSt> {
+    metrics_target: MetricsTarget,
     encoder_frame_converter_state: CvtSt,
     video_encoder_state: EcdSt,
 }
 
 impl<CvtSt, EcdSt> StreamPipelineContainer<CvtSt, EcdSt> {
-    pub(crate) fn new(encoder_frame_converter_state: CvtSt, video_encoder_state: EcdSt) -> Self {
+    pub(crate) fn new(
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+        encoder_frame_converter_state: CvtSt,
+        video_encoder_state: EcdSt,
+    ) -> Self {
         Self {
+            metrics_target: MetricsTarget::Stream {
+                capture_source_id,
+                stream_id,
+            },
             encoder_frame_converter_state,
             video_encoder_state,
         }
@@ -28,5 +43,11 @@ impl<CvtSt, EcdSt> StreamPipelineContainer<CvtSt, EcdSt> {
 
     pub(crate) fn video_encoder_state_mut(&mut self) -> &mut EcdSt {
         &mut self.video_encoder_state
+    }
+}
+
+impl<CvtSt, EcdSt> AsRef<MetricsTarget> for StreamPipelineContainer<CvtSt, EcdSt> {
+    fn as_ref(&self) -> &MetricsTarget {
+        &self.metrics_target
     }
 }

@@ -12,6 +12,7 @@ use crate::{
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
+                MetricsRecorder,
             },
         },
         stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -49,9 +50,11 @@ pub(crate) struct AppHandle {
 }
 
 impl AppRuntime {
-    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt>(
-        app_constructor: impl FnOnce() -> eros::Result<AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>>
-        + Send
+    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt, AppRuntimeGuard>(
+        app_constructor: impl FnOnce() -> eros::Result<(
+            AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+            AppRuntimeGuard,
+        )> + Send
         + 'static,
     ) -> eros::Result<Self>
     where
@@ -62,7 +65,8 @@ impl AppRuntime {
             + ConverterManager<State = CvtMgrSt>
             + EncoderManager<State = EcdMgrSt>,
         StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
-            + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
+            + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
+            + MetricsRecorder,
     {
         let (message_sender, message_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
@@ -73,7 +77,7 @@ impl AppRuntime {
             .spawn(move || {
                 let runtime = compio::runtime::Runtime::new()
                     .with_context(|| "Failed to create Compio runtime for app")?;
-                let app = runtime
+                let (app, _app_runtime_guard) = runtime
                     .enter(app_constructor)
                     .with_context(|| "Failed to construct app")?;
 
@@ -191,10 +195,22 @@ mod tests {
         type ScreenCapturer = TestCapturer;
     }
 
-    impl From<TestCapturerState> for TestCapturer {
-        fn from(_state: TestCapturerState) -> Self {
+    impl From<(CaptureSourceId, TestCapturerState)> for TestCapturer {
+        fn from((_capture_source_id, _state): (CaptureSourceId, TestCapturerState)) -> Self {
             Self
         }
+    }
+
+    impl MetricsRecorder for TestCapturer {
+        fn register_metrics_target(&self) {}
+
+        fn unregister_metrics_target(&self) {}
+
+        fn record_captured_frame(&self, _duration: std::time::Duration) {}
+
+        fn record_converted_frame(&self, _duration: std::time::Duration) {}
+
+        fn record_encoded_frame(&self, _duration: std::time::Duration) {}
     }
 
     impl ScreenCapturerControl for TestControl {
@@ -298,12 +314,15 @@ mod tests {
                 thread::current().id() != caller_thread_id,
                 Ordering::Relaxed,
             );
-            Ok(TestApp::new(
-                TestCapturerManagerState {
-                    _not_send: Rc::new(()),
-                },
-                TestConverterManagerState,
-                TestEncoderManagerState,
+            Ok((
+                TestApp::new(
+                    TestCapturerManagerState {
+                        _not_send: Rc::new(()),
+                    },
+                    TestConverterManagerState,
+                    TestEncoderManagerState,
+                ),
+                (),
             ))
         })
         .expect("app runtime should start");

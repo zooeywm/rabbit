@@ -22,9 +22,11 @@ use container::root::{CapturedFrameFor, EncoderInputFor, StreamPipelineFor};
 
 pub(crate) use runtime::AppHandle;
 
-pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt>(
-    app_constructor: impl FnOnce() -> eros::Result<AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>>
-    + Send
+pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt, AppRuntimeGuard>(
+    app_constructor: impl FnOnce() -> eros::Result<(
+        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+        AppRuntimeGuard,
+    )> + Send
     + 'static,
     run_presentation: impl FnOnce(AppHandle) -> eros::Result<()>,
 ) -> eros::Result<()>
@@ -43,7 +45,6 @@ where
 
     let config = Config::load(&project_dirs)?;
     let _logging_guard = logging::init(&project_dirs, &config.logging)?;
-
     let app_runtime = AppRuntime::start(app_constructor)?;
 
     tracing::trace!("rabbit started");

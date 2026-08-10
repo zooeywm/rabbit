@@ -10,6 +10,7 @@ use eros::Context;
 
 use crate::{
     app::container::{
+        root::outbound_port::MetricsRecorder,
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
         stream_pipeline::inbound::LatestFrameSlot,
     },
@@ -57,7 +58,7 @@ impl CaptureWorker {
         app_message_sender: flume::Sender<AppMessage>,
     ) -> eros::Result<CaptureWorkerHandle<Capturer>>
     where
-        Capturer: ScreenCapturer + From<State> + 'static,
+        Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
     {
         let (command_sender, command_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = flume::bounded(1);
@@ -201,7 +202,7 @@ fn run_capture_worker<Capturer, State>(
     started_sender: flume::Sender<Capturer::Control>,
 ) -> eros::Result<()>
 where
-    Capturer: ScreenCapturer + From<State> + 'static,
+    Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
 {
     let state = Rc::new(RefCell::new(CaptureWorkerState::new(
         initial_stream_id,
@@ -213,28 +214,35 @@ where
         app_message_sender,
     };
     let screen_capturer_state = screen_capturer_state_constructor()?;
-    let mut screen_capturer = Capturer::from(screen_capturer_state);
-    let control = screen_capturer.control()?;
-    let control_state = Rc::clone(&state);
-    let frame_state = Rc::clone(&state);
-    let initial_consumer_count = state.borrow().consumer_count();
+    let mut screen_capturer = Capturer::from((capture_source_id, screen_capturer_state));
+    screen_capturer.register_metrics_target();
 
-    screen_capturer.run(
-        initial_consumer_count,
-        move || {
-            started_sender
-                .send(control)
-                .map_err(|_| eros::error!("Failed to report capture worker startup"))?;
-            Ok(())
-        },
-        move || {
-            Ok(process_commands(
-                &command_receiver,
-                &mut control_state.borrow_mut(),
-            ))
-        },
-        move |frame| Ok(frame_state.borrow_mut().deliver_frame(frame)),
-    )
+    let result = (|| {
+        let control = screen_capturer.control()?;
+        let control_state = Rc::clone(&state);
+        let frame_state = Rc::clone(&state);
+        let initial_consumer_count = state.borrow().consumer_count();
+
+        screen_capturer.run(
+            initial_consumer_count,
+            move || {
+                started_sender
+                    .send(control)
+                    .map_err(|_| eros::error!("Failed to report capture worker startup"))?;
+                Ok(())
+            },
+            move || {
+                Ok(process_commands(
+                    &command_receiver,
+                    &mut control_state.borrow_mut(),
+                ))
+            },
+            move |frame| Ok(frame_state.borrow_mut().deliver_frame(frame)),
+        )
+    })();
+
+    screen_capturer.unregister_metrics_target();
+    result
 }
 
 impl<Frame> CaptureWorkerState<Frame> {
@@ -379,10 +387,22 @@ mod tests {
         }
     }
 
-    impl From<NonSendCapturerState> for TestCapturer {
-        fn from(state: NonSendCapturerState) -> Self {
+    impl From<(CaptureSourceId, NonSendCapturerState)> for TestCapturer {
+        fn from((_capture_source_id, state): (CaptureSourceId, NonSendCapturerState)) -> Self {
             Self(state)
         }
+    }
+
+    impl MetricsRecorder for TestCapturer {
+        fn register_metrics_target(&self) {}
+
+        fn unregister_metrics_target(&self) {}
+
+        fn record_captured_frame(&self, _duration: std::time::Duration) {}
+
+        fn record_converted_frame(&self, _duration: std::time::Duration) {}
+
+        fn record_encoded_frame(&self, _duration: std::time::Duration) {}
     }
 
     impl ScreenCapturer for TestCapturer {

@@ -1,9 +1,14 @@
-use crate::app::container::screen_capture::outbound_port::ScreenCapturer;
+use crate::app::container::{
+    root::outbound_port::MetricsRecorder, screen_capture::outbound_port::ScreenCapturer,
+};
 use crate::domain::stream::models::vo::CaptureSourceId;
 
 pub(crate) trait CapturerManagerStateSpec {
     type ScreenCapturerState: 'static;
-    type ScreenCapturer: ScreenCapturer + From<Self::ScreenCapturerState> + 'static;
+    type ScreenCapturer: ScreenCapturer
+        + MetricsRecorder
+        + From<(CaptureSourceId, Self::ScreenCapturerState)>
+        + 'static;
 }
 
 pub(crate) trait CapturerManager {

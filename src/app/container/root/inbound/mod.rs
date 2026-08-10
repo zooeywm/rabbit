@@ -11,6 +11,7 @@ use crate::{
                 outbound_port::{
                     CapturerManager, CapturerManagerStateSpec, ConverterManager,
                     ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
+                    MetricsRecorder,
                 },
             },
             screen_capture::inbound::CaptureWorker,
@@ -33,7 +34,8 @@ where
         + ConverterManager<State = CvtMgrSt>
         + EncoderManager<State = EcdMgrSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
-        + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
+        + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
+        + MetricsRecorder,
 {
     fn compose_stream_pipeline_states(
         &mut self,

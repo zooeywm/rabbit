@@ -6,10 +6,13 @@ use std::{
 use eros::Context;
 
 use crate::app::{
-    container::stream_pipeline::{
-        StreamPipelineContainer,
-        inbound::LatestFrameSlot,
-        outbound_port::{EncoderFrameConverter, VideoEncoder},
+    container::{
+        root::outbound_port::MetricsRecorder,
+        stream_pipeline::{
+            StreamPipelineContainer,
+            inbound::LatestFrameSlot,
+            outbound_port::{EncoderFrameConverter, VideoEncoder},
+        },
     },
     runtime::AppMessage,
 };
@@ -48,6 +51,7 @@ impl StreamPipelineWorker {
         PipelineFrameFor<CvtSt, EcdSt>: Send + 'static,
         StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
+            + MetricsRecorder
             + 'static,
     {
         let frame_slot = Arc::new(LatestFrameSlot::new());
@@ -66,6 +70,8 @@ impl StreamPipelineWorker {
                 };
 
                 run_stream_pipeline_worker(
+                    capture_source_id,
+                    stream_id,
                     stream_pipeline_states_constructor,
                     worker_frame_slot,
                     started_sender,
@@ -124,29 +130,42 @@ impl<Frame> StreamPipelineWorkerHandle<Frame> {
 }
 
 fn run_stream_pipeline_worker<CvtSt, EcdSt>(
+    capture_source_id: CaptureSourceId,
+    stream_id: StreamId,
     stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
     frame_slot: Arc<LatestFrameSlot<PipelineFrameFor<CvtSt, EcdSt>>>,
     started_sender: flume::Sender<()>,
 ) -> eros::Result<()>
 where
-    StreamPipelineContainer<CvtSt, EcdSt>:
-        EncoderFrameConverter + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>,
+    StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter
+        + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
+        + MetricsRecorder,
 {
     let (encoder_frame_converter_state, video_encoder_state) =
         stream_pipeline_states_constructor()?;
-    let mut stream_pipeline =
-        StreamPipelineContainer::new(encoder_frame_converter_state, video_encoder_state);
+    let mut stream_pipeline = StreamPipelineContainer::new(
+        capture_source_id,
+        stream_id,
+        encoder_frame_converter_state,
+        video_encoder_state,
+    );
+    stream_pipeline.register_metrics_target();
 
-    started_sender
-        .send(())
-        .with_context(|| "Failed to report stream pipeline worker startup")?;
+    let result = (|| {
+        started_sender
+            .send(())
+            .with_context(|| "Failed to report stream pipeline worker startup")?;
 
-    while let Some(frame) = frame_slot.blocking_take() {
-        let encoder_input = EncoderFrameConverter::convert(&mut stream_pipeline, frame)?;
-        let _encoded_frame = VideoEncoder::encode(&mut stream_pipeline, encoder_input)?;
-    }
+        while let Some(frame) = frame_slot.blocking_take() {
+            let encoder_input = EncoderFrameConverter::convert(&mut stream_pipeline, frame)?;
+            let _encoded_frame = VideoEncoder::encode(&mut stream_pipeline, encoder_input)?;
+        }
 
-    Ok(())
+        Ok(())
+    })();
+
+    stream_pipeline.unregister_metrics_target();
+    result
 }
 
 fn join_stream_pipeline_worker(worker_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {
