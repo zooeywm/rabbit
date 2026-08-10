@@ -20,7 +20,12 @@ use crate::{
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
+#[cfg(feature = "test-ui")]
+pub(crate) mod capture_only;
+
 pub(crate) enum AppMessage {
+    #[cfg(feature = "test-ui")]
+    CaptureOnly(capture_only::CaptureOnlyMessage),
     StartStream {
         capture_source_id: CaptureSourceId,
         response_sender: flume::Sender<eros::Result<StreamId>>,

@@ -18,6 +18,9 @@ use crate::{
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
+#[cfg(feature = "test-ui")]
+mod capture_only;
+
 struct CaptureWorkerState<Frame> {
     frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Frame>>>,
 }
@@ -60,6 +63,27 @@ impl CaptureWorker {
     where
         Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
     {
+        Self::spawn_with_frame_slots(
+            capture_source_id,
+            screen_capturer_state_constructor,
+            HashMap::from([(initial_stream_id, initial_frame_slot)]),
+            app_message_sender,
+        )
+        .await
+    }
+
+    async fn spawn_with_frame_slots<Capturer, State>(
+        capture_source_id: CaptureSourceId,
+        screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
+        initial_frame_slots: HashMap<
+            StreamId,
+            Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
+        >,
+        app_message_sender: flume::Sender<AppMessage>,
+    ) -> eros::Result<CaptureWorkerHandle<Capturer>>
+    where
+        Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
+    {
         let (command_sender, command_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = flume::bounded(1);
 
@@ -69,8 +93,7 @@ impl CaptureWorker {
                 run_capture_worker::<Capturer, State>(
                     capture_source_id,
                     screen_capturer_state_constructor,
-                    initial_stream_id,
-                    initial_frame_slot,
+                    initial_frame_slots,
                     command_receiver,
                     app_message_sender,
                     started_sender,
@@ -195,8 +218,10 @@ impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
 fn run_capture_worker<Capturer, State>(
     capture_source_id: CaptureSourceId,
     screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State>,
-    initial_stream_id: StreamId,
-    initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
+    initial_frame_slots: HashMap<
+        StreamId,
+        Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
+    >,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
     app_message_sender: flume::Sender<AppMessage>,
     started_sender: flume::Sender<Capturer::Control>,
@@ -204,10 +229,7 @@ fn run_capture_worker<Capturer, State>(
 where
     Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
 {
-    let state = Rc::new(RefCell::new(CaptureWorkerState::new(
-        initial_stream_id,
-        initial_frame_slot,
-    )));
+    let state = Rc::new(RefCell::new(CaptureWorkerState::new(initial_frame_slots)));
     let _exit_guard = CaptureWorkerExitGuard {
         capture_source_id,
         state: Rc::clone(&state),
@@ -246,9 +268,9 @@ where
 }
 
 impl<Frame> CaptureWorkerState<Frame> {
-    fn new(initial_stream_id: StreamId, initial_frame_slot: Arc<LatestFrameSlot<Frame>>) -> Self {
+    fn new(frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Frame>>>) -> Self {
         Self {
-            frame_slots: HashMap::from([(initial_stream_id, initial_frame_slot)]),
+            frame_slots,
         }
     }
 

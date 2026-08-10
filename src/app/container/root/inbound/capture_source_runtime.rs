@@ -16,6 +16,16 @@ pub(in crate::app::container::root) struct CaptureSourceRuntime<Capturer: Screen
 }
 
 impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
+    #[cfg(feature = "test-ui")]
+    pub(in crate::app::container::root) fn capture_only(
+        capture_worker_handle: CaptureWorkerHandle<Capturer>,
+    ) -> Self {
+        Self {
+            capture_worker_handle,
+            stream_pipeline_handles: HashMap::new(),
+        }
+    }
+
     pub(in crate::app::container::root) fn new(
         capture_worker_handle: CaptureWorkerHandle<Capturer>,
         initial_stream_id: StreamId,

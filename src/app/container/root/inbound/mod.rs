@@ -1,4 +1,6 @@
 mod capture_source_runtime;
+#[cfg(feature = "test-ui")]
+mod capture_only;
 
 pub(super) use capture_source_runtime::CaptureSourceRuntime;
 use eros::Context;
@@ -194,6 +196,11 @@ where
     ) -> eros::Result<()> {
         loop {
             match message_receiver.recv_async().await {
+                #[cfg(feature = "test-ui")]
+                Ok(AppMessage::CaptureOnly(message)) => {
+                    self.handle_capture_only_message(message, &app_message_sender)
+                        .await;
+                }
                 Ok(AppMessage::StartStream {
                     capture_source_id,
                     response_sender,

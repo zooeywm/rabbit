@@ -129,5 +129,10 @@ where
 }
 
 fn frame_pool_size(consumer_count: usize) -> usize {
+    #[cfg(feature = "test-ui")]
+    if consumer_count == 0 {
+        return 1;
+    }
+
     consumer_count + 2
 }

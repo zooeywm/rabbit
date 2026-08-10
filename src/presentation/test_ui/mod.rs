@@ -21,9 +21,18 @@ enum StreamState {
     Restarting,
 }
 
+#[derive(Clone, Copy)]
+enum CaptureOnlyState {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+}
+
 struct TestUi {
     app_handle: AppHandle,
     stream_state: StreamState,
+    capture_only_state: CaptureOnlyState,
 }
 
 impl Render for TestUi {
@@ -32,6 +41,16 @@ impl Render for TestUi {
             .v_flex()
             .gap_2()
             .child("Rabbit Test UI")
+            .child(
+                Button::new("capture-only-action")
+                    .label(self.capture_only_action_label())
+                    .disabled(self.capture_only_action_disabled())
+                    .on_click(cx.listener(|this, _, _, cx| match this.capture_only_state {
+                        CaptureOnlyState::Stopped => this.start_capture_only(cx),
+                        CaptureOnlyState::Running => this.stop_capture_only(cx),
+                        CaptureOnlyState::Starting | CaptureOnlyState::Stopping => {}
+                    })),
+            )
             .child(
                 Button::new("stream-action")
                     .primary()
@@ -67,14 +86,103 @@ impl TestUi {
     }
 
     fn stream_action_disabled(&self) -> bool {
-        matches!(
-            self.stream_state,
-            StreamState::Starting | StreamState::Stopping | StreamState::Restarting
-        )
+        !matches!(self.capture_only_state, CaptureOnlyState::Stopped)
+            || matches!(
+                self.stream_state,
+                StreamState::Starting | StreamState::Stopping | StreamState::Restarting
+            )
     }
 
     fn restart_disabled(&self) -> bool {
-        !matches!(self.stream_state, StreamState::Running(_))
+        !matches!(self.capture_only_state, CaptureOnlyState::Stopped)
+            || !matches!(self.stream_state, StreamState::Running(_))
+    }
+
+    fn capture_only_action_label(&self) -> &'static str {
+        match self.capture_only_state {
+            CaptureOnlyState::Stopped => "Start Capture Only",
+            CaptureOnlyState::Starting => "Starting Capture...",
+            CaptureOnlyState::Running => "Stop Capture Only",
+            CaptureOnlyState::Stopping => "Stopping Capture...",
+        }
+    }
+
+    fn capture_only_action_disabled(&self) -> bool {
+        !matches!(self.stream_state, StreamState::Stopped)
+            || matches!(
+                self.capture_only_state,
+                CaptureOnlyState::Starting | CaptureOnlyState::Stopping
+            )
+    }
+
+    fn start_capture_only(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.capture_only_state, CaptureOnlyState::Stopped)
+            || !matches!(self.stream_state, StreamState::Stopped)
+        {
+            return;
+        }
+
+        self.capture_only_state = CaptureOnlyState::Starting;
+        cx.notify();
+
+        let app_handle = self.app_handle.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = app_handle
+                .start_capture_only(CaptureSourceId::new(0))
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        tracing::info!("Test capture-only source started");
+                        this.capture_only_state = CaptureOnlyState::Running;
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "Failed to start test capture-only source");
+                        this.capture_only_state = CaptureOnlyState::Stopped;
+                    }
+                }
+
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn stop_capture_only(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.capture_only_state, CaptureOnlyState::Running) {
+            return;
+        }
+
+        self.capture_only_state = CaptureOnlyState::Stopping;
+        cx.notify();
+
+        let app_handle = self.app_handle.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = app_handle
+                .stop_capture_only(CaptureSourceId::new(0))
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        tracing::info!("Test capture-only source stopped");
+                        this.capture_only_state = CaptureOnlyState::Stopped;
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "Failed to stop test capture-only source");
+                        this.capture_only_state = CaptureOnlyState::Running;
+                    }
+                }
+
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn start_stream(&mut self, cx: &mut Context<Self>) {
@@ -198,6 +306,7 @@ pub(crate) fn run(app_handle: AppHandle) -> eros::Result<()> {
                 let view = cx.new(|_| TestUi {
                     app_handle,
                     stream_state: StreamState::Stopped,
+                    capture_only_state: CaptureOnlyState::Stopped,
                 });
 
                 cx.new(|cx| Root::new(view, window, cx))
