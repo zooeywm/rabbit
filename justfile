@@ -13,23 +13,34 @@ _cargo command *args:
 _xwin command *args:
     cargo xwin {{ command }} --target {{ windows-target }} {{ args }}
 
-run: (_cargo "run")
-run_fake: (_cargo "run" "--features" "fake")
-build: (_cargo "build" "--workspace")
-build_all: build (_cargo "build" "--workspace" "--features" "fake") build-xwin
-check: (_cargo "check" "--workspace" "--all-targets")
-lint: (_cargo "clippy" "--workspace" "--all-targets" "--all-features" "--" "-D" "warnings")
-release: (_cargo "build" "--workspace" "--release")
-
 run-xwin: (_xwin "run")
-run_fake-xwin: (_xwin "run" "--features" "fake")
-build-xwin: (_xwin "build" "--workspace")
-check-xwin: (_xwin "check" "--workspace" "--all-targets")
-lint-xwin: (_xwin "clippy" "--workspace" "--all-targets" "--all-features" "--" "-D" "warnings")
-release-xwin: (_xwin "build" "--workspace" "--release")
+run-xwin_testui: (_xwin "run" "--features" "test-ui")
+build-xwin: (_xwin "build")
+check-xwin: (_xwin "check" "--all-targets" "--all-features")
+lint-xwin: (_xwin "clippy" "--all-targets" "--all-features")
 
+check:
+    cargo check --all-targets --all-features
+lint:
+    cargo clippy --all-targets --all-features
+run:
+    cargo run
+run-testui:
+    cargo run --features test-ui
+run-fake-testui:
+    cargo run --features fake,test-ui
+run-fake:
+    cargo run --features fake
+build:
+    cargo build
+build-testui:
+    cargo build --features test-ui
+build-fake-testui:
+    cargo build --features fake,test-ui
+build-fake:
+    cargo run --features fake
 test:
-    cargo nextest run --workspace
+    cargo nextest run
 fmt:
     cargo fmt --all
 fmt-check:

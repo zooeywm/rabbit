@@ -32,3 +32,4 @@ flume = { version = "0.12", default-features = false, features = ["async"] }
 [features]
 default = []
 fake = []
+test-ui = []
