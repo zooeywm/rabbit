@@ -11,7 +11,7 @@ use crate::{
         },
         screen_capture::{
             ScreenCaptureContainer,
-            outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
+            outbound_port::{CaptureLoopAction, ScreenCapturer},
         },
         stream_pipeline::{
             StreamPipelineContainer,
@@ -71,8 +71,9 @@ impl<CvtMgrSt, EcdMgrSt> CapturerManager
 
 impl ScreenCapturer for ScreenCaptureContainer<UnsupportedScreenCapturerState> {
     type CapturedFrame = Infallible;
+    type Control = Infallible;
 
-    fn control(&self) -> eros::Result<std::sync::Arc<dyn ScreenCapturerControl>> {
+    fn control(&self) -> eros::Result<Self::Control> {
         ScreenCapturer::control(UnsupportedScreenCapturerImpl::inj_ref(self))
     }
 

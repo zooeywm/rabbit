@@ -27,7 +27,8 @@ pub(crate) type StreamPipelineFor<CvtMgrSt, EcdMgrSt> = StreamPipelineContainer<
 pub(crate) type EncoderInputFor<CvtMgrSt, EcdMgrSt> =
     <StreamPipelineFor<CvtMgrSt, EcdMgrSt> as EncoderFrameConverter>::EncoderInput;
 
-type CaptureSourceRuntimeFor<CapMgrSt> = CaptureSourceRuntime<CapturedFrameFor<CapMgrSt>>;
+type CaptureSourceRuntimeFor<CapMgrSt> =
+    CaptureSourceRuntime<<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer>;
 
 pub(crate) struct AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where

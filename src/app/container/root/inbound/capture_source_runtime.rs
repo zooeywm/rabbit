@@ -4,22 +4,22 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        screen_capture::inbound::CaptureWorkerHandle,
+        screen_capture::{inbound::CaptureWorkerHandle, outbound_port::ScreenCapturer},
         stream_pipeline::inbound::StreamPipelineWorkerHandle,
     },
     domain::stream::models::vo::StreamId,
 };
 
-pub(in crate::app::container::root) struct CaptureSourceRuntime<Frame: Clone + Send + 'static> {
-    capture_worker_handle: CaptureWorkerHandle<Frame>,
-    stream_pipeline_handles: HashMap<StreamId, StreamPipelineWorkerHandle<Frame>>,
+pub(in crate::app::container::root) struct CaptureSourceRuntime<Capturer: ScreenCapturer> {
+    capture_worker_handle: CaptureWorkerHandle<Capturer>,
+    stream_pipeline_handles: HashMap<StreamId, StreamPipelineWorkerHandle<Capturer::CapturedFrame>>,
 }
 
-impl<Frame: Clone + Send + 'static> CaptureSourceRuntime<Frame> {
+impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
     pub(in crate::app::container::root) fn new(
-        capture_worker_handle: CaptureWorkerHandle<Frame>,
+        capture_worker_handle: CaptureWorkerHandle<Capturer>,
         initial_stream_id: StreamId,
-        initial_stream_pipeline_handle: StreamPipelineWorkerHandle<Frame>,
+        initial_stream_pipeline_handle: StreamPipelineWorkerHandle<Capturer::CapturedFrame>,
     ) -> Self {
         Self {
             capture_worker_handle,
@@ -95,7 +95,7 @@ impl<Frame: Clone + Send + 'static> CaptureSourceRuntime<Frame> {
     pub(in crate::app::container::root) async fn add_stream(
         &mut self,
         stream_id: StreamId,
-        stream_pipeline_handle: StreamPipelineWorkerHandle<Frame>,
+        stream_pipeline_handle: StreamPipelineWorkerHandle<Capturer::CapturedFrame>,
     ) -> eros::Result<()> {
         if self.stream_pipeline_handles.contains_key(&stream_id) {
             stream_pipeline_handle.shutdown().await?;

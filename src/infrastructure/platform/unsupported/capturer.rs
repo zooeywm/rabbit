@@ -1,8 +1,6 @@
-use std::{convert::Infallible, sync::Arc};
+use std::convert::Infallible;
 
-use crate::app::container::screen_capture::outbound_port::{
-    CaptureLoopAction, ScreenCapturer, ScreenCapturerControl,
-};
+use crate::app::container::screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer};
 
 #[derive(kudi::DepInj)]
 #[target(UnsupportedScreenCapturerImpl)]
@@ -12,8 +10,9 @@ pub(crate) struct UnsupportedScreenCapturerState {
 
 impl<Deps> ScreenCapturer for UnsupportedScreenCapturerImpl<Deps> {
     type CapturedFrame = Infallible;
+    type Control = Infallible;
 
-    fn control(&self) -> eros::Result<Arc<dyn ScreenCapturerControl>> {
+    fn control(&self) -> eros::Result<Self::Control> {
         eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS)
     }
 

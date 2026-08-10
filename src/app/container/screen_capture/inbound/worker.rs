@@ -42,9 +42,9 @@ struct CaptureWorkerExitGuard<Frame> {
 
 pub(crate) struct CaptureWorker;
 
-pub(crate) struct CaptureWorkerHandle<Frame> {
-    command_sender: flume::Sender<CaptureCommand<Frame>>,
-    control: Arc<dyn ScreenCapturerControl>,
+pub(crate) struct CaptureWorkerHandle<Capturer: ScreenCapturer> {
+    command_sender: flume::Sender<CaptureCommand<Capturer::CapturedFrame>>,
+    control: Capturer::Control,
     worker_thread: JoinHandle<eros::Result<()>>,
 }
 
@@ -55,7 +55,7 @@ impl CaptureWorker {
         initial_stream_id: StreamId,
         initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
         app_message_sender: flume::Sender<AppMessage>,
-    ) -> eros::Result<CaptureWorkerHandle<Capturer::CapturedFrame>>
+    ) -> eros::Result<CaptureWorkerHandle<Capturer>>
     where
         Capturer: ScreenCapturer + From<State> + 'static,
     {
@@ -93,11 +93,11 @@ impl CaptureWorker {
     }
 }
 
-impl<Frame> CaptureWorkerHandle<Frame> {
+impl<Capturer: ScreenCapturer> CaptureWorkerHandle<Capturer> {
     pub(crate) async fn add_stream(
         &self,
         stream_id: StreamId,
-        frame_slot: Arc<LatestFrameSlot<Frame>>,
+        frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     ) -> eros::Result<()> {
         let (response_sender, response_receiver) = flume::bounded(1);
 
@@ -198,7 +198,7 @@ fn run_capture_worker<Capturer, State>(
     initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
     app_message_sender: flume::Sender<AppMessage>,
-    started_sender: flume::Sender<Arc<dyn ScreenCapturerControl>>,
+    started_sender: flume::Sender<Capturer::Control>,
 ) -> eros::Result<()>
 where
     Capturer: ScreenCapturer + From<State> + 'static,
@@ -224,7 +224,7 @@ where
         move || {
             started_sender
                 .send(control)
-                .with_context(|| "Failed to report capture worker startup")?;
+                .map_err(|_| eros::error!("Failed to report capture worker startup"))?;
             Ok(())
         },
         move || {
@@ -387,11 +387,10 @@ mod tests {
 
     impl ScreenCapturer for TestCapturer {
         type CapturedFrame = ();
+        type Control = TestScreenCapturerControl;
 
-        fn control(&self) -> eros::Result<Arc<dyn ScreenCapturerControl>> {
-            Ok(Arc::new(TestScreenCapturerControl(
-                self.0.control_sender.clone(),
-            )))
+        fn control(&self) -> eros::Result<Self::Control> {
+            Ok(TestScreenCapturerControl(self.0.control_sender.clone()))
         }
 
         fn run<OnStarted, OnControl, OnFrame>(

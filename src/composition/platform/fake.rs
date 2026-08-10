@@ -9,7 +9,7 @@ use crate::{
         },
         screen_capture::{
             ScreenCaptureContainer,
-            outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
+            outbound_port::{CaptureLoopAction, ScreenCapturer},
         },
         stream_pipeline::{
             StreamPipelineContainer,
@@ -21,8 +21,8 @@ use crate::{
         FakeCapturedFrame, FakeCapturerManagerImpl, FakeCapturerManagerState,
         FakeConverterManagerImpl, FakeConverterManagerState, FakeEncoderFrameConverterImpl,
         FakeEncoderFrameConverterState, FakeEncoderInput, FakeEncoderManagerImpl,
-        FakeEncoderManagerState, FakeScreenCapturerImpl, FakeScreenCapturerState,
-        FakeVideoEncoderImpl, FakeVideoEncoderState,
+        FakeEncoderManagerState, FakeScreenCapturerControl, FakeScreenCapturerImpl,
+        FakeScreenCapturerState, FakeVideoEncoderImpl, FakeVideoEncoderState,
     },
     infrastructure::support::media::FrameLease,
 };
@@ -82,8 +82,9 @@ impl AsRef<FakeScreenCapturerState> for ScreenCaptureContainer<FakeScreenCapture
 
 impl ScreenCapturer for ScreenCaptureContainer<FakeScreenCapturerState> {
     type CapturedFrame = FrameLease<FakeCapturedFrame>;
+    type Control = FakeScreenCapturerControl;
 
-    fn control(&self) -> eros::Result<std::sync::Arc<dyn ScreenCapturerControl>> {
+    fn control(&self) -> eros::Result<Self::Control> {
         ScreenCapturer::control(FakeScreenCapturerImpl::inj_ref(self))
     }
 

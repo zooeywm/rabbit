@@ -7,7 +7,9 @@ mod converter_manager;
 mod encoder;
 mod encoder_manager;
 
-pub(crate) use capturer::{FakeCapturedFrame, FakeScreenCapturerImpl, FakeScreenCapturerState};
+pub(crate) use capturer::{
+    FakeCapturedFrame, FakeScreenCapturerControl, FakeScreenCapturerImpl, FakeScreenCapturerState,
+};
 pub(crate) use capturer_manager::{FakeCapturerManagerImpl, FakeCapturerManagerState};
 pub(crate) use converter::{
     FakeEncoderFrameConverterImpl, FakeEncoderFrameConverterState, FakeEncoderInput,

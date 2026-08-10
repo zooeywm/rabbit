@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use eros::Context;
 
 use crate::{
@@ -39,7 +37,7 @@ impl FakeScreenCapturerState {
     }
 }
 
-struct FakeScreenCapturerControl {
+pub(crate) struct FakeScreenCapturerControl {
     control_sender: flume::Sender<()>,
     frame_pool_waker: FramePoolWaker<FakeCapturedFrame>,
 }
@@ -59,12 +57,13 @@ where
     Deps: AsRef<FakeScreenCapturerState> + AsMut<FakeScreenCapturerState>,
 {
     type CapturedFrame = FrameLease<FakeCapturedFrame>;
+    type Control = FakeScreenCapturerControl;
 
-    fn control(&self) -> eros::Result<Arc<dyn ScreenCapturerControl>> {
-        Ok(Arc::new(FakeScreenCapturerControl {
+    fn control(&self) -> eros::Result<Self::Control> {
+        Ok(FakeScreenCapturerControl {
             control_sender: self.prj_ref().as_ref().control_sender.clone(),
             frame_pool_waker: self.prj_ref().as_ref().frame_pool.waker(),
-        }))
+        })
     }
 
     fn run<OnStarted, OnControl, OnFrame>(

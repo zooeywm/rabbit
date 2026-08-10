@@ -205,9 +205,10 @@ mod tests {
 
     impl ScreenCapturer for TestCapturer {
         type CapturedFrame = ();
+        type Control = TestControl;
 
-        fn control(&self) -> eros::Result<Arc<dyn ScreenCapturerControl>> {
-            Ok(Arc::new(TestControl))
+        fn control(&self) -> eros::Result<Self::Control> {
+            Ok(TestControl)
         }
 
         fn run<OnStarted, OnControl, OnFrame>(
