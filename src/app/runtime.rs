@@ -38,11 +38,14 @@ pub(crate) enum AppMessage {
     Shutdown,
 }
 
-pub(super) struct AppRuntime;
+pub(super) struct AppRuntime {
+    app_handle: AppHandle,
+    app_thread: JoinHandle<eros::Result<()>>,
+}
 
+#[derive(Clone)]
 pub(crate) struct AppHandle {
     message_sender: flume::Sender<AppMessage>,
-    app_thread: JoinHandle<eros::Result<()>>,
 }
 
 impl AppRuntime {
@@ -50,7 +53,7 @@ impl AppRuntime {
         app_constructor: impl FnOnce() -> eros::Result<AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>>
         + Send
         + 'static,
-    ) -> eros::Result<AppHandle>
+    ) -> eros::Result<Self>
     where
         CapMgrSt: CapturerManagerStateSpec,
         CvtMgrSt: ConverterManagerStateSpec,
@@ -87,10 +90,29 @@ impl AppRuntime {
             eros::bail!("App thread stopped before startup completed");
         }
 
-        Ok(AppHandle {
-            message_sender,
+        Ok(Self {
+            app_handle: AppHandle { message_sender },
             app_thread,
         })
+    }
+
+    pub(super) fn shutdown(self) -> eros::Result<()> {
+        let Self {
+            app_handle,
+            app_thread,
+        } = self;
+
+        let send_result = app_handle.message_sender.send(AppMessage::Shutdown);
+
+        join_app_thread(app_thread)?;
+
+        send_result.with_context(|| "App stopped before receiving shutdown")?;
+
+        Ok(())
+    }
+
+    pub(super) fn handle(&self) -> AppHandle {
+        self.app_handle.clone()
     }
 }
 
@@ -128,21 +150,6 @@ impl AppHandle {
             .recv_async()
             .await
             .with_context(|| "App stopped while removing stream")?
-    }
-
-    pub(super) fn shutdown(self) -> eros::Result<()> {
-        let Self {
-            message_sender,
-            app_thread,
-        } = self;
-
-        let send_result = message_sender.send(AppMessage::Shutdown);
-
-        join_app_thread(app_thread)?;
-
-        send_result.with_context(|| "App stopped before receiving shutdown")?;
-
-        Ok(())
     }
 }
 
@@ -285,7 +292,7 @@ mod tests {
         let created_on_app_thread = Arc::new(AtomicBool::new(false));
         let app_thread_flag = Arc::clone(&created_on_app_thread);
 
-        let app_handle = AppRuntime::start(move || {
+        let app_runtime = AppRuntime::start(move || {
             app_thread_flag.store(
                 thread::current().id() != caller_thread_id,
                 Ordering::Relaxed,
@@ -302,6 +309,6 @@ mod tests {
 
         assert!(created_on_app_thread.load(Ordering::Relaxed));
 
-        app_handle.shutdown().expect("app should stop cleanly");
+        app_runtime.shutdown().expect("app should stop cleanly");
     }
 }

@@ -18,12 +18,15 @@ use directories::ProjectDirs;
 use eros::Context;
 use runtime::AppRuntime;
 
-use crate::app::container::root::{CapturedFrameFor, EncoderInputFor, StreamPipelineFor};
+use container::root::{CapturedFrameFor, EncoderInputFor, StreamPipelineFor};
+
+pub(crate) use runtime::AppHandle;
 
 pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt>(
     app_constructor: impl FnOnce() -> eros::Result<AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>>
     + Send
     + 'static,
+    run_presentation: impl FnOnce(AppHandle) -> eros::Result<()>,
 ) -> eros::Result<()>
 where
     CapMgrSt: CapturerManagerStateSpec,
@@ -41,7 +44,7 @@ where
     let config = Config::load(&project_dirs)?;
     let _logging_guard = logging::init(&project_dirs, &config.logging)?;
 
-    let app_handle = AppRuntime::start(app_constructor)?;
+    let app_runtime = AppRuntime::start(app_constructor)?;
 
     tracing::trace!("rabbit started");
     tracing::debug!("rabbit started");
@@ -49,5 +52,9 @@ where
     tracing::warn!("rabbit started");
     tracing::error!("rabbit started");
 
-    app_handle.shutdown()
+    let presentation_result = run_presentation(app_runtime.handle());
+    let shutdown_result = app_runtime.shutdown();
+
+    presentation_result?;
+    shutdown_result
 }

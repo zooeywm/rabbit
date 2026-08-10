@@ -28,7 +28,7 @@ run:
 run-testui:
     cargo run --features test-ui
 run-fake-testui:
-    cargo run --features fake,test-ui
+    cargo run --features fake,test-ui -- --test
 run-fake:
     cargo run --features fake
 build:
