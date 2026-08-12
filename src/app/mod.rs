@@ -47,11 +47,7 @@ where
     let _logging_guard = logging::init(&project_dirs, &config.logging)?;
     let app_runtime = AppRuntime::start(app_constructor)?;
 
-    tracing::trace!("rabbit started");
-    tracing::debug!("rabbit started");
     tracing::info!("rabbit started");
-    tracing::warn!("rabbit started");
-    tracing::error!("rabbit started");
 
     let presentation_result = run_presentation(app_runtime.handle());
     let shutdown_result = app_runtime.shutdown();

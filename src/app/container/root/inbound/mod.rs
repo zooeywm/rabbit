@@ -21,7 +21,7 @@ where
     pub(crate) async fn run(
         mut self,
         encoded_unit_sender: EncodedUnitSender<Host::EncodedBuffer>,
-        network_client_event_receiver: NetworkClientEventReceiver<Client::NetworkInput>,
+        network_client_event_receiver: &NetworkClientEventReceiver<Client::NetworkInput>,
         app_message_sender: flume::Sender<AppMessage>,
         message_receiver: flume::Receiver<AppMessage>,
     ) -> AppRunExit {
@@ -112,7 +112,7 @@ where
                     };
 
                     let _ = self.shutdown_applications().await;
-                    return AppRunExit::Application(failure);
+                    return AppRunExit::Application(Err(failure));
                 }
                 Ok(AppMessage::HostStreamPipelineWorkerExited {
                     capture_source_id,
@@ -127,7 +127,7 @@ where
                     };
 
                     let _ = self.shutdown_applications().await;
-                    return AppRunExit::Application(failure);
+                    return AppRunExit::Application(Err(failure));
                 }
                 Ok(AppMessage::NetworkWorkerExited) => {
                     let _ = self.shutdown_applications().await;

@@ -16,7 +16,6 @@ use crate::{
 #[derive(kudi::DepInj)]
 #[target(FakeTransporterImpl)]
 pub(crate) struct FakeTransporterState {
-    packetized_unit_count: u64,
     sender: Option<FakeTransporterSender>,
     receiver: Option<FakeTransporterReceiver>,
 }
@@ -28,7 +27,6 @@ pub(crate) struct FakePacketized {
 }
 
 pub(crate) struct FakeTransporterSender {
-    sent_unit_count: u64,
     sender: flume::Sender<FakeReceived>,
 }
 
@@ -44,11 +42,6 @@ pub(crate) struct FakeReceived {
 
 impl FakeTransporterSender {
     pub(crate) async fn send(&mut self, packetized: FakePacketized) -> eros::Result<SentBytes> {
-        let sent_unit_count = self
-            .sent_unit_count
-            .checked_add(1)
-            .with_context(|| "Fake transporter sent unit count space is exhausted")?;
-
         self.sender
             .send_async(FakeReceived {
                 frame_id: packetized.frame_id,
@@ -57,8 +50,6 @@ impl FakeTransporterSender {
             })
             .await
             .with_context(|| "Fake transporter receiver stopped before send completed")?;
-
-        self.sent_unit_count = sent_unit_count;
 
         Ok(SentBytes::new(
             packetized.frame_id.capture_source_id(),
@@ -80,11 +71,7 @@ impl FakeTransporterState {
     pub(crate) fn new() -> eros::Result<Self> {
         let (sender, receiver) = flume::bounded(1);
         Ok(Self {
-            packetized_unit_count: 0,
-            sender: Some(FakeTransporterSender {
-                sent_unit_count: 0,
-                sender,
-            }),
+            sender: Some(FakeTransporterSender { sender }),
             receiver: Some(FakeTransporterReceiver { receiver }),
         })
     }
@@ -113,14 +100,6 @@ where
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized> {
         let packetize_started_at = Instant::now();
-        {
-            let state = self.prj_ref_mut().as_mut();
-            state.packetized_unit_count = state
-                .packetized_unit_count
-                .checked_add(1)
-                .with_context(|| "Fake transporter packetized unit count space is exhausted")?;
-        }
-
         let capture_source_id = unit.source_frame_id.capture_source_id();
         self.prj_ref().record_packetized_frame(
             capture_source_id,
@@ -175,7 +154,6 @@ mod tests {
         }));
 
         assert!(result.is_err());
-        assert_eq!(sender.sent_unit_count, 0);
         Ok(())
     }
 

@@ -203,7 +203,7 @@ where
     async fn handle_capture_worker_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> Option<eros::Result<()>> {
+    ) -> Option<eros::ErrorUnion> {
         let capture_source_runtime = self.capture_source_runtimes.remove(&capture_source_id)?;
 
         Some(
@@ -211,8 +211,8 @@ where
                 .shutdown_after_capture_worker_exit()
                 .await
             {
-                Ok(()) => Err(eros::error!("Capture worker exited unexpectedly")),
-                Err(error) => Err(error),
+                Ok(()) => eros::error!("Capture worker exited unexpectedly"),
+                Err(error) => error,
             },
         )
     }
@@ -221,7 +221,7 @@ where
         &mut self,
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
-    ) -> Option<eros::Result<()>> {
+    ) -> Option<eros::ErrorUnion> {
         let is_current_worker = self
             .capture_source_runtimes
             .get(&capture_source_id)
@@ -236,10 +236,8 @@ where
                 .remove_stream_after_host_pipeline_exit(capture_source_id, stream_id)
                 .await
             {
-                Ok(()) => Err(eros::error!(
-                    "Host stream pipeline worker exited unexpectedly"
-                )),
-                Err(error) => Err(error),
+                Ok(()) => eros::error!("Host stream pipeline worker exited unexpectedly"),
+                Err(error) => error,
             },
         )
     }
@@ -277,7 +275,7 @@ where
     async fn handle_capture_worker_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> Option<eros::Result<()>> {
+    ) -> Option<eros::ErrorUnion> {
         HostContainer::handle_capture_worker_exit(self, capture_source_id).await
     }
 
@@ -285,7 +283,7 @@ where
         &mut self,
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
-    ) -> Option<eros::Result<()>> {
+    ) -> Option<eros::ErrorUnion> {
         HostContainer::handle_host_stream_pipeline_worker_exit(self, capture_source_id, stream_id)
             .await
     }

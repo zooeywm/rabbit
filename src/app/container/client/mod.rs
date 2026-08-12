@@ -55,7 +55,7 @@ impl<DcdMgrSt, DcdSt> ClientContainer<DcdMgrSt, DcdSt> {
             .stream_pipelines
             .get_mut(&stream_id)
             .expect("client stream pipeline should exist after insertion");
-        let _decoded = pipeline.decode(input)?;
+        pipeline.decode(input)?;
         Ok(())
     }
 }

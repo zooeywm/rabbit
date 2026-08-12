@@ -18,13 +18,13 @@ pub(crate) trait HostApplication {
     async fn handle_capture_worker_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
-    ) -> Option<eros::Result<()>>;
+    ) -> Option<eros::ErrorUnion>;
 
     async fn handle_host_stream_pipeline_worker_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
-    ) -> Option<eros::Result<()>>;
+    ) -> Option<eros::ErrorUnion>;
 
     #[cfg(feature = "test-ui")]
     async fn start_capture_only<EventReporter: HostEventReporter>(

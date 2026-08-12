@@ -17,10 +17,6 @@ pub(crate) struct NetworkClientEventReceiver<Input> {
     permit_sender: flume::Sender<()>,
 }
 
-pub(super) struct NetworkClientEventReceiverKeepalive<Input> {
-    _receiver: flume::Receiver<NetworkClientEvent<Input>>,
-}
-
 impl<Input> NetworkClientEventSender<Input> {
     pub(super) fn channel() -> (Self, NetworkClientEventReceiver<Input>) {
         let (sender, receiver) = flume::bounded(NETWORK_CLIENT_EVENT_QUEUE_CAPACITY);
@@ -56,42 +52,9 @@ impl<Input> NetworkClientEventSender<Input> {
 }
 
 impl<Input> NetworkClientEventReceiver<Input> {
-    pub(super) fn keepalive(&self) -> NetworkClientEventReceiverKeepalive<Input> {
-        NetworkClientEventReceiverKeepalive {
-            _receiver: self.receiver.clone(),
-        }
-    }
-
     pub(crate) async fn receive(&self) -> Option<NetworkClientEvent<Input>> {
         let event = self.receiver.recv_async().await.ok()?;
         let _ = self.permit_sender.send_async(()).await;
         Some(event)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keepalive_preserves_the_data_channel_after_the_consumer_is_dropped() {
-        let runtime = compio::runtime::Runtime::new().expect("test runtime should start");
-        runtime.block_on(async {
-            let (sender, receiver) = NetworkClientEventSender::channel();
-            let keepalive = receiver.keepalive();
-            sender
-                .acquire_permit()
-                .await
-                .expect("initial client event permit should exist");
-            drop(receiver);
-
-            sender
-                .send(NetworkClientEvent {
-                    stream_id: StreamId::new(0),
-                    input: (),
-                })
-                .expect("keepalive should preserve the data channel through shutdown");
-            drop(keepalive);
-        });
     }
 }

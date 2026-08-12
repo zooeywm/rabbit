@@ -7,9 +7,7 @@ use eros::Context;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use super::{
-    client_event_queue::{
-        NetworkClientEventReceiver, NetworkClientEventReceiverKeepalive, NetworkClientEventSender,
-    },
+    client_event_queue::{NetworkClientEventReceiver, NetworkClientEventSender},
     packetized_send_queue::{
         PacketizePermitReceiver, PacketizedSendReceiver, PacketizedSendSender,
     },
@@ -31,7 +29,6 @@ pub(crate) struct NetworkWorker;
 pub(crate) struct NetworkWorkerHandle<Buffer, ClientInput> {
     sender: EncodedUnitSender<Buffer>,
     client_event_receiver: Option<NetworkClientEventReceiver<ClientInput>>,
-    client_event_receiver_keepalive: NetworkClientEventReceiverKeepalive<ClientInput>,
     shutdown_sender: flume::Sender<()>,
     worker_thread: JoinHandle<eros::Result<()>>,
 }
@@ -41,12 +38,6 @@ struct NetworkWorkerExitGuard {
 }
 
 struct NetworkQueueMetricsGuard;
-
-enum NetworkTaskExit {
-    EventLoop(eros::Result<()>),
-    SendLoop(eros::Result<()>),
-    ReceiveLoop(eros::Result<()>),
-}
 
 enum NetworkEventLoopStep {
     Continue,
@@ -74,7 +65,6 @@ impl NetworkWorker {
     {
         let (sender, receiver) = EncodedUnitReceiver::channel();
         let (client_event_sender, client_event_receiver) = NetworkClientEventSender::channel();
-        let client_event_receiver_keepalive = client_event_receiver.keepalive();
         let (shutdown_sender, shutdown_receiver) = flume::bounded(1);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
         let worker_thread = thread::Builder::new()
@@ -102,7 +92,6 @@ impl NetworkWorker {
         Ok(NetworkWorkerHandle {
             sender,
             client_event_receiver: Some(client_event_receiver),
-            client_event_receiver_keepalive,
             shutdown_sender,
             worker_thread,
         })
@@ -135,7 +124,6 @@ impl<Buffer, ClientInput> NetworkWorkerHandle<Buffer, ClientInput> {
         let Self {
             sender: _sender,
             client_event_receiver: _client_event_receiver,
-            client_event_receiver_keepalive: _client_event_receiver_keepalive,
             shutdown_sender,
             worker_thread,
         } = self;
@@ -185,39 +173,33 @@ where
 
     let mut tasks = FuturesUnordered::new();
     tasks.push(compio::runtime::spawn(async move {
-        NetworkTaskExit::EventLoop(
-            run_network_event_loop(
-                network,
-                encoded_receiver,
-                received_receiver,
-                packetized_sender,
-                packetize_permits,
-                client_event_sender,
-                event_shutdown_receiver,
-            )
-            .await,
+        run_network_event_loop(
+            network,
+            encoded_receiver,
+            received_receiver,
+            packetized_sender,
+            packetize_permits,
+            client_event_sender,
+            event_shutdown_receiver,
         )
+        .await
     }));
     tasks.push(compio::runtime::spawn(async move {
-        NetworkTaskExit::SendLoop(
-            run_send_loop::<NetworkContainer<State>>(
-                sender,
-                packetized_receiver,
-                send_shutdown_receiver,
-                NetworkMetricsHandle::new(),
-            )
-            .await,
+        run_send_loop::<NetworkContainer<State>>(
+            sender,
+            packetized_receiver,
+            send_shutdown_receiver,
+            NetworkMetricsHandle::new(),
         )
+        .await
     }));
     tasks.push(compio::runtime::spawn(async move {
-        NetworkTaskExit::ReceiveLoop(
-            run_receive_loop::<NetworkContainer<State>>(
-                receiver,
-                received_sender,
-                receive_shutdown_receiver,
-            )
-            .await,
+        run_receive_loop::<NetworkContainer<State>>(
+            receiver,
+            received_sender,
+            receive_shutdown_receiver,
         )
+        .await
     }));
 
     let mut first_error = None;
@@ -244,8 +226,8 @@ where
         let Some(joined) = joined else {
             continue;
         };
-        let exit = match joined {
-            Ok(exit) => exit,
+        let result = match joined {
+            Ok(result) => result,
             Err(error) => {
                 tracing::error!(%error, "Network task failed to join");
                 if !shutdown_started && first_error.is_none() {
@@ -257,12 +239,6 @@ where
                 shutdown_started = true;
                 continue;
             }
-        };
-
-        let result = match exit {
-            NetworkTaskExit::EventLoop(result)
-            | NetworkTaskExit::SendLoop(result)
-            | NetworkTaskExit::ReceiveLoop(result) => result,
         };
 
         if let Err(error) = result {

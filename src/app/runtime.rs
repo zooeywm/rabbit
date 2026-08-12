@@ -116,7 +116,7 @@ impl AppRuntime {
 
                 let app_exit = runtime.block_on(app.run(
                     encoded_unit_sender,
-                    network_client_event_receiver,
+                    &network_client_event_receiver,
                     app_message_sender,
                     message_receiver,
                 ));

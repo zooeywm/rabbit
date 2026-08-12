@@ -157,8 +157,6 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
             .remove(&stream_id)
             .with_context(|| "Host stream pipeline does not exist")?;
 
-        host_stream_pipeline_handle.close();
-
         let _ = self.capture_worker_handle.remove_stream(stream_id).await;
 
         host_stream_pipeline_handle.shutdown().await

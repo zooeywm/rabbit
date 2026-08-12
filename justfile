@@ -14,7 +14,7 @@ _xwin command *args:
     cargo xwin {{ command }} --target {{ windows-target }} {{ args }}
 
 run-xwin: (_xwin "run")
-run-xwin_testui: (_xwin "run" "--features" "test-ui")
+run-xwin-testui: (_xwin "run" "--features" "test-ui" "--" "--test")
 build-xwin: (_xwin "build")
 check-xwin: (_xwin "check" "--all-targets" "--all-features")
 lint-xwin: (_xwin "clippy" "--all-targets" "--all-features")
@@ -26,7 +26,7 @@ lint:
 run:
     cargo run
 run-testui:
-    cargo run --features test-ui
+    cargo run --features test-ui -- --test
 run-fake-testui:
     cargo run --features fake,test-ui -- --test
 run-fake:
@@ -38,7 +38,7 @@ build-testui:
 build-fake-testui:
     cargo build --features fake,test-ui
 build-fake:
-    cargo run --features fake
+    cargo build --features fake
 test:
     cargo nextest run
 fmt:
