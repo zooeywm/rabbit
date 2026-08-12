@@ -7,12 +7,14 @@ use eros::Context;
 
 use crate::{
     app::container::{
+        packetization::outbound_port::Packetizer,
         root::{
-            AppContainer, CapturedFrameFor, EncoderInputFor, StreamPipelineFor,
+            AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor, PacketizerFor,
+            StreamPipelineFor,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                MetricsRecorder,
+                MetricsRecorder, PacketizerManager, PacketizerManagerStateSpec,
             },
         },
         stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -55,9 +57,9 @@ pub(crate) struct AppHandle {
 }
 
 impl AppRuntime {
-    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt, AppRuntimeGuard>(
+    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt, AppRuntimeGuard>(
         app_constructor: impl FnOnce() -> eros::Result<(
-            AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+            AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>,
             AppRuntimeGuard,
         )> + Send
         + 'static,
@@ -66,12 +68,16 @@ impl AppRuntime {
         CapMgrSt: CapturerManagerStateSpec,
         CvtMgrSt: ConverterManagerStateSpec,
         EcdMgrSt: EncoderManagerStateSpec,
-        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
+        PktMgrSt: PacketizerManagerStateSpec,
+        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>: CapturerManager<State = CapMgrSt>
             + ConverterManager<State = CvtMgrSt>
-            + EncoderManager<State = EcdMgrSt>,
+            + EncoderManager<State = EcdMgrSt>
+            + PacketizerManager<State = PktMgrSt>,
         StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
             + MetricsRecorder,
+        EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
+        PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
     {
         let (message_sender, message_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
@@ -181,6 +187,7 @@ mod tests {
 
     use super::*;
     use crate::app::container::{
+        packetization::{PacketizerContainer, outbound_port::Packetizer},
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
         stream_pipeline::{StreamPipelineContainer, outbound_port::EncodedVideoFrame},
     };
@@ -194,6 +201,7 @@ mod tests {
     struct TestControl;
     struct TestConverterManagerState;
     struct TestEncoderManagerState;
+    struct TestPacketizerManagerState;
 
     impl CapturerManagerStateSpec for TestCapturerManagerState {
         type ScreenCapturerState = TestCapturerState;
@@ -256,8 +264,16 @@ mod tests {
         type VideoEncoderState = ();
     }
 
-    type TestApp =
-        AppContainer<TestCapturerManagerState, TestConverterManagerState, TestEncoderManagerState>;
+    impl PacketizerManagerStateSpec for TestPacketizerManagerState {
+        type PacketizerState = ();
+    }
+
+    type TestApp = AppContainer<
+        TestCapturerManagerState,
+        TestConverterManagerState,
+        TestEncoderManagerState,
+        TestPacketizerManagerState,
+    >;
 
     impl CapturerManager for TestApp {
         type State = TestCapturerManagerState;
@@ -290,6 +306,16 @@ mod tests {
         }
     }
 
+    impl PacketizerManager for TestApp {
+        type State = TestPacketizerManagerState;
+
+        fn compose_packetizer_state(
+            &mut self,
+        ) -> impl FnOnce() -> eros::Result<()> + Send + 'static + use<> {
+            || Ok(())
+        }
+    }
+
     impl EncoderFrameConverter for StreamPipelineContainer<(), ()> {
         type CapturedFrame = ();
         type EncoderInput = ();
@@ -305,6 +331,14 @@ mod tests {
 
         fn encode(&mut self, _input: ()) -> eros::Result<EncodedVideoFrame<()>> {
             unreachable!("the runtime test does not encode frames")
+        }
+    }
+
+    impl Packetizer for PacketizerContainer<()> {
+        type EncodedBuffer = ();
+
+        fn packetize(&mut self, _frame: EncodedVideoFrame<()>) -> eros::Result<()> {
+            Ok(())
         }
     }
 
@@ -326,6 +360,7 @@ mod tests {
                     },
                     TestConverterManagerState,
                     TestEncoderManagerState,
+                    TestPacketizerManagerState,
                 ),
                 (),
             ))

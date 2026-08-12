@@ -1,6 +1,6 @@
-mod capture_source_runtime;
 #[cfg(feature = "test-ui")]
 mod capture_only;
+mod capture_source_runtime;
 
 pub(super) use capture_source_runtime::CaptureSourceRuntime;
 use eros::Context;
@@ -8,12 +8,14 @@ use eros::Context;
 use crate::{
     app::{
         container::{
+            packetization::outbound_port::Packetizer,
             root::{
-                AppContainer, CapturedFrameFor, EncoderInputFor, StreamPipelineFor,
+                AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor, PacketizerFor,
+                StreamPipelineFor,
                 outbound_port::{
                     CapturerManager, CapturerManagerStateSpec, ConverterManager,
                     ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                    MetricsRecorder,
+                    MetricsRecorder, PacketizerManager, PacketizerManagerStateSpec,
                 },
             },
             screen_capture::inbound::CaptureWorker,
@@ -27,25 +29,31 @@ use crate::{
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
+    PktMgrSt: PacketizerManagerStateSpec,
     Self: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>,
+        + EncoderManager<State = EcdMgrSt>
+        + PacketizerManager<State = PktMgrSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
+    EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
+    PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
 {
     fn compose_stream_pipeline_states(
         &mut self,
     ) -> impl FnOnce() -> eros::Result<(
         CvtMgrSt::EncoderFrameConverterState,
         EcdMgrSt::VideoEncoderState,
-    )> + Send
-    + 'static {
+    )>
+    + Send
+    + 'static
+    + use<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt> {
         let encoder_frame_converter_state_constructor =
             self.compose_encoder_frame_converter_state();
         let video_encoder_state_constructor = self.compose_video_encoder_state();
@@ -79,10 +87,12 @@ where
         };
 
         let stream_pipeline_states_constructor = self.compose_stream_pipeline_states();
+        let packetizer_state_constructor = self.compose_packetizer_state();
         let stream_pipeline_handle = StreamPipelineWorker::spawn(
             capture_source_id,
             stream_id,
             stream_pipeline_states_constructor,
+            packetizer_state_constructor,
             app_message_sender.clone(),
         )
         .await?;

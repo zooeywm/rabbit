@@ -1,10 +1,12 @@
 use crate::{
     app::container::{
+        packetization::{PacketizerContainer, outbound_port::Packetizer},
         root::{
             AppContainer,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
+                PacketizerManager, PacketizerManagerStateSpec,
             },
         },
         screen_capture::{
@@ -21,8 +23,10 @@ use crate::{
         FakeCapturedFrame, FakeCapturerManagerImpl, FakeCapturerManagerState,
         FakeConverterManagerImpl, FakeConverterManagerState, FakeEncoderFrameConverterImpl,
         FakeEncoderFrameConverterState, FakeEncoderInput, FakeEncoderManagerImpl,
-        FakeEncoderManagerState, FakeScreenCapturerControl, FakeScreenCapturerImpl,
-        FakeScreenCapturerState, FakeVideoEncoderImpl, FakeVideoEncoderState,
+        FakeEncoderManagerState, FakePacketizerImpl, FakePacketizerManagerImpl,
+        FakePacketizerManagerState, FakePacketizerState, FakeScreenCapturerControl,
+        FakeScreenCapturerImpl, FakeScreenCapturerState, FakeVideoEncoderImpl,
+        FakeVideoEncoderState,
     },
     infrastructure::support::media::FrameLease,
 };
@@ -32,24 +36,24 @@ impl CapturerManagerStateSpec for FakeCapturerManagerState {
     type ScreenCapturer = ScreenCaptureContainer<FakeScreenCapturerState>;
 }
 
-impl<CvtMgrSt, EcdMgrSt> AsRef<FakeCapturerManagerState>
-    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+impl<CvtMgrSt, EcdMgrSt, PktMgrSt> AsRef<FakeCapturerManagerState>
+    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
 {
     fn as_ref(&self) -> &FakeCapturerManagerState {
         self.capturer_manager_state()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt> AsMut<FakeCapturerManagerState>
-    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+impl<CvtMgrSt, EcdMgrSt, PktMgrSt> AsMut<FakeCapturerManagerState>
+    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
 {
     fn as_mut(&mut self) -> &mut FakeCapturerManagerState {
         self.capturer_manager_state_mut()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt> CapturerManager
-    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
+impl<CvtMgrSt, EcdMgrSt, PktMgrSt> CapturerManager
+    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
 {
     type State = FakeCapturerManagerState;
 
@@ -60,7 +64,7 @@ impl<CvtMgrSt, EcdMgrSt> CapturerManager
         -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
     + Send
     + 'static
-    + use<CvtMgrSt, EcdMgrSt> {
+    + use<CvtMgrSt, EcdMgrSt, PktMgrSt> {
         CapturerManager::compose_screen_capturer_state(
             FakeCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
@@ -114,8 +118,8 @@ impl ConverterManagerStateSpec for FakeConverterManagerState {
     type EncoderFrameConverterState = FakeEncoderFrameConverterState;
 }
 
-impl<CapMgrSt, EcdMgrSt> AsRef<FakeConverterManagerState>
-    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+impl<CapMgrSt, EcdMgrSt, PktMgrSt> AsRef<FakeConverterManagerState>
+    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -124,8 +128,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt> AsMut<FakeConverterManagerState>
-    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+impl<CapMgrSt, EcdMgrSt, PktMgrSt> AsMut<FakeConverterManagerState>
+    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -134,8 +138,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt> ConverterManager
-    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
+impl<CapMgrSt, EcdMgrSt, PktMgrSt> ConverterManager
+    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -148,7 +152,7 @@ where
     >
     + Send
     + 'static
-    + use<CapMgrSt, EcdMgrSt> {
+    + use<CapMgrSt, EcdMgrSt, PktMgrSt> {
         ConverterManager::compose_encoder_frame_converter_state(
             FakeConverterManagerImpl::inj_ref_mut(self),
         )
@@ -186,8 +190,8 @@ impl EncoderManagerStateSpec for FakeEncoderManagerState {
     type VideoEncoderState = FakeVideoEncoderState;
 }
 
-impl<CapMgrSt, CvtMgrSt> AsRef<FakeEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+impl<CapMgrSt, CvtMgrSt, PktMgrSt> AsRef<FakeEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -196,8 +200,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt> AsMut<FakeEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+impl<CapMgrSt, CvtMgrSt, PktMgrSt> AsMut<FakeEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -206,8 +210,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt> EncoderManager
-    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
+impl<CapMgrSt, CvtMgrSt, PktMgrSt> EncoderManager
+    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -218,7 +222,7 @@ where
     ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
     + Send
     + 'static
-    + use<CapMgrSt, CvtMgrSt> {
+    + use<CapMgrSt, CvtMgrSt, PktMgrSt> {
         EncoderManager::compose_video_encoder_state(FakeEncoderManagerImpl::inj_ref_mut(self))
     }
 }
@@ -247,8 +251,67 @@ impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, FakeVideoEncoderStat
     }
 }
 
-pub(super) type PlatformApp =
-    AppContainer<FakeCapturerManagerState, FakeConverterManagerState, FakeEncoderManagerState>;
+impl PacketizerManagerStateSpec for FakePacketizerManagerState {
+    type PacketizerState = FakePacketizerState;
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsRef<FakePacketizerManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, FakePacketizerManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+{
+    fn as_ref(&self) -> &FakePacketizerManagerState {
+        self.packetizer_manager_state()
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsMut<FakePacketizerManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, FakePacketizerManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+{
+    fn as_mut(&mut self) -> &mut FakePacketizerManagerState {
+        self.packetizer_manager_state_mut()
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> PacketizerManager
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, FakePacketizerManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+{
+    type State = FakePacketizerManagerState;
+
+    fn compose_packetizer_state(
+        &mut self,
+    ) -> impl FnOnce() -> eros::Result<<Self::State as PacketizerManagerStateSpec>::PacketizerState>
+    + Send
+    + 'static
+    + use<CapMgrSt, CvtMgrSt, EcdMgrSt> {
+        PacketizerManager::compose_packetizer_state(FakePacketizerManagerImpl::inj_ref_mut(self))
+    }
+}
+
+impl AsMut<FakePacketizerState> for PacketizerContainer<FakePacketizerState> {
+    fn as_mut(&mut self) -> &mut FakePacketizerState {
+        self.state_mut()
+    }
+}
+
+impl Packetizer for PacketizerContainer<FakePacketizerState> {
+    type EncodedBuffer = [u8; 8];
+
+    fn packetize(&mut self, frame: EncodedVideoFrame<Self::EncodedBuffer>) -> eros::Result<()> {
+        Packetizer::packetize(FakePacketizerImpl::inj_ref_mut(self), frame)
+    }
+}
+
+pub(super) type PlatformApp = AppContainer<
+    FakeCapturerManagerState,
+    FakeConverterManagerState,
+    FakeEncoderManagerState,
+    FakePacketizerManagerState,
+>;
 
 pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
     || {
@@ -256,6 +319,7 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
             FakeCapturerManagerState::new()?,
             FakeConverterManagerState::new()?,
             FakeEncoderManagerState::new()?,
+            FakePacketizerManagerState::new()?,
         ))
     }
 }

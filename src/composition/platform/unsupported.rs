@@ -2,11 +2,13 @@ use std::convert::Infallible;
 
 use crate::{
     app::container::{
+        packetization::{PacketizerContainer, outbound_port::Packetizer},
         root::{
             AppContainer,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
+                PacketizerManager, PacketizerManagerStateSpec,
             },
         },
         screen_capture::{
@@ -23,8 +25,10 @@ use crate::{
         UnsupportedCapturerManagerImpl, UnsupportedCapturerManagerState,
         UnsupportedConverterManagerImpl, UnsupportedConverterManagerState,
         UnsupportedEncoderFrameConverterState, UnsupportedEncoderManagerImpl,
-        UnsupportedEncoderManagerState, UnsupportedScreenCapturerImpl,
-        UnsupportedScreenCapturerState, UnsupportedVideoEncoderState,
+        UnsupportedEncoderManagerState, UnsupportedPacketizerImpl,
+        UnsupportedPacketizerManagerImpl, UnsupportedPacketizerManagerState,
+        UnsupportedPacketizerState, UnsupportedScreenCapturerImpl, UnsupportedScreenCapturerState,
+        UnsupportedVideoEncoderState,
     },
 };
 
@@ -33,24 +37,24 @@ impl CapturerManagerStateSpec for UnsupportedCapturerManagerState {
     type ScreenCapturer = ScreenCaptureContainer<UnsupportedScreenCapturerState>;
 }
 
-impl<CvtMgrSt, EcdMgrSt> AsRef<UnsupportedCapturerManagerState>
-    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
+impl<CvtMgrSt, EcdMgrSt, PktMgrSt> AsRef<UnsupportedCapturerManagerState>
+    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
 {
     fn as_ref(&self) -> &UnsupportedCapturerManagerState {
         self.capturer_manager_state()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt> AsMut<UnsupportedCapturerManagerState>
-    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
+impl<CvtMgrSt, EcdMgrSt, PktMgrSt> AsMut<UnsupportedCapturerManagerState>
+    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
 {
     fn as_mut(&mut self) -> &mut UnsupportedCapturerManagerState {
         self.capturer_manager_state_mut()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt> CapturerManager
-    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
+impl<CvtMgrSt, EcdMgrSt, PktMgrSt> CapturerManager
+    for AppContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
 {
     type State = UnsupportedCapturerManagerState;
 
@@ -61,7 +65,7 @@ impl<CvtMgrSt, EcdMgrSt> CapturerManager
         -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
     + Send
     + 'static
-    + use<CvtMgrSt, EcdMgrSt> {
+    + use<CvtMgrSt, EcdMgrSt, PktMgrSt> {
         CapturerManager::compose_screen_capturer_state(
             UnsupportedCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
@@ -103,8 +107,8 @@ impl ConverterManagerStateSpec for UnsupportedConverterManagerState {
     type EncoderFrameConverterState = UnsupportedEncoderFrameConverterState;
 }
 
-impl<CapMgrSt, EcdMgrSt> AsRef<UnsupportedConverterManagerState>
-    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
+impl<CapMgrSt, EcdMgrSt, PktMgrSt> AsRef<UnsupportedConverterManagerState>
+    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -113,8 +117,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt> AsMut<UnsupportedConverterManagerState>
-    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
+impl<CapMgrSt, EcdMgrSt, PktMgrSt> AsMut<UnsupportedConverterManagerState>
+    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -123,8 +127,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt> ConverterManager
-    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
+impl<CapMgrSt, EcdMgrSt, PktMgrSt> ConverterManager
+    for AppContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -137,7 +141,7 @@ where
     >
     + Send
     + 'static
-    + use<CapMgrSt, EcdMgrSt> {
+    + use<CapMgrSt, EcdMgrSt, PktMgrSt> {
         ConverterManager::compose_encoder_frame_converter_state(
             UnsupportedConverterManagerImpl::inj_ref_mut(self),
         )
@@ -175,8 +179,8 @@ impl EncoderManagerStateSpec for UnsupportedEncoderManagerState {
     type VideoEncoderState = UnsupportedVideoEncoderState;
 }
 
-impl<CapMgrSt, CvtMgrSt> AsRef<UnsupportedEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
+impl<CapMgrSt, CvtMgrSt, PktMgrSt> AsRef<UnsupportedEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -185,8 +189,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt> AsMut<UnsupportedEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
+impl<CapMgrSt, CvtMgrSt, PktMgrSt> AsMut<UnsupportedEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -195,8 +199,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt> EncoderManager
-    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
+impl<CapMgrSt, CvtMgrSt, PktMgrSt> EncoderManager
+    for AppContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -207,7 +211,7 @@ where
     ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
     + Send
     + 'static
-    + use<CapMgrSt, CvtMgrSt> {
+    + use<CapMgrSt, CvtMgrSt, PktMgrSt> {
         EncoderManager::compose_video_encoder_state(UnsupportedEncoderManagerImpl::inj_ref_mut(
             self,
         ))
@@ -242,10 +246,68 @@ impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, UnsupportedVideoEnco
     }
 }
 
+impl PacketizerManagerStateSpec for UnsupportedPacketizerManagerState {
+    type PacketizerState = UnsupportedPacketizerState;
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsRef<UnsupportedPacketizerManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, UnsupportedPacketizerManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+{
+    fn as_ref(&self) -> &UnsupportedPacketizerManagerState {
+        self.packetizer_manager_state()
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsMut<UnsupportedPacketizerManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, UnsupportedPacketizerManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+{
+    fn as_mut(&mut self) -> &mut UnsupportedPacketizerManagerState {
+        self.packetizer_manager_state_mut()
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> PacketizerManager
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, UnsupportedPacketizerManagerState>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+{
+    type State = UnsupportedPacketizerManagerState;
+
+    fn compose_packetizer_state(
+        &mut self,
+    ) -> impl FnOnce() -> eros::Result<<Self::State as PacketizerManagerStateSpec>::PacketizerState>
+    + Send
+    + 'static
+    + use<CapMgrSt, CvtMgrSt, EcdMgrSt> {
+        PacketizerManager::compose_packetizer_state(UnsupportedPacketizerManagerImpl::inj_ref_mut(
+            self,
+        ))
+    }
+}
+
+impl AsMut<UnsupportedPacketizerState> for PacketizerContainer<UnsupportedPacketizerState> {
+    fn as_mut(&mut self) -> &mut UnsupportedPacketizerState {
+        self.state_mut()
+    }
+}
+
+impl Packetizer for PacketizerContainer<UnsupportedPacketizerState> {
+    type EncodedBuffer = Infallible;
+
+    fn packetize(&mut self, frame: EncodedVideoFrame<Self::EncodedBuffer>) -> eros::Result<()> {
+        Packetizer::packetize(UnsupportedPacketizerImpl::inj_ref_mut(self), frame)
+    }
+}
+
 pub(super) type PlatformApp = AppContainer<
     UnsupportedCapturerManagerState,
     UnsupportedConverterManagerState,
     UnsupportedEncoderManagerState,
+    UnsupportedPacketizerManagerState,
 >;
 
 pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
@@ -254,6 +316,7 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
             UnsupportedCapturerManagerState::new()?,
             UnsupportedConverterManagerState::new()?,
             UnsupportedEncoderManagerState::new()?,
+            UnsupportedPacketizerManagerState::new()?,
         ))
     }
 }

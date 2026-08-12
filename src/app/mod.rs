@@ -5,11 +5,12 @@ mod runtime;
 
 use config::Config;
 use container::{
+    packetization::outbound_port::Packetizer,
     root::{
         AppContainer,
         outbound_port::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
-            EncoderManager, EncoderManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec, PacketizerManager, PacketizerManagerStateSpec,
         },
     },
     stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -18,13 +19,15 @@ use directories::ProjectDirs;
 use eros::Context;
 use runtime::AppRuntime;
 
-use container::root::{CapturedFrameFor, EncoderInputFor, StreamPipelineFor};
+use container::root::{
+    CapturedFrameFor, EncodedBufferFor, EncoderInputFor, PacketizerFor, StreamPipelineFor,
+};
 
 pub(crate) use runtime::AppHandle;
 
-pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt, AppRuntimeGuard>(
+pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt, AppRuntimeGuard>(
     app_constructor: impl FnOnce() -> eros::Result<(
-        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>,
         AppRuntimeGuard,
     )> + Send
     + 'static,
@@ -34,11 +37,15 @@ where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
-    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
+    PktMgrSt: PacketizerManagerStateSpec,
+    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>,
+        + EncoderManager<State = EcdMgrSt>
+        + PacketizerManager<State = PktMgrSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
+    EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
+    PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
 {
     let project_dirs = ProjectDirs::from("", "", "rabbit")
         .with_context(|| "Failed looking for app project dir")?;

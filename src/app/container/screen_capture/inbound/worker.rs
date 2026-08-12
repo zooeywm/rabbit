@@ -75,10 +75,7 @@ impl CaptureWorker {
     async fn spawn_with_frame_slots<Capturer, State>(
         capture_source_id: CaptureSourceId,
         screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
-        initial_frame_slots: HashMap<
-            StreamId,
-            Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
-        >,
+        initial_frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Capturer::CapturedFrame>>>,
         app_message_sender: flume::Sender<AppMessage>,
     ) -> eros::Result<CaptureWorkerHandle<Capturer>>
     where
@@ -218,10 +215,7 @@ impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
 fn run_capture_worker<Capturer, State>(
     capture_source_id: CaptureSourceId,
     screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State>,
-    initial_frame_slots: HashMap<
-        StreamId,
-        Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
-    >,
+    initial_frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Capturer::CapturedFrame>>>,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
     app_message_sender: flume::Sender<AppMessage>,
     started_sender: flume::Sender<Capturer::Control>,
@@ -269,9 +263,7 @@ where
 
 impl<Frame> CaptureWorkerState<Frame> {
     fn new(frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Frame>>>) -> Self {
-        Self {
-            frame_slots,
-        }
+        Self { frame_slots }
     }
 
     fn consumer_count(&self) -> usize {

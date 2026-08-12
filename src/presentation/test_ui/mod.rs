@@ -128,9 +128,7 @@ impl TestUi {
         let app_handle = self.app_handle.clone();
 
         cx.spawn(async move |this, cx| {
-            let result = app_handle
-                .start_capture_only(CaptureSourceId::new(0))
-                .await;
+            let result = app_handle.start_capture_only(CaptureSourceId::new(0)).await;
 
             this.update(cx, |this, cx| {
                 match result {
@@ -162,9 +160,7 @@ impl TestUi {
         let app_handle = self.app_handle.clone();
 
         cx.spawn(async move |this, cx| {
-            let result = app_handle
-                .stop_capture_only(CaptureSourceId::new(0))
-                .await;
+            let result = app_handle.stop_capture_only(CaptureSourceId::new(0)).await;
 
             this.update(cx, |this, cx| {
                 match result {

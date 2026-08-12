@@ -6,11 +6,16 @@ use std::collections::HashMap;
 
 use crate::{
     app::container::{
+        packetization::PacketizerContainer,
         root::outbound_port::{
             CapturerManagerStateSpec, ConverterManagerStateSpec, EncoderManagerStateSpec,
+            PacketizerManagerStateSpec,
         },
         screen_capture::outbound_port::ScreenCapturer,
-        stream_pipeline::{StreamPipelineContainer, outbound_port::EncoderFrameConverter},
+        stream_pipeline::{
+            StreamPipelineContainer,
+            outbound_port::{EncoderFrameConverter, VideoEncoder},
+        },
     },
     domain::stream::models::vo::CaptureSourceId,
 };
@@ -27,21 +32,28 @@ pub(crate) type StreamPipelineFor<CvtMgrSt, EcdMgrSt> = StreamPipelineContainer<
 pub(crate) type EncoderInputFor<CvtMgrSt, EcdMgrSt> =
     <StreamPipelineFor<CvtMgrSt, EcdMgrSt> as EncoderFrameConverter>::EncoderInput;
 
+pub(crate) type EncodedBufferFor<CvtMgrSt, EcdMgrSt> =
+    <StreamPipelineFor<CvtMgrSt, EcdMgrSt> as VideoEncoder>::EncodedBuffer;
+
+pub(crate) type PacketizerFor<PktMgrSt> =
+    PacketizerContainer<<PktMgrSt as PacketizerManagerStateSpec>::PacketizerState>;
+
 type CaptureSourceRuntimeFor<CapMgrSt> =
     CaptureSourceRuntime<<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer>;
 
-pub(crate) struct AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+pub(crate) struct AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
     capturer_manager_state: CapMgrSt,
     converter_manager_state: CvtMgrSt,
     encoder_manager_state: EcdMgrSt,
+    packetizer_manager_state: PktMgrSt,
     capture_source_runtimes: HashMap<CaptureSourceId, CaptureSourceRuntimeFor<CapMgrSt>>,
     next_stream_id: u16,
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -49,11 +61,13 @@ where
         capturer_manager_state: CapMgrSt,
         converter_manager_state: CvtMgrSt,
         encoder_manager_state: EcdMgrSt,
+        packetizer_manager_state: PktMgrSt,
     ) -> Self {
         Self {
             capturer_manager_state,
             converter_manager_state,
             encoder_manager_state,
+            packetizer_manager_state,
             capture_source_runtimes: HashMap::new(),
             next_stream_id: 0,
         }
@@ -81,6 +95,14 @@ where
 
     pub(crate) fn encoder_manager_state_mut(&mut self) -> &mut EcdMgrSt {
         &mut self.encoder_manager_state
+    }
+
+    pub(crate) fn packetizer_manager_state(&self) -> &PktMgrSt {
+        &self.packetizer_manager_state
+    }
+
+    pub(crate) fn packetizer_manager_state_mut(&mut self) -> &mut PktMgrSt {
+        &mut self.packetizer_manager_state
     }
 
     pub(crate) async fn shutdown(self) -> eros::Result<()> {

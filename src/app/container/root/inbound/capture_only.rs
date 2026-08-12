@@ -2,17 +2,20 @@ use crate::app::runtime::capture_only::CaptureOnlyMessage;
 
 use super::*;
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
+    PktMgrSt: PacketizerManagerStateSpec,
     Self: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>,
+        + EncoderManager<State = EcdMgrSt>
+        + PacketizerManager<State = PktMgrSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
+    PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
 {
     async fn start_capture_only(
         &mut self,
@@ -44,10 +47,7 @@ where
         Ok(())
     }
 
-    async fn stop_capture_only(
-        &mut self,
-        capture_source_id: CaptureSourceId,
-    ) -> eros::Result<()> {
+    async fn stop_capture_only(&mut self, capture_source_id: CaptureSourceId) -> eros::Result<()> {
         let capture_source_runtime = self
             .capture_source_runtimes
             .get(&capture_source_id)
