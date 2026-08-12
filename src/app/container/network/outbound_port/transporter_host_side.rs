@@ -3,6 +3,8 @@ use crate::{
     domain::stream::models::vo::StreamId,
 };
 
+use super::SentBytes;
+
 pub(crate) trait TransporterHostSide {
     type EncodedBuffer;
     type Packetized;
@@ -16,5 +18,8 @@ pub(crate) trait TransporterHostSide {
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized>;
 
-    async fn send(sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()>;
+    async fn send(
+        sender: &mut Self::Sender,
+        packetized: Self::Packetized,
+    ) -> eros::Result<SentBytes>;
 }

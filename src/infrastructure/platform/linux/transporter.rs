@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use crate::{
     app::container::{
         host_stream_pipeline::outbound_port::EncodedVideoUnit,
-        network::outbound_port::{TransporterClientSide, TransporterHostSide},
+        network::outbound_port::{SentBytes, TransporterClientSide, TransporterHostSide},
     },
     domain::stream::models::vo::StreamId,
 };
@@ -31,7 +31,10 @@ impl<Deps> TransporterHostSide for LinuxTransporterImpl<Deps> {
         match unit.data {}
     }
 
-    async fn send(_sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()> {
+    async fn send(
+        _sender: &mut Self::Sender,
+        packetized: Self::Packetized,
+    ) -> eros::Result<SentBytes> {
         match packetized {}
     }
 }

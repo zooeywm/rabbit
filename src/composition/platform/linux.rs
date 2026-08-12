@@ -16,7 +16,7 @@ use crate::{
         },
         network::{
             NetworkContainer,
-            outbound_port::{TransporterClientSide, TransporterHostSide},
+            outbound_port::{SentBytes, TransporterClientSide, TransporterHostSide},
         },
         root::{
             AppContainer,
@@ -325,7 +325,10 @@ impl TransporterHostSide for NetworkContainer<LinuxTransporterState> {
         TransporterHostSide::packetize(LinuxTransporterImpl::inj_ref_mut(self), stream_id, unit)
     }
 
-    async fn send(_sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()> {
+    async fn send(
+        _sender: &mut Self::Sender,
+        packetized: Self::Packetized,
+    ) -> eros::Result<SentBytes> {
         match packetized {}
     }
 }

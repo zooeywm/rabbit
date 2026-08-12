@@ -1,6 +1,7 @@
 mod inbound;
 
 pub(crate) mod outbound_port;
+pub(crate) use inbound::AppRunExit;
 
 use crate::app::container::root::outbound_port::{
     TransporterConstructor, TransporterConstructorStateSpec,

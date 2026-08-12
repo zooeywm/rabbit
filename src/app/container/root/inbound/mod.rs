@@ -8,6 +8,11 @@ use crate::app::{
     runtime::AppMessage,
 };
 
+pub(crate) enum AppRunExit {
+    Application(eros::Result<()>),
+    NetworkWorkerExited,
+}
+
 impl<Host, Client, NetworkConstructorState> AppContainer<Host, Client, NetworkConstructorState>
 where
     Host: HostApplication,
@@ -19,7 +24,7 @@ where
         network_client_event_receiver: NetworkClientEventReceiver<Client::NetworkInput>,
         app_message_sender: flume::Sender<AppMessage>,
         message_receiver: flume::Receiver<AppMessage>,
-    ) -> eros::Result<()> {
+    ) -> AppRunExit {
         use futures_util::{FutureExt, select_biased};
 
         loop {
@@ -31,14 +36,15 @@ where
                 message = app_message => Some(message),
                 event = network_client_event => {
                     let Some(event) = event else {
-                        break;
+                        let _ = self.shutdown_applications().await;
+                        return AppRunExit::NetworkWorkerExited;
                     };
                     if let Err(failure) = self
                         .client
                         .handle_network_input(event.stream_id, event.input)
                     {
                         let _ = self.shutdown_applications().await;
-                        return Err(failure);
+                        return AppRunExit::Application(Err(failure));
                     }
                     None
                 },
@@ -106,7 +112,7 @@ where
                     };
 
                     let _ = self.shutdown_applications().await;
-                    return failure;
+                    return AppRunExit::Application(failure);
                 }
                 Ok(AppMessage::HostStreamPipelineWorkerExited {
                     capture_source_id,
@@ -121,17 +127,17 @@ where
                     };
 
                     let _ = self.shutdown_applications().await;
-                    return failure;
+                    return AppRunExit::Application(failure);
                 }
                 Ok(AppMessage::NetworkWorkerExited) => {
                     let _ = self.shutdown_applications().await;
-                    eros::bail!("Network worker exited unexpectedly");
+                    return AppRunExit::NetworkWorkerExited;
                 }
                 Ok(AppMessage::Shutdown) | Err(_) => break,
             }
         }
 
-        self.shutdown_applications().await
+        AppRunExit::Application(self.shutdown_applications().await)
     }
 
     async fn shutdown_applications(self) -> eros::Result<()> {

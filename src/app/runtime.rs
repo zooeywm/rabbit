@@ -15,7 +15,7 @@ use crate::{
             outbound_port::{NetworkMetricsRecorder, TransporterClientSide, TransporterHostSide},
         },
         root::{
-            AppContainer, TransporterStateFor,
+            AppContainer, AppRunExit, TransporterStateFor,
             outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
         },
     },
@@ -114,7 +114,7 @@ impl AppRuntime {
                     .send(())
                     .with_context(|| "Failed to report app startup")?;
 
-                let app_result = runtime.block_on(app.run(
+                let app_exit = runtime.block_on(app.run(
                     encoded_unit_sender,
                     network_client_event_receiver,
                     app_message_sender,
@@ -122,10 +122,7 @@ impl AppRuntime {
                 ));
                 let network_result = runtime.block_on(network_worker.shutdown());
 
-                match network_result {
-                    Err(error) => Err(error),
-                    Ok(()) => app_result,
-                }
+                select_app_and_network_result(app_exit, network_result)
             })
             .with_context(|| "Failed to spawn app thread")?;
 
@@ -157,6 +154,20 @@ impl AppRuntime {
 
     pub(super) fn handle(&self) -> AppHandle {
         self.app_handle.clone()
+    }
+}
+
+fn select_app_and_network_result(
+    app_exit: AppRunExit,
+    network_result: eros::Result<()>,
+) -> eros::Result<()> {
+    match app_exit {
+        AppRunExit::Application(Err(error)) => Err(error),
+        AppRunExit::Application(Ok(())) => network_result,
+        AppRunExit::NetworkWorkerExited => match network_result {
+            Err(error) => Err(error),
+            Ok(()) => eros::bail!("Network worker exited unexpectedly"),
+        },
     }
 }
 
@@ -201,5 +212,32 @@ fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()>
     match app_thread.join() {
         Ok(result) => result,
         Err(_) => eros::bail!("App thread panicked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn application_failure_precedes_network_cleanup_failure() {
+        let result = select_app_and_network_result(
+            AppRunExit::Application(Err(eros::error!("Application failed first"))),
+            Err(eros::error!("Network cleanup failed second")),
+        );
+
+        let error = result.expect_err("application failure should be returned");
+        assert!(error.to_string().contains("Application failed first"));
+    }
+
+    #[test]
+    fn network_exit_uses_the_network_root_cause() {
+        let result = select_app_and_network_result(
+            AppRunExit::NetworkWorkerExited,
+            Err(eros::error!("Network root cause")),
+        );
+
+        let error = result.expect_err("network failure should be returned");
+        assert!(error.to_string().contains("Network root cause"));
     }
 }

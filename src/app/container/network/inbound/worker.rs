@@ -15,9 +15,11 @@ use super::{
 };
 use crate::app::{
     container::network::{
-        NetworkContainer,
+        NetworkContainer, NetworkMetricsHandle,
         inbound::{EncodedUnitSender, NetworkClientEvent},
-        outbound_port::{NetworkMetricsRecorder, TransporterClientSide, TransporterHostSide},
+        outbound_port::{
+            NetworkMetricsRecorder, SentBytes, TransporterClientSide, TransporterHostSide,
+        },
     },
     runtime::AppMessage,
 };
@@ -189,7 +191,12 @@ where
     }));
     tasks.push(compio::runtime::spawn(async move {
         NetworkTaskExit::SendLoop(
-            run_send_loop::<NetworkContainer<State>>(sender, packetized_receiver).await,
+            run_send_loop::<NetworkContainer<State>>(
+                sender,
+                packetized_receiver,
+                NetworkMetricsHandle::new(),
+            )
+            .await,
         )
     }));
     tasks.push(compio::runtime::spawn(async move {
@@ -204,6 +211,9 @@ where
     }));
 
     let mut first_error = None;
+    let mut event_loop_finished = false;
+    let mut send_loop_finished = false;
+    let mut receive_loop_finished = false;
     while let Some(joined) = tasks.next().await {
         let exit = match joined {
             Ok(exit) => exit,
@@ -218,10 +228,10 @@ where
             }
         };
 
-        let (is_event_loop, is_receive_loop, result) = match exit {
-            NetworkTaskExit::EventLoop(result) => (true, false, result),
-            NetworkTaskExit::SendLoop(result) => (false, false, result),
-            NetworkTaskExit::ReceiveLoop(result) => (false, true, result),
+        let (is_event_loop, is_send_loop, is_receive_loop, result) = match exit {
+            NetworkTaskExit::EventLoop(result) => (true, false, false, result),
+            NetworkTaskExit::SendLoop(result) => (false, true, false, result),
+            NetworkTaskExit::ReceiveLoop(result) => (false, false, true, result),
         };
 
         if let Err(error) = result {
@@ -230,10 +240,17 @@ where
             }
             let _ = event_shutdown_sender.try_send(());
             let _ = receive_shutdown_sender.try_send(());
-        } else if is_event_loop {
-            let _ = receive_shutdown_sender.try_send(());
-        } else if is_receive_loop {
-            let _ = event_shutdown_sender.try_send(());
+        } else {
+            event_loop_finished |= is_event_loop;
+            send_loop_finished |= is_send_loop;
+            receive_loop_finished |= is_receive_loop;
+
+            if is_receive_loop && !event_loop_finished {
+                let _ = event_shutdown_sender.try_send(());
+            }
+            if event_loop_finished && send_loop_finished && !receive_loop_finished {
+                let _ = receive_shutdown_sender.try_send(());
+            }
         }
     }
 
@@ -311,7 +328,7 @@ where
             received
         );
 
-        futures_util::select_biased! {
+        futures_util::select! {
             _ = supervisor_shutdown => break,
             _ = worker_shutdown => break,
             permit = packetize_permit => {
@@ -365,12 +382,18 @@ impl Drop for NetworkQueueMetricsGuard {
 async fn run_send_loop<Network>(
     mut sender: Network::Sender,
     packetized_receiver: PacketizedSendReceiver<Network::Packetized>,
+    metrics: impl NetworkMetricsRecorder,
 ) -> eros::Result<()>
 where
     Network: TransporterHostSide,
 {
     while let Some(packetized) = packetized_receiver.receive().await {
-        Network::send(&mut sender, packetized).await?;
+        let SentBytes {
+            capture_source_id,
+            stream_id,
+            bytes,
+        } = Network::send(&mut sender, packetized).await?;
+        metrics.record_sent_bytes(capture_source_id, stream_id, bytes);
     }
     Ok(())
 }
@@ -395,9 +418,7 @@ where
         let Some(received) = received else {
             break;
         };
-        if received_sender.send_async(received).await.is_err() {
-            break;
-        }
+        let _ = received_sender.send_async(received).await;
     }
     Ok(())
 }
@@ -467,7 +488,10 @@ mod tests {
             Ok(unit.data)
         }
 
-        async fn send(sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()> {
+        async fn send(
+            sender: &mut Self::Sender,
+            packetized: Self::Packetized,
+        ) -> eros::Result<SentBytes> {
             sender
                 .gate_receiver
                 .recv_async()
@@ -478,7 +502,11 @@ mod tests {
                 .lock()
                 .expect("drain test sent mutex should not be poisoned")
                 .push(packetized);
-            Ok(())
+            Ok(SentBytes::new(
+                CaptureSourceId::new(0),
+                StreamId::new(0),
+                std::mem::size_of::<u64>(),
+            ))
         }
     }
 
@@ -540,8 +568,8 @@ mod tests {
         async fn send(
             _sender: &mut Self::Sender,
             _packetized: Self::Packetized,
-        ) -> eros::Result<()> {
-            Ok(())
+        ) -> eros::Result<SentBytes> {
+            Ok(SentBytes::new(CaptureSourceId::new(0), StreamId::new(0), 0))
         }
     }
 
