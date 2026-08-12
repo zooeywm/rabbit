@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, hash_map::Entry},
     sync::{Mutex, OnceLock},
 };
 
@@ -8,23 +8,52 @@ use opentelemetry::{
     metrics::{Histogram, UpDownCounter},
 };
 
-use crate::app::container::root::outbound_port::{MetricsRecorder, MetricsTarget};
+use crate::{
+    app::container::root::outbound_port::{MetricsRecorder, MetricsTarget},
+    domain::stream::models::vo::FrameId,
+};
 
 pub(super) const CAPTURE_SOURCE_ID_ATTRIBUTE: &str = "capture_source_id";
 pub(super) const STREAM_ID_ATTRIBUTE: &str = "stream_id";
 pub(super) const CAPTURE_DURATION_METRIC: &str = "rabbit.capture.duration";
 pub(super) const CONVERT_DURATION_METRIC: &str = "rabbit.convert.duration";
 pub(super) const ENCODE_DURATION_METRIC: &str = "rabbit.encode.duration";
+pub(super) const PACKETIZE_DURATION_METRIC: &str = "rabbit.packetize.duration";
 
 #[derive(kudi::DepInj)]
 #[target(OpenTelemetryMetricsRecorderImpl)]
 pub(crate) struct OpenTelemetryMetricsRecorder;
+
+#[derive(Default)]
+struct CompletedSourceFrameIds {
+    captured: HashSet<FrameId>,
+    converted: HashSet<FrameId>,
+    encoded: HashSet<FrameId>,
+    packetized: HashSet<FrameId>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct CompletedSourceFrameCounts {
+    pub(super) captured: usize,
+    pub(super) converted: usize,
+    pub(super) encoded: usize,
+    pub(super) packetized: usize,
+}
+
+#[derive(Clone, Copy)]
+enum SourceFrameStage {
+    Capture,
+    Convert,
+    Encode,
+    Packetize,
+}
 
 struct Instruments {
     active_targets: UpDownCounter<i64>,
     capture_duration: Histogram<f64>,
     convert_duration: Histogram<f64>,
     encode_duration: Histogram<f64>,
+    packetize_duration: Histogram<f64>,
 }
 
 impl Instruments {
@@ -46,12 +75,17 @@ impl Instruments {
                     .build(),
                 convert_duration: meter
                     .f64_histogram(CONVERT_DURATION_METRIC)
-                    .with_description("Time spent converting one frame")
+                    .with_description("Time spent converting one source frame")
                     .with_unit("ms")
                     .build(),
                 encode_duration: meter
                     .f64_histogram(ENCODE_DURATION_METRIC)
-                    .with_description("Time spent encoding one frame")
+                    .with_description("Time spent completing encoding for one source frame")
+                    .with_unit("ms")
+                    .build(),
+                packetize_duration: meter
+                    .f64_histogram(PACKETIZE_DURATION_METRIC)
+                    .with_description("Time spent completing packetization for one source frame")
                     .with_unit("ms")
                     .build(),
             }
@@ -64,38 +98,73 @@ where
     Deps: AsRef<MetricsTarget>,
 {
     fn register_metrics_target(&self) {
-        let inserted = registered_metrics_targets()
-            .lock()
-            .expect("metrics target registry mutex should not be poisoned")
-            .insert(*self.prj_ref().as_ref());
+        let target = *self.prj_ref().as_ref();
+        let should_activate = {
+            let mut targets = registered_metrics_targets()
+                .lock()
+                .expect("metrics target registry mutex should not be poisoned");
 
-        assert!(inserted, "metrics target should only be registered once");
+            match targets.entry(target) {
+                Entry::Vacant(entry) => {
+                    entry.insert(1);
+                    true
+                }
+                Entry::Occupied(mut entry) => {
+                    let next_count = entry
+                        .get()
+                        .checked_add(1)
+                        .expect("metrics target registration count should not overflow");
+                    *entry.get_mut() = next_count;
+                    false
+                }
+            }
+        };
 
-        Instruments::global()
-            .active_targets
-            .add(1, &target_attributes(*self.prj_ref().as_ref()));
+        if should_activate {
+            clear_completed_source_frames(target);
+            Instruments::global()
+                .active_targets
+                .add(1, &target_attributes(target));
+        }
     }
 
     fn unregister_metrics_target(&self) {
-        let removed = registered_metrics_targets()
-            .lock()
-            .expect("metrics target registry mutex should not be poisoned")
-            .remove(self.prj_ref().as_ref());
+        let target = *self.prj_ref().as_ref();
+        let should_deactivate = {
+            let mut targets = registered_metrics_targets()
+                .lock()
+                .expect("metrics target registry mutex should not be poisoned");
+            let count = targets
+                .get_mut(&target)
+                .expect("metrics target should be registered before removal");
 
-        assert!(
-            removed,
-            "metrics target should be registered before removal"
-        );
+            let next_count = count
+                .checked_sub(1)
+                .expect("metrics target registration count should be positive");
+            *count = next_count;
 
-        Instruments::global()
-            .active_targets
-            .add(-1, &target_attributes(*self.prj_ref().as_ref()));
+            if *count == 0 {
+                targets.remove(&target);
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_deactivate {
+            clear_completed_source_frames(target);
+            Instruments::global()
+                .active_targets
+                .add(-1, &target_attributes(target));
+        }
     }
 
-    fn record_captured_frame(&self, duration: std::time::Duration) {
-        let MetricsTarget::CaptureSource(capture_source_id) = self.prj_ref().as_ref() else {
+    fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        let target = *self.prj_ref().as_ref();
+        let MetricsTarget::CaptureSource(capture_source_id) = target else {
             unreachable!("captured frames require a capture source metrics target");
         };
+        record_completed_source_frame(target, SourceFrameStage::Capture, frame_id);
 
         Instruments::global().capture_duration.record(
             duration.as_secs_f64() * 1_000.0,
@@ -106,14 +175,16 @@ where
         );
     }
 
-    fn record_converted_frame(&self, duration: std::time::Duration) {
+    fn record_converted_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        let target = *self.prj_ref().as_ref();
         let MetricsTarget::Stream {
             capture_source_id,
             stream_id,
-        } = self.prj_ref().as_ref()
+        } = target
         else {
             unreachable!("converted frames require a stream metrics target");
         };
+        record_completed_source_frame(target, SourceFrameStage::Convert, frame_id);
 
         Instruments::global().convert_duration.record(
             duration.as_secs_f64() * 1_000.0,
@@ -127,14 +198,16 @@ where
         );
     }
 
-    fn record_encoded_frame(&self, duration: std::time::Duration) {
+    fn record_encoded_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        let target = *self.prj_ref().as_ref();
         let MetricsTarget::Stream {
             capture_source_id,
             stream_id,
-        } = self.prj_ref().as_ref()
+        } = target
         else {
             unreachable!("encoded frames require a stream metrics target");
         };
+        record_completed_source_frame(target, SourceFrameStage::Encode, frame_id);
 
         Instruments::global().encode_duration.record(
             duration.as_secs_f64() * 1_000.0,
@@ -147,10 +220,57 @@ where
             ],
         );
     }
+
+    fn record_packetized_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        let target = *self.prj_ref().as_ref();
+        let MetricsTarget::Stream {
+            capture_source_id,
+            stream_id,
+        } = target
+        else {
+            unreachable!("packetized frames require a stream metrics target");
+        };
+        record_completed_source_frame(target, SourceFrameStage::Packetize, frame_id);
+
+        Instruments::global().packetize_duration.record(
+            duration.as_secs_f64() * 1_000.0,
+            &[
+                KeyValue::new(
+                    CAPTURE_SOURCE_ID_ATTRIBUTE,
+                    i64::from(capture_source_id.value()),
+                ),
+                KeyValue::new(STREAM_ID_ATTRIBUTE, i64::from(stream_id.value())),
+            ],
+        );
+    }
+}
+
+pub(super) fn take_completed_source_frame_counts()
+-> HashMap<MetricsTarget, CompletedSourceFrameCounts> {
+    let completed_frames = std::mem::take(
+        &mut *completed_source_frames()
+            .lock()
+            .expect("completed source frame registry mutex should not be poisoned"),
+    );
+
+    completed_frames
+        .into_iter()
+        .map(|(target, frames)| {
+            (
+                target,
+                CompletedSourceFrameCounts {
+                    captured: frames.captured.len(),
+                    converted: frames.converted.len(),
+                    encoded: frames.encoded.len(),
+                    packetized: frames.packetized.len(),
+                },
+            )
+        })
+        .collect()
 }
 
 pub(super) fn with_registered_metrics_targets<R>(
-    f: impl FnOnce(&HashSet<MetricsTarget>) -> R,
+    f: impl FnOnce(&HashMap<MetricsTarget, usize>) -> R,
 ) -> R {
     let targets = registered_metrics_targets()
         .lock()
@@ -159,10 +279,42 @@ pub(super) fn with_registered_metrics_targets<R>(
     f(&targets)
 }
 
-fn registered_metrics_targets() -> &'static Mutex<HashSet<MetricsTarget>> {
-    static TARGETS: OnceLock<Mutex<HashSet<MetricsTarget>>> = OnceLock::new();
+fn registered_metrics_targets() -> &'static Mutex<HashMap<MetricsTarget, usize>> {
+    static TARGETS: OnceLock<Mutex<HashMap<MetricsTarget, usize>>> = OnceLock::new();
 
-    TARGETS.get_or_init(|| Mutex::new(HashSet::new()))
+    TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_completed_source_frame(
+    target: MetricsTarget,
+    stage: SourceFrameStage,
+    frame_id: FrameId,
+) {
+    let mut completed_frames = completed_source_frames()
+        .lock()
+        .expect("completed source frame registry mutex should not be poisoned");
+    let frames = completed_frames.entry(target).or_default();
+
+    match stage {
+        SourceFrameStage::Capture => frames.captured.insert(frame_id),
+        SourceFrameStage::Convert => frames.converted.insert(frame_id),
+        SourceFrameStage::Encode => frames.encoded.insert(frame_id),
+        SourceFrameStage::Packetize => frames.packetized.insert(frame_id),
+    };
+}
+
+fn completed_source_frames() -> &'static Mutex<HashMap<MetricsTarget, CompletedSourceFrameIds>> {
+    static COMPLETED_FRAMES: OnceLock<Mutex<HashMap<MetricsTarget, CompletedSourceFrameIds>>> =
+        OnceLock::new();
+
+    COMPLETED_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn clear_completed_source_frames(target: MetricsTarget) {
+    completed_source_frames()
+        .lock()
+        .expect("completed source frame registry mutex should not be poisoned")
+        .remove(&target);
 }
 
 fn target_attributes(target: MetricsTarget) -> Vec<KeyValue> {
@@ -181,5 +333,35 @@ fn target_attributes(target: MetricsTarget) -> Vec<KeyValue> {
             ),
             KeyValue::new(STREAM_ID_ATTRIBUTE, i64::from(stream_id.value())),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
+
+    #[test]
+    fn counts_each_source_frame_once_per_stage() {
+        let capture_source_id = CaptureSourceId::new(42);
+        let target = MetricsTarget::Stream {
+            capture_source_id,
+            stream_id: StreamId::new(7),
+        };
+        let first_frame = FrameId::new(capture_source_id, 1);
+        let second_frame = FrameId::new(capture_source_id, 2);
+
+        record_completed_source_frame(target, SourceFrameStage::Encode, first_frame);
+        record_completed_source_frame(target, SourceFrameStage::Encode, first_frame);
+        record_completed_source_frame(target, SourceFrameStage::Encode, second_frame);
+        record_completed_source_frame(target, SourceFrameStage::Packetize, first_frame);
+
+        let counts = take_completed_source_frame_counts();
+        let counts = counts
+            .get(&target)
+            .expect("stream completion counts should exist");
+
+        assert_eq!(counts.encoded, 2);
+        assert_eq!(counts.packetized, 1);
     }
 }

@@ -10,7 +10,8 @@ use container::{
         AppContainer,
         outbound_port::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
-            EncoderManager, EncoderManagerStateSpec, PacketizerManager, PacketizerManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec, MetricsRecorder, PacketizerManager,
+            PacketizerManagerStateSpec,
         },
     },
     stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -45,7 +46,8 @@ where
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
-    PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
+    PacketizerFor<PktMgrSt>:
+        Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
 {
     let project_dirs = ProjectDirs::from("", "", "rabbit")
         .with_context(|| "Failed looking for app project dir")?;

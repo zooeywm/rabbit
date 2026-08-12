@@ -64,7 +64,7 @@ impl StreamPipelineWorker {
             + MetricsRecorder
             + 'static,
         PacketizerContainer<PktSt>:
-            Packetizer<EncodedBuffer = EncodedBufferFor<CvtSt, EcdSt>> + 'static,
+            Packetizer<EncodedBuffer = EncodedBufferFor<CvtSt, EcdSt>> + MetricsRecorder + 'static,
     {
         let frame_slot = Arc::new(LatestFrameSlot::new());
         let worker_frame_slot = Arc::clone(&frame_slot);
@@ -158,7 +158,7 @@ where
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
         + MetricsRecorder,
     PacketizerContainer<PktSt>:
-        Packetizer<EncodedBuffer = EncodedBufferFor<CvtSt, EcdSt>> + 'static,
+        Packetizer<EncodedBuffer = EncodedBufferFor<CvtSt, EcdSt>> + MetricsRecorder + 'static,
 {
     let packetizer_worker = PacketizerWorker::spawn(
         capture_source_id,

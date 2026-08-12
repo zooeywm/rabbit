@@ -77,7 +77,8 @@ impl AppRuntime {
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
             + MetricsRecorder,
         EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
-        PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
+        PacketizerFor<PktMgrSt>:
+            Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
     {
         let (message_sender, message_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
@@ -191,6 +192,7 @@ mod tests {
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
         stream_pipeline::{StreamPipelineContainer, outbound_port::EncodedVideoFrame},
     };
+    use crate::domain::stream::models::vo::FrameId;
 
     struct TestCapturerManagerState {
         _not_send: Rc<()>,
@@ -219,11 +221,13 @@ mod tests {
 
         fn unregister_metrics_target(&self) {}
 
-        fn record_captured_frame(&self, _duration: std::time::Duration) {}
+        fn record_captured_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
 
-        fn record_converted_frame(&self, _duration: std::time::Duration) {}
+        fn record_converted_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
 
-        fn record_encoded_frame(&self, _duration: std::time::Duration) {}
+        fn record_encoded_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
+
+        fn record_packetized_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
     }
 
     impl ScreenCapturerControl for TestControl {

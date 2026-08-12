@@ -1,5 +1,8 @@
+use std::time::Instant;
+
 use crate::app::container::{
-    packetization::outbound_port::Packetizer, stream_pipeline::outbound_port::EncodedVideoFrame,
+    packetization::outbound_port::Packetizer, root::outbound_port::MetricsRecorder,
+    stream_pipeline::outbound_port::EncodedVideoFrame,
 };
 
 use eros::Context;
@@ -20,16 +23,20 @@ impl FakePacketizerState {
 
 impl<Deps> Packetizer for FakePacketizerImpl<Deps>
 where
-    Deps: AsMut<FakePacketizerState>,
+    Deps: AsMut<FakePacketizerState> + MetricsRecorder,
 {
     type EncodedBuffer = [u8; 8];
 
-    fn packetize(&mut self, _frame: EncodedVideoFrame<Self::EncodedBuffer>) -> eros::Result<()> {
+    fn packetize(&mut self, frame: EncodedVideoFrame<Self::EncodedBuffer>) -> eros::Result<()> {
+        let packetize_started_at = Instant::now();
         let state = self.prj_ref_mut().as_mut();
         state.packetized_frame_count = state
             .packetized_frame_count
             .checked_add(1)
             .with_context(|| "Fake packetizer frame count space is exhausted")?;
+
+        self.prj_ref()
+            .record_packetized_frame(frame.frame_id, packetize_started_at.elapsed());
 
         Ok(())
     }

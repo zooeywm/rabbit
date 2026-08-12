@@ -11,6 +11,7 @@ use crate::{
     app::{
         container::{
             packetization::{PacketizerContainer, outbound_port::Packetizer},
+            root::outbound_port::MetricsRecorder,
             stream_pipeline::outbound_port::EncodedVideoFrame,
         },
         runtime::AppMessage,
@@ -43,7 +44,7 @@ impl PacketizerWorker {
     ) -> eros::Result<PacketizerWorkerHandle<EncodedBufferFor<State>>>
     where
         EncodedBufferFor<State>: Send + 'static,
-        PacketizerContainer<State>: Packetizer + 'static,
+        PacketizerContainer<State>: Packetizer + MetricsRecorder + 'static,
     {
         let frame_queue = Arc::new(PacketizerFrameQueue::new());
         let worker_frame_queue = Arc::clone(&frame_queue);
@@ -60,7 +61,13 @@ impl PacketizerWorker {
                     app_message_sender,
                 };
 
-                run_packetizer_worker(state_constructor, worker_frame_queue, started_sender)
+                run_packetizer_worker(
+                    capture_source_id,
+                    stream_id,
+                    state_constructor,
+                    worker_frame_queue,
+                    started_sender,
+                )
             })
             .with_context(|| "Failed to spawn packetizer worker thread")?;
 
@@ -109,24 +116,33 @@ impl<Buffer> PacketizerWorkerHandle<Buffer> {
 }
 
 fn run_packetizer_worker<State>(
+    capture_source_id: CaptureSourceId,
+    stream_id: StreamId,
     state_constructor: impl FnOnce() -> eros::Result<State>,
     frame_queue: Arc<PacketizerFrameQueue<EncodedVideoFrame<EncodedBufferFor<State>>>>,
     started_sender: mpsc::SyncSender<()>,
 ) -> eros::Result<()>
 where
-    PacketizerContainer<State>: Packetizer,
+    PacketizerContainer<State>: Packetizer + MetricsRecorder,
 {
-    let mut packetizer = PacketizerContainer::new(state_constructor()?);
+    let mut packetizer =
+        PacketizerContainer::new(capture_source_id, stream_id, state_constructor()?);
+    packetizer.register_metrics_target();
 
-    started_sender
-        .send(())
-        .with_context(|| "Failed to report packetizer worker startup")?;
+    let result = (|| {
+        started_sender
+            .send(())
+            .with_context(|| "Failed to report packetizer worker startup")?;
 
-    while let Some(frame) = frame_queue.blocking_pop() {
-        Packetizer::packetize(&mut packetizer, frame)?;
-    }
+        while let Some(frame) = frame_queue.blocking_pop() {
+            Packetizer::packetize(&mut packetizer, frame)?;
+        }
 
-    Ok(())
+        Ok(())
+    })();
+
+    packetizer.unregister_metrics_target();
+    result
 }
 
 fn join_packetizer_worker(worker_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {

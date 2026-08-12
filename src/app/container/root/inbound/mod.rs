@@ -43,7 +43,8 @@ where
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
-    PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
+    PacketizerFor<PktMgrSt>:
+        Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
 {
     fn compose_stream_pipeline_states(
         &mut self,

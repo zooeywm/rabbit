@@ -369,6 +369,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::domain::stream::models::vo::FrameId;
 
     struct NonSendCapturerState {
         _not_send: Rc<()>,
@@ -412,11 +413,13 @@ mod tests {
 
         fn unregister_metrics_target(&self) {}
 
-        fn record_captured_frame(&self, _duration: std::time::Duration) {}
+        fn record_captured_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
 
-        fn record_converted_frame(&self, _duration: std::time::Duration) {}
+        fn record_converted_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
 
-        fn record_encoded_frame(&self, _duration: std::time::Duration) {}
+        fn record_encoded_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
+
+        fn record_packetized_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
     }
 
     impl ScreenCapturer for TestCapturer {

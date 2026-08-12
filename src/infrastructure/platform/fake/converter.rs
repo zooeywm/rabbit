@@ -4,6 +4,7 @@ use crate::{
     app::container::{
         root::outbound_port::MetricsRecorder, stream_pipeline::outbound_port::EncoderFrameConverter,
     },
+    domain::stream::models::vo::FrameId,
     infrastructure::fake::capturer::FakeCapturedFrame,
     infrastructure::support::media::FrameLease,
 };
@@ -13,7 +14,7 @@ use crate::{
 pub(crate) struct FakeEncoderFrameConverterState;
 
 pub(crate) struct FakeEncoderInput {
-    pub(crate) capture_sequence: u64,
+    pub(crate) frame_id: FrameId,
 }
 
 impl FakeEncoderFrameConverterState {
@@ -32,11 +33,11 @@ where
     fn convert(&mut self, frame: Self::CapturedFrame) -> eros::Result<Self::EncoderInput> {
         let convert_started_at = Instant::now();
         let input = FakeEncoderInput {
-            capture_sequence: frame.capture_sequence,
+            frame_id: frame.frame_id,
         };
 
         self.prj_ref()
-            .record_converted_frame(convert_started_at.elapsed());
+            .record_converted_frame(input.frame_id, convert_started_at.elapsed());
 
         Ok(input)
     }

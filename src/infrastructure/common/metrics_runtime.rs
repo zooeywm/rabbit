@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -26,7 +26,8 @@ use crate::{
 
 use super::metrics_recorder::{
     CAPTURE_DURATION_METRIC, CAPTURE_SOURCE_ID_ATTRIBUTE, CONVERT_DURATION_METRIC,
-    ENCODE_DURATION_METRIC, STREAM_ID_ATTRIBUTE, with_registered_metrics_targets,
+    CompletedSourceFrameCounts, ENCODE_DURATION_METRIC, PACKETIZE_DURATION_METRIC,
+    STREAM_ID_ATTRIBUTE, take_completed_source_frame_counts, with_registered_metrics_targets,
 };
 
 struct TracingMetricExporter {
@@ -66,8 +67,9 @@ impl PushMetricExporter for TracingMetricExporter {
         }
 
         let export_period = self.take_export_period();
+        let completed_source_frames = take_completed_source_frame_counts();
         with_registered_metrics_targets(|targets| {
-            export_registered_targets(metrics, targets, export_period);
+            export_registered_targets(metrics, targets, &completed_source_frames, export_period);
         });
 
         Ok(())
@@ -117,7 +119,10 @@ impl Drop for MetricsRuntime {
 
 fn duration_histogram_view(instrument: &Instrument) -> Option<Stream> {
     match instrument.name() {
-        CAPTURE_DURATION_METRIC | CONVERT_DURATION_METRIC | ENCODE_DURATION_METRIC => Some(
+        CAPTURE_DURATION_METRIC
+        | CONVERT_DURATION_METRIC
+        | ENCODE_DURATION_METRIC
+        | PACKETIZE_DURATION_METRIC => Some(
             Stream::builder()
                 .with_aggregation(Aggregation::Base2ExponentialHistogram {
                     max_size: 160,
@@ -133,19 +138,23 @@ fn duration_histogram_view(instrument: &Instrument) -> Option<Stream> {
 
 #[derive(Default)]
 struct SourceMetrics {
+    completed_capture_frames: usize,
     capture_duration: DurationMetrics,
     streams: HashMap<StreamId, StreamMetrics>,
 }
 
 #[derive(Default)]
 struct StreamMetrics {
+    completed_converted_frames: usize,
+    completed_encoded_frames: usize,
+    completed_packetized_frames: usize,
     convert_duration: DurationMetrics,
     encode_duration: DurationMetrics,
+    packetize_duration: DurationMetrics,
 }
 
 #[derive(Clone, Copy, Default)]
 struct DurationMetrics {
-    count: usize,
     average_ms: f64,
     p50_ms: f64,
     p95_ms: f64,
@@ -154,12 +163,13 @@ struct DurationMetrics {
 
 fn export_registered_targets(
     resource_metrics: &ResourceMetrics,
-    targets: &HashSet<MetricsTarget>,
+    targets: &HashMap<MetricsTarget, usize>,
+    completed_source_frames: &HashMap<MetricsTarget, CompletedSourceFrameCounts>,
     export_period: Duration,
 ) {
     let mut source_metrics = HashMap::<CaptureSourceId, SourceMetrics>::new();
 
-    for target in targets {
+    for target in targets.keys() {
         match target {
             MetricsTarget::CaptureSource(capture_source_id) => {
                 source_metrics.entry(*capture_source_id).or_default();
@@ -185,12 +195,40 @@ fn export_registered_targets(
         aggregate_duration_metric(metric, targets, &mut source_metrics);
     }
 
+    for (target, completed_frames) in completed_source_frames {
+        if !targets.contains_key(target) {
+            continue;
+        }
+
+        match target {
+            MetricsTarget::CaptureSource(capture_source_id) => {
+                source_metrics
+                    .get_mut(capture_source_id)
+                    .expect("registered capture source metrics should exist")
+                    .completed_capture_frames = completed_frames.captured;
+            }
+            MetricsTarget::Stream {
+                capture_source_id,
+                stream_id,
+            } => {
+                let stream = source_metrics
+                    .get_mut(capture_source_id)
+                    .and_then(|source| source.streams.get_mut(stream_id))
+                    .expect("registered stream metrics should exist");
+
+                stream.completed_converted_frames = completed_frames.converted;
+                stream.completed_encoded_frames = completed_frames.encoded;
+                stream.completed_packetized_frames = completed_frames.packetized;
+            }
+        }
+    }
+
     let mut capture_source_ids = source_metrics.keys().copied().collect::<Vec<_>>();
     capture_source_ids.sort_unstable_by_key(|capture_source_id| capture_source_id.value());
 
     for capture_source_id in capture_source_ids {
         let values = &source_metrics[&capture_source_id];
-        let capture_fps = frames_per_second(values.capture_duration.count, export_period);
+        let capture_fps = frames_per_second(values.completed_capture_frames, export_period);
         let capture_ms = format_duration(values.capture_duration);
         let mut streams = values.streams.iter().collect::<Vec<_>>();
 
@@ -200,11 +238,14 @@ fn export_registered_targets(
             .into_iter()
             .map(|(stream_id, values)| {
                 format!(
-                    "{{stream_id={} convert_encode_fps={:.2} convert_ms={} encode_ms={}}}",
+                    "{{stream_id={} source_frame_fps={{converted={:.2} encoded={:.2} packetized={:.2}}} convert_ms={} encode_ms={} packetize_ms={}}}",
                     stream_id.value(),
-                    frames_per_second(values.encode_duration.count, export_period),
+                    frames_per_second(values.completed_converted_frames, export_period),
+                    frames_per_second(values.completed_encoded_frames, export_period),
+                    frames_per_second(values.completed_packetized_frames, export_period),
                     format_duration(values.convert_duration),
                     format_duration(values.encode_duration),
+                    format_duration(values.packetize_duration),
                 )
             })
             .collect::<Vec<_>>()
@@ -224,7 +265,7 @@ fn export_registered_targets(
 
 fn aggregate_duration_metric(
     metric: &Metric,
-    targets: &HashSet<MetricsTarget>,
+    targets: &HashMap<MetricsTarget, usize>,
     source_metrics: &mut HashMap<CaptureSourceId, SourceMetrics>,
 ) {
     let AggregatedMetrics::F64(MetricData::ExponentialHistogram(histogram)) = metric.data() else {
@@ -235,7 +276,7 @@ fn aggregate_duration_metric(
         let Some(target) = metric_target(metric.name(), point.attributes()) else {
             continue;
         };
-        if !targets.contains(&target) {
+        if !targets.contains_key(&target) {
             continue;
         }
 
@@ -249,7 +290,7 @@ fn aggregate_duration_metric(
                     .capture_duration = duration;
             }
             (
-                CONVERT_DURATION_METRIC | ENCODE_DURATION_METRIC,
+                CONVERT_DURATION_METRIC | ENCODE_DURATION_METRIC | PACKETIZE_DURATION_METRIC,
                 MetricsTarget::Stream {
                     capture_source_id,
                     stream_id,
@@ -263,6 +304,7 @@ fn aggregate_duration_metric(
                 match metric.name() {
                     CONVERT_DURATION_METRIC => values.convert_duration = duration,
                     ENCODE_DURATION_METRIC => values.encode_duration = duration,
+                    PACKETIZE_DURATION_METRIC => values.packetize_duration = duration,
                     _ => unreachable!(),
                 }
             }
@@ -277,7 +319,6 @@ fn summarize_duration(point: &ExponentialHistogramDataPoint<f64>) -> DurationMet
     }
 
     DurationMetrics {
-        count: point.count(),
         average_ms: point.sum() / point.count() as f64,
         p50_ms: exponential_histogram_quantile(point, 0.50),
         p95_ms: exponential_histogram_quantile(point, 0.95),
@@ -355,10 +396,12 @@ fn metric_target<'a>(
 
     match metric_name {
         CAPTURE_DURATION_METRIC => Some(MetricsTarget::CaptureSource(capture_source_id?)),
-        CONVERT_DURATION_METRIC | ENCODE_DURATION_METRIC => Some(MetricsTarget::Stream {
-            capture_source_id: capture_source_id?,
-            stream_id: stream_id?,
-        }),
+        CONVERT_DURATION_METRIC | ENCODE_DURATION_METRIC | PACKETIZE_DURATION_METRIC => {
+            Some(MetricsTarget::Stream {
+                capture_source_id: capture_source_id?,
+                stream_id: stream_id?,
+            })
+        }
         _ => None,
     }
 }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
+use crate::domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MetricsTarget {
@@ -16,9 +16,15 @@ pub(crate) trait MetricsRecorder {
 
     fn unregister_metrics_target(&self);
 
-    fn record_captured_frame(&self, duration: Duration);
+    /// Records completion of one source capture frame.
+    fn record_captured_frame(&self, frame_id: FrameId, duration: Duration);
 
-    fn record_converted_frame(&self, duration: Duration);
+    /// Records conversion completion for a source capture frame.
+    fn record_converted_frame(&self, frame_id: FrameId, duration: Duration);
 
-    fn record_encoded_frame(&self, duration: Duration);
+    /// Records encoding completion for a source capture frame.
+    fn record_encoded_frame(&self, frame_id: FrameId, duration: Duration);
+
+    /// Records packetization completion for a source capture frame.
+    fn record_packetized_frame(&self, frame_id: FrameId, duration: Duration);
 }

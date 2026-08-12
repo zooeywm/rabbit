@@ -7,12 +7,20 @@ use crate::{
         root::outbound_port::MetricsRecorder,
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
     },
+    domain::stream::models::vo::{CaptureSourceId, FrameId},
     infrastructure::support::media::{FrameLease, FramePool, FramePoolWaker},
 };
 
-#[derive(Default)]
 pub(crate) struct FakeCapturedFrame {
-    pub(crate) capture_sequence: u64,
+    pub(crate) frame_id: FrameId,
+}
+
+impl Default for FakeCapturedFrame {
+    fn default() -> Self {
+        Self {
+            frame_id: FrameId::new(CaptureSourceId::new(0), 0),
+        }
+    }
 }
 
 #[derive(kudi::DepInj)]
@@ -20,7 +28,9 @@ pub(crate) struct FakeCapturedFrame {
 pub(crate) struct FakeScreenCapturerState {
     frame_pool: FramePool<FakeCapturedFrame>,
 
-    next_capture_sequence: u64,
+    capture_source_id: CaptureSourceId,
+
+    next_frame_id: u64,
 
     control_sender: flume::Sender<()>,
 
@@ -28,12 +38,13 @@ pub(crate) struct FakeScreenCapturerState {
 }
 
 impl FakeScreenCapturerState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(capture_source_id: CaptureSourceId) -> Self {
         let (control_sender, control_receiver) = flume::unbounded();
 
         Self {
             frame_pool: FramePool::new(0),
-            next_capture_sequence: 0,
+            capture_source_id,
+            next_frame_id: 0,
             control_sender,
             control_receiver,
         }
@@ -107,13 +118,16 @@ where
                 let Some(mut frame) = state.frame_pool.blocking_acquire_interruptibly() else {
                     continue;
                 };
-                frame.capture_sequence = state.next_capture_sequence;
-                state.next_capture_sequence += 1;
+                frame.frame_id = FrameId::new(state.capture_source_id, state.next_frame_id);
+                state.next_frame_id = state
+                    .next_frame_id
+                    .checked_add(1)
+                    .with_context(|| "Fake capture frame ID space is exhausted")?;
                 frame
             };
 
             self.prj_ref()
-                .record_captured_frame(capture_started_at.elapsed());
+                .record_captured_frame(frame.frame_id, capture_started_at.elapsed());
 
             match on_frame(frame)? {
                 CaptureLoopAction::Continue { consumer_count } => {

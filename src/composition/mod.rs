@@ -1,8 +1,9 @@
 use crate::{
     app::container::{
-        root::outbound_port::MetricsRecorder, screen_capture::ScreenCaptureContainer,
-        stream_pipeline::StreamPipelineContainer,
+        packetization::PacketizerContainer, root::outbound_port::MetricsRecorder,
+        screen_capture::ScreenCaptureContainer, stream_pipeline::StreamPipelineContainer,
     },
+    domain::stream::models::vo::FrameId,
     infrastructure::common::OpenTelemetryMetricsRecorderImpl,
 };
 
@@ -15,23 +16,34 @@ impl<State> MetricsRecorder for ScreenCaptureContainer<State> {
         MetricsRecorder::unregister_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
     }
 
-    fn record_captured_frame(&self, duration: std::time::Duration) {
+    fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         MetricsRecorder::record_captured_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
             duration,
         );
     }
 
-    fn record_converted_frame(&self, duration: std::time::Duration) {
+    fn record_converted_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         MetricsRecorder::record_converted_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
             duration,
         );
     }
 
-    fn record_encoded_frame(&self, duration: std::time::Duration) {
+    fn record_encoded_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         MetricsRecorder::record_encoded_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
+            duration,
+        );
+    }
+
+    fn record_packetized_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        MetricsRecorder::record_packetized_frame(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
             duration,
         );
     }
@@ -46,23 +58,76 @@ impl<CvtSt, EcdSt> MetricsRecorder for StreamPipelineContainer<CvtSt, EcdSt> {
         MetricsRecorder::unregister_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
     }
 
-    fn record_captured_frame(&self, duration: std::time::Duration) {
+    fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         MetricsRecorder::record_captured_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
             duration,
         );
     }
 
-    fn record_converted_frame(&self, duration: std::time::Duration) {
+    fn record_converted_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         MetricsRecorder::record_converted_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
             duration,
         );
     }
 
-    fn record_encoded_frame(&self, duration: std::time::Duration) {
+    fn record_encoded_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         MetricsRecorder::record_encoded_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
+            duration,
+        );
+    }
+
+    fn record_packetized_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        MetricsRecorder::record_packetized_frame(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
+            duration,
+        );
+    }
+}
+
+impl<State> MetricsRecorder for PacketizerContainer<State> {
+    fn register_metrics_target(&self) {
+        MetricsRecorder::register_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
+    }
+
+    fn unregister_metrics_target(&self) {
+        MetricsRecorder::unregister_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
+    }
+
+    fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        MetricsRecorder::record_captured_frame(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
+            duration,
+        );
+    }
+
+    fn record_converted_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        MetricsRecorder::record_converted_frame(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
+            duration,
+        );
+    }
+
+    fn record_encoded_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        MetricsRecorder::record_encoded_frame(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
+            duration,
+        );
+    }
+
+    fn record_packetized_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+        MetricsRecorder::record_packetized_frame(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            frame_id,
             duration,
         );
     }

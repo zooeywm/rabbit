@@ -45,13 +45,14 @@ where
             .with_context(|| "Fake video encoder frame number space is exhausted")?;
 
         let frame = EncodedVideoFrame::new(
+            input.frame_id,
             FrameNumber::new(frame_number),
             frame_number == 0,
-            input.capture_sequence.to_le_bytes(),
+            input.frame_id.sequence().to_le_bytes(),
         );
 
         self.prj_ref()
-            .record_encoded_frame(encode_started_at.elapsed());
+            .record_encoded_frame(input.frame_id, encode_started_at.elapsed());
 
         Ok(frame)
     }

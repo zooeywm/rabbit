@@ -19,12 +19,12 @@ impl<Deps> CapturerManager for FakeCapturerManagerImpl<Deps> {
 
     fn compose_screen_capturer_state(
         &mut self,
-        _capture_source_id: CaptureSourceId,
+        capture_source_id: CaptureSourceId,
     ) -> impl FnOnce()
         -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
     + Send
     + 'static
     + use<Deps> {
-        || Ok(FakeScreenCapturerState::new())
+        move || Ok(FakeScreenCapturerState::new(capture_source_id))
     }
 }

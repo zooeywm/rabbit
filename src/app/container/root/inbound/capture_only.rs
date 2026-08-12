@@ -15,7 +15,8 @@ where
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
-    PacketizerFor<PktMgrSt>: Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
+    PacketizerFor<PktMgrSt>:
+        Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
 {
     async fn start_capture_only(
         &mut self,
