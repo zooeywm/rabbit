@@ -3,7 +3,7 @@ use crate::{
         client::{
             ClientContainer,
             inbound_port::ClientApplication,
-            outbound_port::{DecoderManager, DecoderManagerStateSpec},
+            outbound_port::{ClientEventReporter, DecoderManager, DecoderManagerStateSpec},
         },
         client_stream_pipeline::{ClientStreamPipelineContainer, outbound_port::VideoDecoder},
         host::{
@@ -272,19 +272,28 @@ impl DecoderManagerStateSpec for FakeDecoderManagerState {
     type VideoDecoderState = FakeVideoDecoderState;
 }
 
-impl<DcdSt> AsRef<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState, DcdSt> {
+impl<DcdSt> AsRef<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState, DcdSt>
+where
+    ClientStreamPipelineContainer<DcdSt>: VideoDecoder,
+{
     fn as_ref(&self) -> &FakeDecoderManagerState {
         self.decoder_manager_state()
     }
 }
 
-impl<DcdSt> AsMut<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState, DcdSt> {
+impl<DcdSt> AsMut<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState, DcdSt>
+where
+    ClientStreamPipelineContainer<DcdSt>: VideoDecoder,
+{
     fn as_mut(&mut self) -> &mut FakeDecoderManagerState {
         self.decoder_manager_state_mut()
     }
 }
 
-impl<DcdSt> DecoderManager for ClientContainer<FakeDecoderManagerState, DcdSt> {
+impl<DcdSt> DecoderManager for ClientContainer<FakeDecoderManagerState, DcdSt>
+where
+    ClientStreamPipelineContainer<DcdSt>: VideoDecoder,
+{
     type State = FakeDecoderManagerState;
 
     fn compose_video_decoder_state(
@@ -313,31 +322,58 @@ impl VideoDecoder for ClientStreamPipelineContainer<FakeVideoDecoderState> {
     type DecoderInput = FakeDecoderInput;
     type DecodedBuffer = [u8; 8];
 
-    fn decode(
+    fn reset(&mut self) -> eros::Result<()> {
+        VideoDecoder::reset(FakeVideoDecoderImpl::inj_ref_mut(self))
+    }
+
+    fn submit(&mut self, input: Self::DecoderInput) -> eros::Result<()> {
+        VideoDecoder::submit(FakeVideoDecoderImpl::inj_ref_mut(self), input)
+    }
+
+    fn try_receive(
         &mut self,
-        input: Self::DecoderInput,
     ) -> eros::Result<
-        crate::app::container::client_stream_pipeline::outbound_port::DecodedVideoFrame<
-            Self::DecodedBuffer,
+        Option<
+            crate::app::container::client_stream_pipeline::outbound_port::DecodedVideoFrame<
+                Self::DecodedBuffer,
+            >,
         >,
     > {
-        VideoDecoder::decode(FakeVideoDecoderImpl::inj_ref_mut(self), input)
+        VideoDecoder::try_receive(FakeVideoDecoderImpl::inj_ref_mut(self))
     }
 }
 
 impl ClientApplication for ClientContainer<FakeDecoderManagerState, FakeVideoDecoderState> {
     type NetworkInput = FakeDecoderInput;
 
-    fn handle_network_input(
+    async fn start_stream(
         &mut self,
         stream_id: crate::domain::stream::models::vo::StreamId,
-        input: Self::NetworkInput,
+        event_reporter: impl ClientEventReporter,
+    ) -> eros::Result<
+        crate::app::container::client_stream_pipeline::inbound::DecodeUnitSender<
+            Self::NetworkInput,
+        >,
+    > {
+        ClientContainer::start_stream(self, stream_id, event_reporter).await
+    }
+
+    async fn remove_stream(
+        &mut self,
+        stream_id: crate::domain::stream::models::vo::StreamId,
     ) -> eros::Result<()> {
-        self.decode_network_input(stream_id, input)
+        ClientContainer::remove_stream(self, stream_id).await
+    }
+
+    async fn handle_client_stream_pipeline_worker_exit(
+        &mut self,
+        stream_id: crate::domain::stream::models::vo::StreamId,
+    ) -> Option<eros::ErrorUnion> {
+        self.handle_worker_exit(stream_id).await
     }
 
     async fn shutdown(self) -> eros::Result<()> {
-        Ok(())
+        ClientContainer::shutdown(self).await
     }
 }
 
@@ -447,12 +483,20 @@ impl TransporterClientSide for NetworkContainer<FakeTransporterState> {
     )> {
         TransporterClientSide::depacketize(FakeTransporterImpl::inj_ref_mut(self), received)
     }
+
+    fn request_video_refresh(
+        &mut self,
+        stream_id: crate::domain::stream::models::vo::StreamId,
+    ) -> eros::Result<()> {
+        TransporterClientSide::request_video_refresh(
+            FakeTransporterImpl::inj_ref_mut(self),
+            stream_id,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use eros::Context;
-
     use super::*;
     use crate::{
         app::container::{
@@ -469,7 +513,10 @@ mod tests {
         let frame_id = FrameId::new(CaptureSourceId::new(7), 11);
         let buffer = 42_u64.to_le_bytes();
 
-        let decoded = pipeline.decode(FakeDecoderInput::new(frame_id, buffer))?;
+        pipeline.submit(FakeDecoderInput::new(frame_id, buffer, true))?;
+        let decoded = pipeline
+            .try_receive()?
+            .expect("Fake decoder should produce one output");
 
         assert!(decoded.frame_id == frame_id);
         assert!(decoded.buffer == buffer);
@@ -479,25 +526,43 @@ mod tests {
     #[test]
     fn fake_network_closes_the_host_to_client_loop() -> eros::Result<()> {
         let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let mut worker = NetworkWorker::spawn(FakeTransporterState::new, app_message_sender)?;
+        let worker = NetworkWorker::spawn(FakeTransporterState::new, app_message_sender.clone())?;
         let encoded_sender = worker.sender();
-        let client_event_receiver = worker.take_client_event_receiver()?;
+        let client_stream_control_sender = worker.client_stream_control_sender();
         let frame_id = FrameId::new(CaptureSourceId::new(3), 9);
         let stream_id = StreamId::new(4);
-        encoded_sender.send(
-            stream_id,
-            EncodedVideoUnit::new(frame_id, UnitNumber::new(2), false, 77_u64.to_le_bytes()),
-        )?;
-        drop(encoded_sender);
 
         let runtime = compio::runtime::Runtime::new()?;
         runtime.block_on(async move {
-            let event = client_event_receiver
-                .receive()
-                .await
-                .with_context(|| "Fake network did not produce a client event")?;
             let mut client = PlatformClient::new(FakeDecoderManagerState::new()?);
-            client.handle_network_input(event.stream_id, event.input)?;
+            let input_sender = client.start_stream(stream_id, app_message_sender).await?;
+            let decoded_frame_slot = client
+                .decoded_frame_slot(stream_id)
+                .expect("Client stream should expose its decoded frame slot");
+            client_stream_control_sender
+                .register(stream_id, input_sender)
+                .await?;
+
+            encoded_sender.send(
+                stream_id,
+                EncodedVideoUnit::new(frame_id, UnitNumber::new(2), false, 77_u64.to_le_bytes()),
+            )?;
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            let decoded = loop {
+                if let Some(decoded) = decoded_frame_slot.take_latest() {
+                    break decoded;
+                }
+                if std::time::Instant::now() >= deadline {
+                    eros::bail!("Fake Client pipeline did not produce a decoded frame");
+                }
+                std::thread::yield_now();
+            };
+            assert!(decoded.frame_id == frame_id);
+            assert!(decoded.buffer == 77_u64.to_le_bytes());
+
+            client_stream_control_sender.unregister(stream_id).await?;
+            client.remove_stream(stream_id).await?;
             worker.shutdown().await
         })
     }

@@ -7,7 +7,7 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        client::inbound_port::ClientApplication,
+        client::{inbound_port::ClientApplication, outbound_port::ClientEventReporter},
         host::{inbound_port::HostApplication, outbound_port::HostEventReporter},
         network::{
             NetworkContainer,
@@ -43,6 +43,9 @@ pub(crate) enum AppMessage {
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
     },
+    ClientStreamPipelineWorkerExited {
+        stream_id: StreamId,
+    },
     NetworkWorkerExited,
     Shutdown,
 }
@@ -61,6 +64,12 @@ impl HostEventReporter for flume::Sender<AppMessage> {
             capture_source_id,
             stream_id,
         });
+    }
+}
+
+impl ClientEventReporter for flume::Sender<AppMessage> {
+    fn report_client_stream_pipeline_worker_exited(&self, stream_id: StreamId) {
+        let _ = self.send(AppMessage::ClientStreamPipelineWorkerExited { stream_id });
     }
 }
 
@@ -105,10 +114,10 @@ impl AppRuntime {
                     .enter(app_constructor)
                     .with_context(|| "Failed to construct app")?;
                 let transporter_constructor = app.compose_transporter()?;
-                let mut network_worker =
+                let network_worker =
                     NetworkWorker::spawn(transporter_constructor, app_message_sender.clone())?;
                 let encoded_unit_sender = network_worker.sender();
-                let network_client_event_receiver = network_worker.take_client_event_receiver()?;
+                let client_stream_control_sender = network_worker.client_stream_control_sender();
 
                 started_sender
                     .send(())
@@ -116,7 +125,7 @@ impl AppRuntime {
 
                 let app_exit = runtime.block_on(app.run(
                     encoded_unit_sender,
-                    &network_client_event_receiver,
+                    client_stream_control_sender,
                     app_message_sender,
                     message_receiver,
                 ));

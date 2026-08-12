@@ -366,4 +366,14 @@ impl TransporterClientSide for NetworkContainer<UnsupportedTransporterState> {
     )> {
         match received {}
     }
+
+    fn request_video_refresh(
+        &mut self,
+        stream_id: crate::domain::stream::models::vo::StreamId,
+    ) -> eros::Result<()> {
+        TransporterClientSide::request_video_refresh(
+            UnsupportedTransporterImpl::inj_ref_mut(self),
+            stream_id,
+        )
+    }
 }

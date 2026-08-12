@@ -58,4 +58,8 @@ impl<Deps> TransporterClientSide for LinuxTransporterImpl<Deps> {
     ) -> eros::Result<(StreamId, Self::Depacketized)> {
         match received {}
     }
+
+    fn request_video_refresh(&mut self, _stream_id: StreamId) -> eros::Result<()> {
+        eros::bail!("Linux transporter is not implemented")
+    }
 }

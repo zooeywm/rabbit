@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::mpsc,
     thread::{self, JoinHandle},
 };
@@ -7,7 +8,9 @@ use eros::Context;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use super::{
-    client_event_queue::{NetworkClientEventReceiver, NetworkClientEventSender},
+    client_stream_control::{
+        ClientStreamControl, ClientStreamControlReceiver, ClientStreamControlSender,
+    },
     packetized_send_queue::{
         PacketizePermitReceiver, PacketizedSendReceiver, PacketizedSendSender,
     },
@@ -16,7 +19,7 @@ use super::{
 use crate::app::{
     container::network::{
         NetworkContainer, NetworkMetricsHandle,
-        inbound::{EncodedUnitSender, NetworkClientEvent},
+        inbound::EncodedUnitSender,
         outbound_port::{
             NetworkMetricsRecorder, SentBytes, TransporterClientSide, TransporterHostSide,
         },
@@ -28,7 +31,7 @@ pub(crate) struct NetworkWorker;
 
 pub(crate) struct NetworkWorkerHandle<Buffer, ClientInput> {
     sender: EncodedUnitSender<Buffer>,
-    client_event_receiver: Option<NetworkClientEventReceiver<ClientInput>>,
+    client_stream_control_sender: ClientStreamControlSender<ClientInput>,
     shutdown_sender: flume::Sender<()>,
     worker_thread: JoinHandle<eros::Result<()>>,
 }
@@ -62,9 +65,12 @@ impl NetworkWorker {
         <NetworkContainer<State> as TransporterHostSide>::EncodedBuffer: Send + 'static,
         <NetworkContainer<State> as TransporterHostSide>::Packetized: 'static,
         <NetworkContainer<State> as TransporterClientSide>::Received: 'static,
+        <NetworkContainer<State> as TransporterClientSide>::Depacketized:
+            crate::app::container::client_stream_pipeline::outbound_port::VideoDecodeUnit,
     {
         let (sender, receiver) = EncodedUnitReceiver::channel();
-        let (client_event_sender, client_event_receiver) = NetworkClientEventSender::channel();
+        let (client_stream_control_sender, client_stream_control_receiver) =
+            ClientStreamControlSender::channel();
         let (shutdown_sender, shutdown_receiver) = flume::bounded(1);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
         let worker_thread = thread::Builder::new()
@@ -77,7 +83,7 @@ impl NetworkWorker {
                 runtime.block_on(run_network_worker(
                     transporter_constructor,
                     receiver,
-                    client_event_sender,
+                    client_stream_control_receiver,
                     shutdown_receiver,
                     started_sender,
                 ))
@@ -91,7 +97,7 @@ impl NetworkWorker {
 
         Ok(NetworkWorkerHandle {
             sender,
-            client_event_receiver: Some(client_event_receiver),
+            client_stream_control_sender,
             shutdown_sender,
             worker_thread,
         })
@@ -111,19 +117,14 @@ impl<Buffer, ClientInput> NetworkWorkerHandle<Buffer, ClientInput> {
         self.sender.clone()
     }
 
-    pub(crate) fn take_client_event_receiver(
-        &mut self,
-    ) -> eros::Result<NetworkClientEventReceiver<ClientInput>> {
-        Ok(self
-            .client_event_receiver
-            .take()
-            .with_context(|| "Network client event receiver has already been taken")?)
+    pub(crate) fn client_stream_control_sender(&self) -> ClientStreamControlSender<ClientInput> {
+        self.client_stream_control_sender.clone()
     }
 
     pub(crate) async fn shutdown(self) -> eros::Result<()> {
         let Self {
             sender: _sender,
-            client_event_receiver: _client_event_receiver,
+            client_stream_control_sender: _client_stream_control_sender,
             shutdown_sender,
             worker_thread,
         } = self;
@@ -141,7 +142,7 @@ async fn run_network_worker<State, Constructor>(
     encoded_receiver: EncodedUnitReceiver<
         <NetworkContainer<State> as TransporterHostSide>::EncodedBuffer,
     >,
-    client_event_sender: NetworkClientEventSender<
+    client_stream_control_receiver: ClientStreamControlReceiver<
         <NetworkContainer<State> as TransporterClientSide>::Depacketized,
     >,
     worker_shutdown_receiver: flume::Receiver<()>,
@@ -154,6 +155,8 @@ where
         TransporterHostSide + TransporterClientSide + NetworkMetricsRecorder + 'static,
     <NetworkContainer<State> as TransporterHostSide>::Packetized: 'static,
     <NetworkContainer<State> as TransporterClientSide>::Received: 'static,
+    <NetworkContainer<State> as TransporterClientSide>::Depacketized:
+        crate::app::container::client_stream_pipeline::outbound_port::VideoDecodeUnit,
 {
     let mut network = NetworkContainer::new(transporter_constructor()?);
     let sender = TransporterHostSide::take_sender(&mut network)?;
@@ -179,7 +182,7 @@ where
             received_receiver,
             packetized_sender,
             packetize_permits,
-            client_event_sender,
+            client_stream_control_receiver,
             event_shutdown_receiver,
         )
         .await
@@ -264,24 +267,25 @@ async fn run_network_event_loop<Network>(
     received_receiver: flume::Receiver<Network::Received>,
     packetized_sender: PacketizedSendSender<Network::Packetized>,
     packetize_permits: PacketizePermitReceiver,
-    client_event_sender: NetworkClientEventSender<Network::Depacketized>,
+    client_stream_control_receiver: ClientStreamControlReceiver<Network::Depacketized>,
     shutdown_receiver: flume::Receiver<()>,
 ) -> eros::Result<()>
 where
     Network: TransporterHostSide + TransporterClientSide,
+    Network::Depacketized:
+        crate::app::container::client_stream_pipeline::outbound_port::VideoDecodeUnit,
 {
     let mut may_packetize = false;
-    let mut may_route_client_event = false;
     let mut send_loop_alive = true;
     let mut receive_loop_alive = true;
-    let mut client_event_sink_alive = true;
+    let mut client_stream_control_alive = true;
+    let mut client_streams = HashMap::new();
 
     loop {
         let wait_for_packetize_permit = send_loop_alive && !may_packetize;
-        let wait_for_client_event_permit = client_event_sink_alive && !may_route_client_event;
         let receive_encoded = send_loop_alive && may_packetize;
-        let receive_network =
-            receive_loop_alive && client_event_sink_alive && may_route_client_event;
+        let receive_network = receive_loop_alive;
+        let receive_client_stream_control = client_stream_control_alive;
         let packetize_permit = async {
             if wait_for_packetize_permit {
                 packetize_permits.acquire().await
@@ -290,9 +294,9 @@ where
             }
         }
         .fuse();
-        let client_event_permit = async {
-            if wait_for_client_event_permit {
-                client_event_sender.acquire_permit().await
+        let client_stream_control = async {
+            if receive_client_stream_control {
+                client_stream_control_receiver.receive().await
             } else {
                 futures_util::future::pending().await
             }
@@ -315,7 +319,7 @@ where
         }
         .fuse();
         let normal_event = async {
-            futures_util::pin_mut!(packetize_permit, client_event_permit, encoded, received);
+            futures_util::pin_mut!(packetize_permit, client_stream_control, encoded, received);
 
             futures_util::select! {
                 permit = packetize_permit => {
@@ -328,12 +332,36 @@ where
                     }
                     eros::Result::Ok(NetworkEventLoopStep::Continue)
                 },
-                permit = client_event_permit => {
-                    match permit {
-                        Ok(()) => may_route_client_event = true,
-                        Err(_) => {
-                            client_event_sink_alive = false;
-                            may_route_client_event = false;
+                command = client_stream_control => {
+                    let Some(command) = command else {
+                        client_stream_control_alive = false;
+                        return eros::Result::Ok(NetworkEventLoopStep::Continue);
+                    };
+                    match command {
+                        ClientStreamControl::Register {
+                            stream_id,
+                            input_sender,
+                            response_sender,
+                        } => {
+                            let result = if client_streams.contains_key(&stream_id) {
+                                Err(eros::error!("Client stream is already registered"))
+                            } else {
+                                network.request_video_refresh(stream_id)?;
+                                client_streams.insert(stream_id, input_sender);
+                                Ok(())
+                            };
+                            let _ = response_sender.send(result);
+                        }
+                        ClientStreamControl::Unregister {
+                            stream_id,
+                            response_sender,
+                        } => {
+                            let result = if client_streams.remove(&stream_id).is_some() {
+                                Ok(())
+                            } else {
+                                Err(eros::error!("Client stream is not registered"))
+                            };
+                            let _ = response_sender.send(result);
                         }
                     }
                     eros::Result::Ok(NetworkEventLoopStep::Continue)
@@ -353,8 +381,20 @@ where
                         return eros::Result::Ok(NetworkEventLoopStep::Continue);
                     };
                     let (stream_id, input) = network.depacketize(item)?;
-                    client_event_sender.send(NetworkClientEvent { stream_id, input })?;
-                    may_route_client_event = false;
+                    let Some(input_sender) = client_streams.get(&stream_id) else {
+                        return eros::Result::Ok(NetworkEventLoopStep::Continue);
+                    };
+                    use crate::app::container::client_stream_pipeline::inbound::DecodeUnitPushOutcome;
+                    match input_sender.push(input) {
+                        DecodeUnitPushOutcome::Enqueued
+                        | DecodeUnitPushOutcome::DroppedAwaitingRecovery => {}
+                        DecodeUnitPushOutcome::Overflowed => {
+                            network.request_video_refresh(stream_id)?;
+                        }
+                        DecodeUnitPushOutcome::Closed => {
+                            client_streams.remove(&stream_id);
+                        }
+                    }
                     eros::Result::Ok(NetworkEventLoopStep::Continue)
                 },
             }
@@ -478,9 +518,18 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::container::host_stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber},
+        app::container::{
+            client_stream_pipeline::outbound_port::VideoDecodeUnit,
+            host_stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber},
+        },
         domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
     };
+
+    impl VideoDecodeUnit for () {
+        fn is_recovery_point(&self) -> bool {
+            true
+        }
+    }
 
     struct NonSendTransporterState {
         _not_send: PhantomData<Rc<()>>,
@@ -599,6 +648,10 @@ mod tests {
         ) -> eros::Result<(StreamId, Self::Depacketized)> {
             Ok((StreamId::new(0), ()))
         }
+
+        fn request_video_refresh(&mut self, _stream_id: StreamId) -> eros::Result<()> {
+            Ok(())
+        }
     }
 
     fn encoded_unit(value: u64) -> EncodedVideoUnit<u64> {
@@ -681,6 +734,10 @@ mod tests {
         ) -> eros::Result<(StreamId, Self::Depacketized)> {
             Ok((StreamId::new(0), ()))
         }
+
+        fn request_video_refresh(&mut self, _stream_id: StreamId) -> eros::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -724,7 +781,7 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sent_from_network = Arc::clone(&sent);
         let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let mut worker = NetworkWorker::spawn(
+        let worker = NetworkWorker::spawn(
             move || {
                 Ok(CancellationTransporterState {
                     packetized_sender,
@@ -739,7 +796,6 @@ mod tests {
             app_message_sender,
         )?;
         let encoded_sender = worker.sender();
-        let client_event_receiver = worker.take_client_event_receiver()?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);
@@ -748,8 +804,6 @@ mod tests {
             1
         );
         drop(encoded_sender);
-        drop(client_event_receiver);
-
         shutdown_with_timeout(worker)?;
 
         assert!(
@@ -769,7 +823,7 @@ mod tests {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sent_from_network = Arc::clone(&sent);
         let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let mut worker = NetworkWorker::spawn(
+        let worker = NetworkWorker::spawn(
             move || {
                 Ok(CancellationTransporterState {
                     packetized_sender,
@@ -784,7 +838,6 @@ mod tests {
             app_message_sender,
         )?;
         let encoded_sender = worker.sender();
-        let _client_event_receiver = worker.take_client_event_receiver()?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(
@@ -814,7 +867,7 @@ mod tests {
         let (send_started_sender, send_started_receiver) = flume::unbounded();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let mut worker = NetworkWorker::spawn(
+        let worker = NetworkWorker::spawn(
             move || {
                 Ok(CancellationTransporterState {
                     packetized_sender,
@@ -829,7 +882,6 @@ mod tests {
             app_message_sender,
         )?;
         let encoded_sender = worker.sender();
-        let _client_event_receiver = worker.take_client_event_receiver()?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);

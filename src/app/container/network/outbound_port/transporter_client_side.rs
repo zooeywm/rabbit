@@ -13,4 +13,6 @@ pub(crate) trait TransporterClientSide {
         &mut self,
         received: Self::Received,
     ) -> eros::Result<(StreamId, Self::Depacketized)>;
+
+    fn request_video_refresh(&mut self, stream_id: StreamId) -> eros::Result<()>;
 }

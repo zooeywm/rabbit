@@ -58,4 +58,8 @@ impl<Deps> TransporterClientSide for UnsupportedTransporterImpl<Deps> {
     ) -> eros::Result<(StreamId, Self::Depacketized)> {
         match received {}
     }
+
+    fn request_video_refresh(&mut self, _stream_id: StreamId) -> eros::Result<()> {
+        eros::bail!("Transporter is not implemented on this platform")
+    }
 }

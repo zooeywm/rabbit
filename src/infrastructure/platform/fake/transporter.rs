@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use eros::Context;
 
@@ -18,11 +18,13 @@ use crate::{
 pub(crate) struct FakeTransporterState {
     sender: Option<FakeTransporterSender>,
     receiver: Option<FakeTransporterReceiver>,
+    streams_awaiting_video_refresh: HashSet<StreamId>,
 }
 
 pub(crate) struct FakePacketized {
     frame_id: FrameId,
     stream_id: StreamId,
+    is_keyframe: bool,
     payload: [u8; 8],
 }
 
@@ -37,6 +39,7 @@ pub(crate) struct FakeTransporterReceiver {
 pub(crate) struct FakeReceived {
     frame_id: FrameId,
     stream_id: StreamId,
+    is_keyframe: bool,
     payload: [u8; 8],
 }
 
@@ -46,6 +49,7 @@ impl FakeTransporterSender {
             .send_async(FakeReceived {
                 frame_id: packetized.frame_id,
                 stream_id: packetized.stream_id,
+                is_keyframe: packetized.is_keyframe,
                 payload: packetized.payload,
             })
             .await
@@ -73,6 +77,7 @@ impl FakeTransporterState {
         Ok(Self {
             sender: Some(FakeTransporterSender { sender }),
             receiver: Some(FakeTransporterReceiver { receiver }),
+            streams_awaiting_video_refresh: HashSet::new(),
         })
     }
 }
@@ -110,6 +115,7 @@ where
         Ok(FakePacketized {
             frame_id: unit.source_frame_id,
             stream_id,
+            is_keyframe: unit.is_keyframe,
             payload: unit.data,
         })
     }
@@ -150,6 +156,7 @@ mod tests {
         let result = runtime.block_on(sender.send(FakePacketized {
             frame_id: FrameId::new(CaptureSourceId::new(0), 0),
             stream_id: StreamId::new(0),
+            is_keyframe: true,
             payload: [0; 8],
         }));
 
@@ -201,9 +208,22 @@ where
         &mut self,
         received: Self::Received,
     ) -> eros::Result<(StreamId, Self::Depacketized)> {
+        let state = self.prj_ref_mut().as_mut();
+        let recovery_point = received.is_keyframe
+            || state
+                .streams_awaiting_video_refresh
+                .remove(&received.stream_id);
         Ok((
             received.stream_id,
-            FakeDecoderInput::new(received.frame_id, received.payload),
+            FakeDecoderInput::new(received.frame_id, received.payload, recovery_point),
         ))
+    }
+
+    fn request_video_refresh(&mut self, stream_id: StreamId) -> eros::Result<()> {
+        self.prj_ref_mut()
+            .as_mut()
+            .streams_awaiting_video_refresh
+            .insert(stream_id);
+        Ok(())
     }
 }

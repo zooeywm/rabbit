@@ -1,3 +1,4 @@
+pub(crate) mod inbound;
 pub(crate) mod outbound_port;
 
 pub(crate) struct ClientStreamPipelineContainer<DcdSt> {

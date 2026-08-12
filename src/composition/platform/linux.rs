@@ -355,4 +355,14 @@ impl TransporterClientSide for NetworkContainer<LinuxTransporterState> {
     )> {
         match received {}
     }
+
+    fn request_video_refresh(
+        &mut self,
+        stream_id: crate::domain::stream::models::vo::StreamId,
+    ) -> eros::Result<()> {
+        TransporterClientSide::request_video_refresh(
+            LinuxTransporterImpl::inj_ref_mut(self),
+            stream_id,
+        )
+    }
 }
