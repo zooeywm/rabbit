@@ -28,7 +28,7 @@ use super::metrics_recorder::{
     CAPTURE_DURATION_METRIC, CAPTURE_SOURCE_ID_ATTRIBUTE, CONVERT_DURATION_METRIC,
     CompletedSourceFrameCounts, ENCODE_DURATION_METRIC, PACKETIZE_DURATION_METRIC,
     STREAM_ID_ATTRIBUTE, TargetResourceUsageSnapshots, snapshot_metrics_resource_usages,
-    snapshot_transporter_queue_usage, take_completed_source_frame_counts, take_sent_byte_counts,
+    snapshot_network_queue_usage, take_completed_source_frame_counts, take_sent_byte_counts,
     with_registered_metrics_targets,
 };
 
@@ -75,7 +75,7 @@ impl PushMetricExporter for TracingMetricExporter {
         let export_period = self.take_export_period();
         let completed_source_frames = take_completed_source_frame_counts();
         let resource_usages = snapshot_metrics_resource_usages();
-        let transporter_queue = snapshot_transporter_queue_usage().unwrap_or_default();
+        let network_queue = snapshot_network_queue_usage().unwrap_or_default();
         let sent_byte_counts = take_sent_byte_counts();
         with_registered_metrics_targets(|targets| {
             export_registered_targets(
@@ -83,7 +83,7 @@ impl PushMetricExporter for TracingMetricExporter {
                 targets,
                 &completed_source_frames,
                 &resource_usages,
-                transporter_queue,
+                network_queue,
                 &sent_byte_counts,
                 export_period,
             );
@@ -184,7 +184,7 @@ fn export_registered_targets(
     targets: &HashMap<MetricsTarget, usize>,
     completed_source_frames: &HashMap<MetricsTarget, CompletedSourceFrameCounts>,
     resource_usages: &HashMap<MetricsTarget, TargetResourceUsageSnapshots>,
-    transporter_queue: ResourceUsageSnapshot,
+    network_queue: ResourceUsageSnapshot,
     sent_byte_counts: &HashMap<MetricsTarget, u64>,
     export_period: Duration,
 ) {
@@ -323,9 +323,9 @@ fn export_registered_targets(
 
     tracing::info!(
         target: "rabbit::metrics",
-        "runtime metrics: transporter_queue={}/{} sources=[{sources}]",
-        transporter_queue.used,
-        transporter_queue.total,
+        "runtime metrics: network_queue={}/{} sources=[{sources}]",
+        network_queue.used,
+        network_queue.total,
     );
 }
 

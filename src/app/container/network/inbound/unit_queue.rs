@@ -50,7 +50,7 @@ impl<Buffer> EncodedUnitSender<Buffer> {
         unit: EncodedVideoUnit<Buffer>,
     ) -> eros::Result<()> {
         if !self.queue.receiver_alive.load(Ordering::Acquire) {
-            eros::bail!("Transporter worker stopped before receiving encoded unit");
+            eros::bail!("Network worker stopped before receiving encoded unit");
         }
 
         let discarded_backlog = {
@@ -58,7 +58,7 @@ impl<Buffer> EncodedUnitSender<Buffer> {
                 .queue
                 .producer_lock
                 .lock()
-                .expect("transporter queue producer mutex should not be poisoned");
+                .expect("network queue producer mutex should not be poisoned");
             let item = QueuedEncodedUnit { stream_id, unit };
             let mut discarded_backlog = Vec::new();
 
@@ -70,15 +70,15 @@ impl<Buffer> EncodedUnitSender<Buffer> {
                     }
 
                     if !self.queue.receiver_alive.load(Ordering::Acquire) {
-                        eros::bail!("Transporter worker stopped before receiving encoded unit");
+                        eros::bail!("Network worker stopped before receiving encoded unit");
                     }
 
                     self.queue.sender.try_send(item).map_err(|_| {
-                        eros::error!("Transporter worker stopped while receiving encoded unit")
+                        eros::error!("Network worker stopped while receiving encoded unit")
                     })?;
                 }
                 Err(flume::TrySendError::Disconnected(_)) => {
-                    eros::bail!("Transporter worker stopped before receiving encoded unit");
+                    eros::bail!("Network worker stopped before receiving encoded unit");
                 }
             }
 

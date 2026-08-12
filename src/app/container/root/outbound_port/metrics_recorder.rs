@@ -82,10 +82,10 @@ pub(crate) trait MetricsRecorder {
     fn record_encoded_frame(&self, frame_id: FrameId, duration: Duration);
 }
 
-pub(crate) trait TransporterMetricsRecorder {
-    fn register_transporter_queue_usage(&self, usage: ResourceUsage);
+pub(crate) trait NetworkMetricsRecorder {
+    fn register_network_queue_usage(&self, usage: ResourceUsage);
 
-    fn unregister_transporter_queue_usage(&self);
+    fn unregister_network_queue_usage(&self);
 
     /// Records packetization completion for a source capture frame.
     fn record_packetized_frame(

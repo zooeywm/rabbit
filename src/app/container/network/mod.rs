@@ -1,11 +1,11 @@
 pub(crate) mod inbound;
 pub(crate) mod outbound_port;
 
-pub(crate) struct TransporterContainer<State> {
+pub(crate) struct NetworkContainer<State> {
     state: State,
 }
 
-impl<State> TransporterContainer<State> {
+impl<State> NetworkContainer<State> {
     pub(crate) fn new(state: State) -> Self {
         Self { state }
     }

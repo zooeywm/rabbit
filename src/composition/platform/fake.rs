@@ -1,5 +1,6 @@
 use crate::{
     app::container::{
+        network::{NetworkContainer, outbound_port::Transporter},
         root::{
             AppContainer,
             outbound_port::{
@@ -16,7 +17,6 @@ use crate::{
             StreamPipelineContainer,
             outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
         },
-        transporter::{TransporterContainer, outbound_port::Transporter},
     },
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
@@ -304,13 +304,13 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
     }
 }
 
-impl AsMut<FakeTransporterState> for TransporterContainer<FakeTransporterState> {
+impl AsMut<FakeTransporterState> for NetworkContainer<FakeTransporterState> {
     fn as_mut(&mut self) -> &mut FakeTransporterState {
         self.state_mut()
     }
 }
 
-impl Transporter for TransporterContainer<FakeTransporterState> {
+impl Transporter for NetworkContainer<FakeTransporterState> {
     type EncodedBuffer = [u8; 8];
     type Packetized = FakePacketized;
 

@@ -7,13 +7,13 @@ use eros::Context;
 
 use crate::app::{
     container::{
+        network::inbound::EncodedUnitSender,
         root::outbound_port::MetricsRecorder,
         stream_pipeline::{
             StreamPipelineContainer,
             inbound::LatestFrameSlot,
             outbound_port::{EncoderFrameConverter, VideoEncoder},
         },
-        transporter::inbound::EncodedUnitSender,
     },
     runtime::AppMessage,
 };

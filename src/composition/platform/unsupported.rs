@@ -2,6 +2,7 @@ use std::convert::Infallible;
 
 use crate::{
     app::container::{
+        network::{NetworkContainer, outbound_port::Transporter},
         root::{
             AppContainer,
             outbound_port::{
@@ -18,7 +19,6 @@ use crate::{
             StreamPipelineContainer,
             outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
         },
-        transporter::{TransporterContainer, outbound_port::Transporter},
     },
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
@@ -300,13 +300,13 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
     }
 }
 
-impl AsMut<UnsupportedTransporterState> for TransporterContainer<UnsupportedTransporterState> {
+impl AsMut<UnsupportedTransporterState> for NetworkContainer<UnsupportedTransporterState> {
     fn as_mut(&mut self) -> &mut UnsupportedTransporterState {
         self.state_mut()
     }
 }
 
-impl Transporter for TransporterContainer<UnsupportedTransporterState> {
+impl Transporter for NetworkContainer<UnsupportedTransporterState> {
     type EncodedBuffer = Infallible;
     type Packetized = Infallible;
 

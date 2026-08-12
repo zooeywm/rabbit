@@ -8,6 +8,7 @@ use eros::Context;
 use crate::{
     app::{
         container::{
+            network::inbound::EncodedUnitSender,
             root::{
                 AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor,
                 StreamPipelineFor,
@@ -22,7 +23,6 @@ use crate::{
                 inbound::StreamPipelineWorker,
                 outbound_port::{EncoderFrameConverter, VideoEncoder},
             },
-            transporter::inbound::EncodedUnitSender,
         },
         runtime::AppMessage,
     },
@@ -268,9 +268,9 @@ where
                     let _ = self.shutdown().await;
                     return Err(failure);
                 }
-                Ok(AppMessage::TransporterWorkerExited) => {
+                Ok(AppMessage::NetworkWorkerExited) => {
                     let _ = self.shutdown().await;
-                    eros::bail!("Transporter worker exited unexpectedly");
+                    eros::bail!("Network worker exited unexpectedly");
                 }
                 Ok(AppMessage::Shutdown) | Err(_) => break,
             }

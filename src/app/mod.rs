@@ -5,16 +5,16 @@ mod runtime;
 
 use config::Config;
 use container::{
+    network::{NetworkContainer, outbound_port::Transporter},
     root::{
         AppContainer, TransporterStateFor,
         outbound_port::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
-            EncoderManager, EncoderManagerStateSpec, MetricsRecorder, TransporterConstructor,
-            TransporterConstructorStateSpec, TransporterMetricsRecorder,
+            EncoderManager, EncoderManagerStateSpec, MetricsRecorder, NetworkMetricsRecorder,
+            TransporterConstructor, TransporterConstructorStateSpec,
         },
     },
     stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
-    transporter::{TransporterContainer, outbound_port::Transporter},
 };
 use directories::ProjectDirs;
 use eros::Context;
@@ -37,8 +37,8 @@ where
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
     TprCstSt: TransporterConstructorStateSpec,
-    TransporterContainer<TransporterStateFor<TprCstSt>>: Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>
-        + TransporterMetricsRecorder,
+    NetworkContainer<TransporterStateFor<TprCstSt>>:
+        Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + NetworkMetricsRecorder,
     AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
         + EncoderManager<State = EcdMgrSt>

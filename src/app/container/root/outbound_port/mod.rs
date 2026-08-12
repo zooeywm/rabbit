@@ -8,7 +8,6 @@ pub(crate) use capturer_manager::{CapturerManager, CapturerManagerStateSpec};
 pub(crate) use converter_manager::{ConverterManager, ConverterManagerStateSpec};
 pub(crate) use encoder_manager::{EncoderManager, EncoderManagerStateSpec};
 pub(crate) use metrics_recorder::{
-    MetricsRecorder, MetricsTarget, ResourceUsage, ResourceUsageSnapshot,
-    TransporterMetricsRecorder,
+    MetricsRecorder, MetricsTarget, NetworkMetricsRecorder, ResourceUsage, ResourceUsageSnapshot,
 };
 pub(crate) use transporter_constructor::{TransporterConstructor, TransporterConstructorStateSpec};

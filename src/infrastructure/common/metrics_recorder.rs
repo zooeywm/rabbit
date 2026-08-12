@@ -10,8 +10,8 @@ use opentelemetry::{
 
 use crate::{
     app::container::root::outbound_port::{
-        MetricsRecorder, MetricsTarget, ResourceUsage, ResourceUsageSnapshot,
-        TransporterMetricsRecorder,
+        MetricsRecorder, MetricsTarget, NetworkMetricsRecorder, ResourceUsage,
+        ResourceUsageSnapshot,
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
 };
@@ -247,17 +247,17 @@ where
     }
 }
 
-impl<Deps> TransporterMetricsRecorder for OpenTelemetryMetricsRecorderImpl<Deps> {
-    fn register_transporter_queue_usage(&self, usage: ResourceUsage) {
-        *transporter_queue_usage()
+impl<Deps> NetworkMetricsRecorder for OpenTelemetryMetricsRecorderImpl<Deps> {
+    fn register_network_queue_usage(&self, usage: ResourceUsage) {
+        *network_queue_usage()
             .lock()
-            .expect("transporter queue usage mutex should not be poisoned") = Some(usage);
+            .expect("network queue usage mutex should not be poisoned") = Some(usage);
     }
 
-    fn unregister_transporter_queue_usage(&self) {
-        transporter_queue_usage()
+    fn unregister_network_queue_usage(&self) {
+        network_queue_usage()
             .lock()
-            .expect("transporter queue usage mutex should not be poisoned")
+            .expect("network queue usage mutex should not be poisoned")
             .take();
     }
 
@@ -336,10 +336,10 @@ pub(super) fn snapshot_metrics_resource_usages()
         .collect()
 }
 
-pub(super) fn snapshot_transporter_queue_usage() -> Option<ResourceUsageSnapshot> {
-    transporter_queue_usage()
+pub(super) fn snapshot_network_queue_usage() -> Option<ResourceUsageSnapshot> {
+    network_queue_usage()
         .lock()
-        .expect("transporter queue usage mutex should not be poisoned")
+        .expect("network queue usage mutex should not be poisoned")
         .as_ref()
         .map(ResourceUsage::snapshot)
 }
@@ -399,7 +399,7 @@ fn metrics_resource_usages() -> &'static Mutex<HashMap<MetricsTarget, TargetReso
     RESOURCE_USAGES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn transporter_queue_usage() -> &'static Mutex<Option<ResourceUsage>> {
+fn network_queue_usage() -> &'static Mutex<Option<ResourceUsage>> {
     static USAGE: OnceLock<Mutex<Option<ResourceUsage>>> = OnceLock::new();
     USAGE.get_or_init(|| Mutex::new(None))
 }

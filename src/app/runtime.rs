@@ -7,20 +7,18 @@ use eros::Context;
 
 use crate::{
     app::container::{
+        network::{NetworkContainer, inbound::NetworkWorker, outbound_port::Transporter},
         root::{
             AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor, StreamPipelineFor,
             TransporterStateFor,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                MetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
-                TransporterMetricsRecorder,
+                MetricsRecorder, NetworkMetricsRecorder, TransporterConstructor,
+                TransporterConstructorStateSpec,
             },
         },
         stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
-        transporter::{
-            TransporterContainer, inbound::TransporterWorker, outbound_port::Transporter,
-        },
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
@@ -46,7 +44,7 @@ pub(crate) enum AppMessage {
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
     },
-    TransporterWorkerExited,
+    NetworkWorkerExited,
     Shutdown,
 }
 
@@ -73,8 +71,8 @@ impl AppRuntime {
         CvtMgrSt: ConverterManagerStateSpec,
         EcdMgrSt: EncoderManagerStateSpec,
         TprCstSt: TransporterConstructorStateSpec,
-        TransporterContainer<TransporterStateFor<TprCstSt>>: Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>
-            + TransporterMetricsRecorder,
+        NetworkContainer<TransporterStateFor<TprCstSt>>: Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>
+            + NetworkMetricsRecorder,
         AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: CapturerManager<State = CapMgrSt>
             + ConverterManager<State = CvtMgrSt>
             + EncoderManager<State = EcdMgrSt>
@@ -97,9 +95,9 @@ impl AppRuntime {
                     .enter(app_constructor)
                     .with_context(|| "Failed to construct app")?;
                 let transporter_constructor = app.compose_transporter()?;
-                let transporter_worker =
-                    TransporterWorker::spawn(transporter_constructor, app_message_sender.clone())?;
-                let encoded_unit_sender = transporter_worker.sender();
+                let network_worker =
+                    NetworkWorker::spawn(transporter_constructor, app_message_sender.clone())?;
+                let encoded_unit_sender = network_worker.sender();
 
                 started_sender
                     .send(())
@@ -110,9 +108,9 @@ impl AppRuntime {
                     app_message_sender,
                     message_receiver,
                 ));
-                let transporter_result = runtime.block_on(transporter_worker.shutdown());
+                let network_result = runtime.block_on(network_worker.shutdown());
 
-                match transporter_result {
+                match network_result {
                     Err(error) => Err(error),
                     Ok(()) => app_result,
                 }

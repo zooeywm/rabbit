@@ -1,9 +1,9 @@
 use crate::{
     app::container::{
-        root::outbound_port::{MetricsRecorder, ResourceUsage, TransporterMetricsRecorder},
+        network::NetworkContainer,
+        root::outbound_port::{MetricsRecorder, NetworkMetricsRecorder, ResourceUsage},
         screen_capture::ScreenCaptureContainer,
         stream_pipeline::StreamPipelineContainer,
-        transporter::TransporterContainer,
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
     infrastructure::common::OpenTelemetryMetricsRecorderImpl,
@@ -91,16 +91,16 @@ impl<CvtSt, EcdSt> MetricsRecorder for StreamPipelineContainer<CvtSt, EcdSt> {
     }
 }
 
-impl<State> TransporterMetricsRecorder for TransporterContainer<State> {
-    fn register_transporter_queue_usage(&self, usage: ResourceUsage) {
-        TransporterMetricsRecorder::register_transporter_queue_usage(
+impl<State> NetworkMetricsRecorder for NetworkContainer<State> {
+    fn register_network_queue_usage(&self, usage: ResourceUsage) {
+        NetworkMetricsRecorder::register_network_queue_usage(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
             usage,
         );
     }
 
-    fn unregister_transporter_queue_usage(&self) {
-        TransporterMetricsRecorder::unregister_transporter_queue_usage(
+    fn unregister_network_queue_usage(&self) {
+        NetworkMetricsRecorder::unregister_network_queue_usage(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
         );
     }
@@ -112,7 +112,7 @@ impl<State> TransporterMetricsRecorder for TransporterContainer<State> {
         frame_id: FrameId,
         duration: std::time::Duration,
     ) {
-        TransporterMetricsRecorder::record_packetized_frame(
+        NetworkMetricsRecorder::record_packetized_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
             capture_source_id,
             stream_id,
@@ -127,7 +127,7 @@ impl<State> TransporterMetricsRecorder for TransporterContainer<State> {
         stream_id: StreamId,
         bytes: usize,
     ) {
-        TransporterMetricsRecorder::record_sent_bytes(
+        NetworkMetricsRecorder::record_sent_bytes(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
             capture_source_id,
             stream_id,
