@@ -6,6 +6,9 @@ use crate::{
 pub(crate) trait TransporterHostSide {
     type EncodedBuffer;
     type Packetized;
+    type Sender: 'static;
+
+    fn take_sender(&mut self) -> eros::Result<Self::Sender>;
 
     fn packetize(
         &mut self,
@@ -13,5 +16,5 @@ pub(crate) trait TransporterHostSide {
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized>;
 
-    async fn send(&mut self, packetized: Self::Packetized) -> eros::Result<()>;
+    async fn send(sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()>;
 }

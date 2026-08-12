@@ -87,7 +87,7 @@ impl AppRuntime {
         Client: ClientApplication,
         NetworkConstructorState: TransporterConstructorStateSpec,
         NetworkContainer<TransporterStateFor<NetworkConstructorState>>: TransporterHostSide<EncodedBuffer = Host::EncodedBuffer>
-            + TransporterClientSide
+            + TransporterClientSide<Depacketized = Client::NetworkInput>
             + NetworkMetricsRecorder,
         AppContainer<Host, Client, NetworkConstructorState>:
             TransporterConstructor<State = NetworkConstructorState>,
@@ -105,9 +105,10 @@ impl AppRuntime {
                     .enter(app_constructor)
                     .with_context(|| "Failed to construct app")?;
                 let transporter_constructor = app.compose_transporter()?;
-                let network_worker =
+                let mut network_worker =
                     NetworkWorker::spawn(transporter_constructor, app_message_sender.clone())?;
                 let encoded_unit_sender = network_worker.sender();
+                let network_client_event_receiver = network_worker.take_client_event_receiver()?;
 
                 started_sender
                     .send(())
@@ -115,6 +116,7 @@ impl AppRuntime {
 
                 let app_result = runtime.block_on(app.run(
                     encoded_unit_sender,
+                    network_client_event_receiver,
                     app_message_sender,
                     message_receiver,
                 ));

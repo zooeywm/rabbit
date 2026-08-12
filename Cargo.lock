@@ -5378,6 +5378,7 @@ dependencies = [
  "directories",
  "eros",
  "flume",
+ "futures-util",
  "gpui",
  "gpui-component",
  "gpui_platform",

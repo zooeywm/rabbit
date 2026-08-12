@@ -1,7 +1,9 @@
 use crate::app::{
     container::{
-        client::inbound_port::ClientApplication, host::inbound_port::HostApplication,
-        network::inbound::EncodedUnitSender, root::AppContainer,
+        client::inbound_port::ClientApplication,
+        host::inbound_port::HostApplication,
+        network::inbound::{EncodedUnitSender, NetworkClientEventReceiver},
+        root::AppContainer,
     },
     runtime::AppMessage,
 };
@@ -14,11 +16,33 @@ where
     pub(crate) async fn run(
         mut self,
         encoded_unit_sender: EncodedUnitSender<Host::EncodedBuffer>,
+        network_client_event_receiver: NetworkClientEventReceiver<Client::NetworkInput>,
         app_message_sender: flume::Sender<AppMessage>,
         message_receiver: flume::Receiver<AppMessage>,
     ) -> eros::Result<()> {
+        use futures_util::{FutureExt, select_biased};
+
         loop {
-            match message_receiver.recv_async().await {
+            let app_message = message_receiver.recv_async().fuse();
+            let network_client_event = network_client_event_receiver.receive().fuse();
+            futures_util::pin_mut!(app_message, network_client_event);
+
+            let message = select_biased! {
+                message = app_message => Some(message),
+                event = network_client_event => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    self.client.handle_network_input(event.stream_id, event.input)?;
+                    None
+                },
+            };
+
+            let Some(message) = message else {
+                continue;
+            };
+
+            match message {
                 #[cfg(feature = "test-ui")]
                 Ok(AppMessage::CaptureOnly(message)) => {
                     use crate::app::runtime::capture_only::CaptureOnlyMessage;

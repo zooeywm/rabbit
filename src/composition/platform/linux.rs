@@ -311,6 +311,11 @@ impl AsMut<LinuxTransporterState> for NetworkContainer<LinuxTransporterState> {
 impl TransporterHostSide for NetworkContainer<LinuxTransporterState> {
     type EncodedBuffer = Infallible;
     type Packetized = Infallible;
+    type Sender = Infallible;
+
+    fn take_sender(&mut self) -> eros::Result<Self::Sender> {
+        TransporterHostSide::take_sender(LinuxTransporterImpl::inj_ref_mut(self))
+    }
 
     fn packetize(
         &mut self,
@@ -320,9 +325,31 @@ impl TransporterHostSide for NetworkContainer<LinuxTransporterState> {
         TransporterHostSide::packetize(LinuxTransporterImpl::inj_ref_mut(self), stream_id, unit)
     }
 
-    async fn send(&mut self, packetized: Self::Packetized) -> eros::Result<()> {
-        TransporterHostSide::send(LinuxTransporterImpl::inj_ref_mut(self), packetized).await
+    async fn send(_sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()> {
+        match packetized {}
     }
 }
 
-impl TransporterClientSide for NetworkContainer<LinuxTransporterState> {}
+impl TransporterClientSide for NetworkContainer<LinuxTransporterState> {
+    type Receiver = Infallible;
+    type Received = Infallible;
+    type Depacketized = Infallible;
+
+    fn take_receiver(&mut self) -> eros::Result<Self::Receiver> {
+        TransporterClientSide::take_receiver(LinuxTransporterImpl::inj_ref_mut(self))
+    }
+
+    async fn receive(_receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
+        eros::bail!("Linux transporter is not implemented")
+    }
+
+    fn depacketize(
+        &mut self,
+        received: Self::Received,
+    ) -> eros::Result<(
+        crate::domain::stream::models::vo::StreamId,
+        Self::Depacketized,
+    )> {
+        match received {}
+    }
+}

@@ -2,6 +2,7 @@ use crate::{
     app::container::{
         client::{
             ClientContainer,
+            inbound_port::ClientApplication,
             outbound_port::{DecoderManager, DecoderManagerStateSpec},
         },
         client_stream_pipeline::{ClientStreamPipelineContainer, outbound_port::VideoDecoder},
@@ -37,8 +38,8 @@ use crate::{
         FakeEncoderFrameConverterState, FakeEncoderInput, FakeEncoderManagerImpl,
         FakeEncoderManagerState, FakePacketized, FakeScreenCapturerControl, FakeScreenCapturerImpl,
         FakeScreenCapturerState, FakeTransporterConstructorImpl, FakeTransporterConstructorState,
-        FakeTransporterImpl, FakeTransporterState, FakeVideoDecoderImpl, FakeVideoDecoderState,
-        FakeVideoEncoderImpl, FakeVideoEncoderState,
+        FakeTransporterImpl, FakeTransporterReceiver, FakeTransporterSender, FakeTransporterState,
+        FakeVideoDecoderImpl, FakeVideoDecoderState, FakeVideoEncoderImpl, FakeVideoEncoderState,
     },
     infrastructure::support::media::FrameLease,
 };
@@ -271,19 +272,19 @@ impl DecoderManagerStateSpec for FakeDecoderManagerState {
     type VideoDecoderState = FakeVideoDecoderState;
 }
 
-impl AsRef<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState> {
+impl<DcdSt> AsRef<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState, DcdSt> {
     fn as_ref(&self) -> &FakeDecoderManagerState {
         self.decoder_manager_state()
     }
 }
 
-impl AsMut<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState> {
+impl<DcdSt> AsMut<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState, DcdSt> {
     fn as_mut(&mut self) -> &mut FakeDecoderManagerState {
         self.decoder_manager_state_mut()
     }
 }
 
-impl DecoderManager for ClientContainer<FakeDecoderManagerState> {
+impl<DcdSt> DecoderManager for ClientContainer<FakeDecoderManagerState, DcdSt> {
     type State = FakeDecoderManagerState;
 
     fn compose_video_decoder_state(
@@ -291,7 +292,7 @@ impl DecoderManager for ClientContainer<FakeDecoderManagerState> {
     ) -> impl FnOnce() -> eros::Result<<Self::State as DecoderManagerStateSpec>::VideoDecoderState>
     + Send
     + 'static
-    + use<> {
+    + use<DcdSt> {
         DecoderManager::compose_video_decoder_state(FakeDecoderManagerImpl::inj_ref_mut(self))
     }
 }
@@ -321,6 +322,22 @@ impl VideoDecoder for ClientStreamPipelineContainer<FakeVideoDecoderState> {
         >,
     > {
         VideoDecoder::decode(FakeVideoDecoderImpl::inj_ref_mut(self), input)
+    }
+}
+
+impl ClientApplication for ClientContainer<FakeDecoderManagerState, FakeVideoDecoderState> {
+    type NetworkInput = FakeDecoderInput;
+
+    fn handle_network_input(
+        &mut self,
+        stream_id: crate::domain::stream::models::vo::StreamId,
+        input: Self::NetworkInput,
+    ) -> eros::Result<()> {
+        self.decode_network_input(stream_id, input)
+    }
+
+    async fn shutdown(self) -> eros::Result<()> {
+        Ok(())
     }
 }
 
@@ -358,7 +375,7 @@ impl<Host, Client> TransporterConstructor
 
 pub(super) type PlatformHost =
     HostContainer<FakeCapturerManagerState, FakeConverterManagerState, FakeEncoderManagerState>;
-pub(super) type PlatformClient = ClientContainer<FakeDecoderManagerState>;
+pub(super) type PlatformClient = ClientContainer<FakeDecoderManagerState, FakeVideoDecoderState>;
 pub(super) type PlatformNetworkConstructorState = FakeTransporterConstructorState;
 pub(super) type PlatformApp =
     AppContainer<PlatformHost, PlatformClient, PlatformNetworkConstructorState>;
@@ -386,6 +403,11 @@ impl AsMut<FakeTransporterState> for NetworkContainer<FakeTransporterState> {
 impl TransporterHostSide for NetworkContainer<FakeTransporterState> {
     type EncodedBuffer = [u8; 8];
     type Packetized = FakePacketized;
+    type Sender = FakeTransporterSender;
+
+    fn take_sender(&mut self) -> eros::Result<Self::Sender> {
+        TransporterHostSide::take_sender(FakeTransporterImpl::inj_ref_mut(self))
+    }
 
     fn packetize(
         &mut self,
@@ -395,17 +417,46 @@ impl TransporterHostSide for NetworkContainer<FakeTransporterState> {
         TransporterHostSide::packetize(FakeTransporterImpl::inj_ref_mut(self), stream_id, unit)
     }
 
-    async fn send(&mut self, packetized: Self::Packetized) -> eros::Result<()> {
-        TransporterHostSide::send(FakeTransporterImpl::inj_ref_mut(self), packetized).await
+    async fn send(sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()> {
+        sender.send(packetized).await
     }
 }
 
-impl TransporterClientSide for NetworkContainer<FakeTransporterState> {}
+impl TransporterClientSide for NetworkContainer<FakeTransporterState> {
+    type Receiver = FakeTransporterReceiver;
+    type Received = crate::infrastructure::platform::FakeReceived;
+    type Depacketized = FakeDecoderInput;
+
+    fn take_receiver(&mut self) -> eros::Result<Self::Receiver> {
+        TransporterClientSide::take_receiver(FakeTransporterImpl::inj_ref_mut(self))
+    }
+
+    async fn receive(receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
+        receiver.receive().await
+    }
+
+    fn depacketize(
+        &mut self,
+        received: Self::Received,
+    ) -> eros::Result<(
+        crate::domain::stream::models::vo::StreamId,
+        Self::Depacketized,
+    )> {
+        TransporterClientSide::depacketize(FakeTransporterImpl::inj_ref_mut(self), received)
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use eros::Context;
+
     use super::*;
-    use crate::domain::stream::models::vo::FrameId;
+    use crate::{
+        app::container::{
+            host_stream_pipeline::outbound_port::UnitNumber, network::inbound::NetworkWorker,
+        },
+        domain::stream::models::vo::{FrameId, StreamId},
+    };
 
     #[test]
     fn fake_client_pipeline_decodes_input() -> eros::Result<()> {
@@ -420,5 +471,31 @@ mod tests {
         assert!(decoded.frame_id == frame_id);
         assert!(decoded.buffer == buffer);
         Ok(())
+    }
+
+    #[test]
+    fn fake_network_closes_the_host_to_client_loop() -> eros::Result<()> {
+        let (app_message_sender, _app_message_receiver) = flume::unbounded();
+        let mut worker = NetworkWorker::spawn(FakeTransporterState::new, app_message_sender)?;
+        let encoded_sender = worker.sender();
+        let client_event_receiver = worker.take_client_event_receiver()?;
+        let frame_id = FrameId::new(CaptureSourceId::new(3), 9);
+        let stream_id = StreamId::new(4);
+        encoded_sender.send(
+            stream_id,
+            EncodedVideoUnit::new(frame_id, UnitNumber::new(2), false, 77_u64.to_le_bytes()),
+        )?;
+        drop(encoded_sender);
+
+        let runtime = compio::runtime::Runtime::new()?;
+        runtime.block_on(async move {
+            let event = client_event_receiver
+                .receive()
+                .await
+                .with_context(|| "Fake network did not produce a client event")?;
+            let mut client = PlatformClient::new(FakeDecoderManagerState::new()?);
+            client.handle_network_input(event.stream_id, event.input)?;
+            worker.shutdown().await
+        })
     }
 }

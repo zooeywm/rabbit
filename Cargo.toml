@@ -32,6 +32,7 @@ cfg-if = "1.0"
 # For async runtime
 compio = "0.19"
 flume = { version = "0.12", default-features = false, features = ["async"] }
+futures-util = "0.3"
 
 # For UI
 gpui = { git = "https://github.com/zed-industries/zed" }

@@ -35,7 +35,7 @@ where
     Client: ClientApplication,
     NetworkConstructorState: TransporterConstructorStateSpec,
     NetworkContainer<TransporterStateFor<NetworkConstructorState>>: TransporterHostSide<EncodedBuffer = Host::EncodedBuffer>
-        + TransporterClientSide
+        + TransporterClientSide<Depacketized = Client::NetworkInput>
         + NetworkMetricsRecorder,
     AppContainer<Host, Client, NetworkConstructorState>:
         TransporterConstructor<State = NetworkConstructorState>,

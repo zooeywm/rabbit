@@ -318,6 +318,11 @@ impl AsMut<UnsupportedTransporterState> for NetworkContainer<UnsupportedTranspor
 impl TransporterHostSide for NetworkContainer<UnsupportedTransporterState> {
     type EncodedBuffer = Infallible;
     type Packetized = Infallible;
+    type Sender = Infallible;
+
+    fn take_sender(&mut self) -> eros::Result<Self::Sender> {
+        TransporterHostSide::take_sender(UnsupportedTransporterImpl::inj_ref_mut(self))
+    }
 
     fn packetize(
         &mut self,
@@ -331,9 +336,31 @@ impl TransporterHostSide for NetworkContainer<UnsupportedTransporterState> {
         )
     }
 
-    async fn send(&mut self, packetized: Self::Packetized) -> eros::Result<()> {
-        TransporterHostSide::send(UnsupportedTransporterImpl::inj_ref_mut(self), packetized).await
+    async fn send(_sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()> {
+        match packetized {}
     }
 }
 
-impl TransporterClientSide for NetworkContainer<UnsupportedTransporterState> {}
+impl TransporterClientSide for NetworkContainer<UnsupportedTransporterState> {
+    type Receiver = Infallible;
+    type Received = Infallible;
+    type Depacketized = Infallible;
+
+    fn take_receiver(&mut self) -> eros::Result<Self::Receiver> {
+        TransporterClientSide::take_receiver(UnsupportedTransporterImpl::inj_ref_mut(self))
+    }
+
+    async fn receive(_receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
+        eros::bail!("Transporter is not implemented on this platform")
+    }
+
+    fn depacketize(
+        &mut self,
+        received: Self::Received,
+    ) -> eros::Result<(
+        crate::domain::stream::models::vo::StreamId,
+        Self::Depacketized,
+    )> {
+        match received {}
+    }
+}
