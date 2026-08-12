@@ -290,7 +290,7 @@ pub(super) type PlatformHost = HostContainer<
     UnsupportedConverterManagerState,
     UnsupportedEncoderManagerState,
 >;
-pub(super) type PlatformClient = ClientContainer;
+pub(super) type PlatformClient = ClientContainer<()>;
 pub(super) type PlatformNetworkConstructorState = UnsupportedTransporterConstructorState;
 pub(super) type PlatformApp =
     AppContainer<PlatformHost, PlatformClient, PlatformNetworkConstructorState>;
@@ -303,7 +303,7 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
                 UnsupportedConverterManagerState::new()?,
                 UnsupportedEncoderManagerState::new()?,
             ),
-            PlatformClient::new(),
+            PlatformClient::new(()),
             UnsupportedTransporterConstructorState::new()?,
         ))
     }

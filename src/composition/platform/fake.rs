@@ -1,6 +1,10 @@
 use crate::{
     app::container::{
-        client::ClientContainer,
+        client::{
+            ClientContainer,
+            outbound_port::{DecoderManager, DecoderManagerStateSpec},
+        },
+        client_stream_pipeline::{ClientStreamPipelineContainer, outbound_port::VideoDecoder},
         host::{
             HostContainer,
             outbound_port::{
@@ -28,11 +32,13 @@ use crate::{
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
         FakeCapturedFrame, FakeCapturerManagerImpl, FakeCapturerManagerState,
-        FakeConverterManagerImpl, FakeConverterManagerState, FakeEncoderFrameConverterImpl,
+        FakeConverterManagerImpl, FakeConverterManagerState, FakeDecoderInput,
+        FakeDecoderManagerImpl, FakeDecoderManagerState, FakeEncoderFrameConverterImpl,
         FakeEncoderFrameConverterState, FakeEncoderInput, FakeEncoderManagerImpl,
         FakeEncoderManagerState, FakePacketized, FakeScreenCapturerControl, FakeScreenCapturerImpl,
         FakeScreenCapturerState, FakeTransporterConstructorImpl, FakeTransporterConstructorState,
-        FakeTransporterImpl, FakeTransporterState, FakeVideoEncoderImpl, FakeVideoEncoderState,
+        FakeTransporterImpl, FakeTransporterState, FakeVideoDecoderImpl, FakeVideoDecoderState,
+        FakeVideoEncoderImpl, FakeVideoEncoderState,
     },
     infrastructure::support::media::FrameLease,
 };
@@ -261,6 +267,63 @@ impl<CvtSt> VideoEncoder for HostStreamPipelineContainer<CvtSt, FakeVideoEncoder
     }
 }
 
+impl DecoderManagerStateSpec for FakeDecoderManagerState {
+    type VideoDecoderState = FakeVideoDecoderState;
+}
+
+impl AsRef<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState> {
+    fn as_ref(&self) -> &FakeDecoderManagerState {
+        self.decoder_manager_state()
+    }
+}
+
+impl AsMut<FakeDecoderManagerState> for ClientContainer<FakeDecoderManagerState> {
+    fn as_mut(&mut self) -> &mut FakeDecoderManagerState {
+        self.decoder_manager_state_mut()
+    }
+}
+
+impl DecoderManager for ClientContainer<FakeDecoderManagerState> {
+    type State = FakeDecoderManagerState;
+
+    fn compose_video_decoder_state(
+        &mut self,
+    ) -> impl FnOnce() -> eros::Result<<Self::State as DecoderManagerStateSpec>::VideoDecoderState>
+    + Send
+    + 'static
+    + use<> {
+        DecoderManager::compose_video_decoder_state(FakeDecoderManagerImpl::inj_ref_mut(self))
+    }
+}
+
+impl AsRef<FakeVideoDecoderState> for ClientStreamPipelineContainer<FakeVideoDecoderState> {
+    fn as_ref(&self) -> &FakeVideoDecoderState {
+        self.video_decoder_state()
+    }
+}
+
+impl AsMut<FakeVideoDecoderState> for ClientStreamPipelineContainer<FakeVideoDecoderState> {
+    fn as_mut(&mut self) -> &mut FakeVideoDecoderState {
+        self.video_decoder_state_mut()
+    }
+}
+
+impl VideoDecoder for ClientStreamPipelineContainer<FakeVideoDecoderState> {
+    type DecoderInput = FakeDecoderInput;
+    type DecodedBuffer = [u8; 8];
+
+    fn decode(
+        &mut self,
+        input: Self::DecoderInput,
+    ) -> eros::Result<
+        crate::app::container::client_stream_pipeline::outbound_port::DecodedVideoFrame<
+            Self::DecodedBuffer,
+        >,
+    > {
+        VideoDecoder::decode(FakeVideoDecoderImpl::inj_ref_mut(self), input)
+    }
+}
+
 impl TransporterConstructorStateSpec for FakeTransporterConstructorState {
     type TransporterState = FakeTransporterState;
 }
@@ -295,7 +358,7 @@ impl<Host, Client> TransporterConstructor
 
 pub(super) type PlatformHost =
     HostContainer<FakeCapturerManagerState, FakeConverterManagerState, FakeEncoderManagerState>;
-pub(super) type PlatformClient = ClientContainer;
+pub(super) type PlatformClient = ClientContainer<FakeDecoderManagerState>;
 pub(super) type PlatformNetworkConstructorState = FakeTransporterConstructorState;
 pub(super) type PlatformApp =
     AppContainer<PlatformHost, PlatformClient, PlatformNetworkConstructorState>;
@@ -308,7 +371,7 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
                 FakeConverterManagerState::new()?,
                 FakeEncoderManagerState::new()?,
             ),
-            PlatformClient::new(),
+            PlatformClient::new(FakeDecoderManagerState::new()?),
             FakeTransporterConstructorState::new()?,
         ))
     }
@@ -338,3 +401,24 @@ impl TransporterHostSide for NetworkContainer<FakeTransporterState> {
 }
 
 impl TransporterClientSide for NetworkContainer<FakeTransporterState> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::stream::models::vo::FrameId;
+
+    #[test]
+    fn fake_client_pipeline_decodes_input() -> eros::Result<()> {
+        let mut client = PlatformClient::new(FakeDecoderManagerState::new()?);
+        let compose_decoder = client.compose_video_decoder_state();
+        let mut pipeline = ClientStreamPipelineContainer::new(compose_decoder()?);
+        let frame_id = FrameId::new(CaptureSourceId::new(7), 11);
+        let buffer = 42_u64.to_le_bytes();
+
+        let decoded = pipeline.decode(FakeDecoderInput::new(frame_id, buffer))?;
+
+        assert!(decoded.frame_id == frame_id);
+        assert!(decoded.buffer == buffer);
+        Ok(())
+    }
+}

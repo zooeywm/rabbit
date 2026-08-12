@@ -283,7 +283,7 @@ impl<Host, Client> TransporterConstructor
 
 pub(super) type PlatformHost =
     HostContainer<LinuxCapturerManagerState, LinuxConverterManagerState, LinuxEncoderManagerState>;
-pub(super) type PlatformClient = ClientContainer;
+pub(super) type PlatformClient = ClientContainer<()>;
 pub(super) type PlatformNetworkConstructorState = LinuxTransporterConstructorState;
 pub(super) type PlatformApp =
     AppContainer<PlatformHost, PlatformClient, PlatformNetworkConstructorState>;
@@ -296,7 +296,7 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
                 LinuxConverterManagerState::new()?,
                 LinuxEncoderManagerState::new()?,
             ),
-            PlatformClient::new(),
+            PlatformClient::new(()),
             LinuxTransporterConstructorState::new()?,
         ))
     }
