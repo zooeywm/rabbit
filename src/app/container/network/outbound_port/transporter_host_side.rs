@@ -3,7 +3,7 @@ use crate::{
     domain::stream::models::vo::StreamId,
 };
 
-pub(crate) trait Transporter {
+pub(crate) trait TransporterHostSide {
     type EncodedBuffer;
     type Packetized;
 

@@ -9,12 +9,14 @@ use crate::{
     app::container::{
         client::inbound_port::ClientApplication,
         host::{inbound_port::HostApplication, outbound_port::HostEventReporter},
-        network::{NetworkContainer, inbound::NetworkWorker, outbound_port::Transporter},
+        network::{
+            NetworkContainer,
+            inbound::NetworkWorker,
+            outbound_port::{NetworkMetricsRecorder, TransporterClientSide, TransporterHostSide},
+        },
         root::{
             AppContainer, TransporterStateFor,
-            outbound_port::{
-                NetworkMetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
-            },
+            outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
         },
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
@@ -84,8 +86,9 @@ impl AppRuntime {
         Host: HostApplication,
         Client: ClientApplication,
         NetworkConstructorState: TransporterConstructorStateSpec,
-        NetworkContainer<TransporterStateFor<NetworkConstructorState>>:
-            Transporter<EncodedBuffer = Host::EncodedBuffer> + NetworkMetricsRecorder,
+        NetworkContainer<TransporterStateFor<NetworkConstructorState>>: TransporterHostSide<EncodedBuffer = Host::EncodedBuffer>
+            + TransporterClientSide
+            + NetworkMetricsRecorder,
         AppContainer<Host, Client, NetworkConstructorState>:
             TransporterConstructor<State = NetworkConstructorState>,
     {

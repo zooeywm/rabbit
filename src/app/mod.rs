@@ -7,12 +7,13 @@ use config::Config;
 use container::{
     client::inbound_port::ClientApplication,
     host::inbound_port::HostApplication,
-    network::{NetworkContainer, outbound_port::Transporter},
+    network::{
+        NetworkContainer,
+        outbound_port::{NetworkMetricsRecorder, TransporterClientSide, TransporterHostSide},
+    },
     root::{
         AppContainer, TransporterStateFor,
-        outbound_port::{
-            NetworkMetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
-        },
+        outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
     },
 };
 use directories::ProjectDirs;
@@ -33,8 +34,9 @@ where
     Host: HostApplication,
     Client: ClientApplication,
     NetworkConstructorState: TransporterConstructorStateSpec,
-    NetworkContainer<TransporterStateFor<NetworkConstructorState>>:
-        Transporter<EncodedBuffer = Host::EncodedBuffer> + NetworkMetricsRecorder,
+    NetworkContainer<TransporterStateFor<NetworkConstructorState>>: TransporterHostSide<EncodedBuffer = Host::EncodedBuffer>
+        + TransporterClientSide
+        + NetworkMetricsRecorder,
     AppContainer<Host, Client, NetworkConstructorState>:
         TransporterConstructor<State = NetworkConstructorState>,
 {

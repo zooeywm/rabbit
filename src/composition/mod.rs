@@ -1,8 +1,10 @@
 use crate::{
     app::container::{
-        ResourceUsage, host::outbound_port::MetricsRecorder,
-        host_stream_pipeline::HostStreamPipelineContainer, network::NetworkContainer,
-        root::outbound_port::NetworkMetricsRecorder, screen_capture::ScreenCaptureContainer,
+        ResourceUsage,
+        host::outbound_port::MetricsRecorder,
+        host_stream_pipeline::HostStreamPipelineContainer,
+        network::{NetworkContainer, outbound_port::NetworkMetricsRecorder},
+        screen_capture::ScreenCaptureContainer,
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
     infrastructure::common::OpenTelemetryMetricsRecorderImpl,

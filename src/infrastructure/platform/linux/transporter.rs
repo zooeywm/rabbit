@@ -2,7 +2,8 @@ use std::convert::Infallible;
 
 use crate::{
     app::container::{
-        host_stream_pipeline::outbound_port::EncodedVideoUnit, network::outbound_port::Transporter,
+        host_stream_pipeline::outbound_port::EncodedVideoUnit,
+        network::outbound_port::TransporterHostSide,
     },
     domain::stream::models::vo::StreamId,
 };
@@ -13,7 +14,7 @@ pub(crate) struct LinuxTransporterState {
     never: Infallible,
 }
 
-impl<Deps> Transporter for LinuxTransporterImpl<Deps> {
+impl<Deps> TransporterHostSide for LinuxTransporterImpl<Deps> {
     type EncodedBuffer = Infallible;
     type Packetized = Infallible;
 

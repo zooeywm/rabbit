@@ -5,6 +5,7 @@ use crate::{
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
 };
 
+/// Records process-wide Network application metrics.
 pub(crate) trait NetworkMetricsRecorder {
     fn register_network_queue_usage(&self, usage: ResourceUsage);
 

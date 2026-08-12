@@ -7,9 +7,10 @@ use eros::Context;
 
 use super::unit_queue::EncodedUnitReceiver;
 use crate::app::{
-    container::{
-        network::{NetworkContainer, inbound::EncodedUnitSender, outbound_port::Transporter},
-        root::outbound_port::NetworkMetricsRecorder,
+    container::network::{
+        NetworkContainer,
+        inbound::EncodedUnitSender,
+        outbound_port::{NetworkMetricsRecorder, TransporterClientSide, TransporterHostSide},
     },
     runtime::AppMessage,
 };
@@ -29,12 +30,15 @@ impl NetworkWorker {
     pub(crate) fn spawn<State, Constructor>(
         transporter_constructor: Constructor,
         app_message_sender: flume::Sender<AppMessage>,
-    ) -> eros::Result<NetworkWorkerHandle<<NetworkContainer<State> as Transporter>::EncodedBuffer>>
+    ) -> eros::Result<
+        NetworkWorkerHandle<<NetworkContainer<State> as TransporterHostSide>::EncodedBuffer>,
+    >
     where
         State: 'static,
         Constructor: FnOnce() -> eros::Result<State> + Send + 'static,
-        NetworkContainer<State>: Transporter + NetworkMetricsRecorder,
-        <NetworkContainer<State> as Transporter>::EncodedBuffer: Send + 'static,
+        NetworkContainer<State>:
+            TransporterHostSide + TransporterClientSide + NetworkMetricsRecorder,
+        <NetworkContainer<State> as TransporterHostSide>::EncodedBuffer: Send + 'static,
     {
         let (sender, receiver) = EncodedUnitReceiver::channel();
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
@@ -94,12 +98,12 @@ impl<Buffer> NetworkWorkerHandle<Buffer> {
 
 async fn run_network_worker<State, Constructor>(
     transporter_constructor: Constructor,
-    receiver: EncodedUnitReceiver<<NetworkContainer<State> as Transporter>::EncodedBuffer>,
+    receiver: EncodedUnitReceiver<<NetworkContainer<State> as TransporterHostSide>::EncodedBuffer>,
     started_sender: mpsc::SyncSender<()>,
 ) -> eros::Result<()>
 where
     Constructor: FnOnce() -> eros::Result<State>,
-    NetworkContainer<State>: Transporter + NetworkMetricsRecorder,
+    NetworkContainer<State>: TransporterHostSide + TransporterClientSide + NetworkMetricsRecorder,
 {
     let mut network = NetworkContainer::new(transporter_constructor()?);
     network.register_network_queue_usage(receiver.usage());
@@ -109,8 +113,9 @@ where
 
     let result = async {
         while let Some(item) = receiver.receive().await {
-            let packetized = Transporter::packetize(&mut network, item.stream_id, item.unit)?;
-            Transporter::send(&mut network, packetized).await?;
+            let packetized =
+                TransporterHostSide::packetize(&mut network, item.stream_id, item.unit)?;
+            TransporterHostSide::send(&mut network, packetized).await?;
         }
         Ok(())
     }
@@ -147,7 +152,9 @@ mod tests {
 
     struct NonSendTransporterState(PhantomData<Rc<()>>);
 
-    impl Transporter for crate::app::container::network::NetworkContainer<NonSendTransporterState> {
+    impl TransporterHostSide
+        for crate::app::container::network::NetworkContainer<NonSendTransporterState>
+    {
         type EncodedBuffer = ();
         type Packetized = ();
 
@@ -162,6 +169,11 @@ mod tests {
         async fn send(&mut self, _packetized: Self::Packetized) -> eros::Result<()> {
             Ok(())
         }
+    }
+
+    impl TransporterClientSide
+        for crate::app::container::network::NetworkContainer<NonSendTransporterState>
+    {
     }
 
     #[test]

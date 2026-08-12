@@ -12,7 +12,10 @@ use crate::{
             HostStreamPipelineContainer,
             outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
         },
-        network::{NetworkContainer, outbound_port::Transporter},
+        network::{
+            NetworkContainer,
+            outbound_port::{TransporterClientSide, TransporterHostSide},
+        },
         root::{
             AppContainer,
             outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
@@ -317,7 +320,7 @@ impl AsMut<FakeTransporterState> for NetworkContainer<FakeTransporterState> {
     }
 }
 
-impl Transporter for NetworkContainer<FakeTransporterState> {
+impl TransporterHostSide for NetworkContainer<FakeTransporterState> {
     type EncodedBuffer = [u8; 8];
     type Packetized = FakePacketized;
 
@@ -326,10 +329,12 @@ impl Transporter for NetworkContainer<FakeTransporterState> {
         stream_id: crate::domain::stream::models::vo::StreamId,
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized> {
-        Transporter::packetize(FakeTransporterImpl::inj_ref_mut(self), stream_id, unit)
+        TransporterHostSide::packetize(FakeTransporterImpl::inj_ref_mut(self), stream_id, unit)
     }
 
     async fn send(&mut self, packetized: Self::Packetized) -> eros::Result<()> {
-        Transporter::send(FakeTransporterImpl::inj_ref_mut(self), packetized).await
+        TransporterHostSide::send(FakeTransporterImpl::inj_ref_mut(self), packetized).await
     }
 }
+
+impl TransporterClientSide for NetworkContainer<FakeTransporterState> {}

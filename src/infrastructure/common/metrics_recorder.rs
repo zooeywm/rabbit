@@ -12,7 +12,7 @@ use crate::{
     app::container::{
         ResourceUsage, ResourceUsageSnapshot,
         host::outbound_port::{MetricsRecorder, MetricsTarget},
-        root::outbound_port::NetworkMetricsRecorder,
+        network::outbound_port::NetworkMetricsRecorder,
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
 };

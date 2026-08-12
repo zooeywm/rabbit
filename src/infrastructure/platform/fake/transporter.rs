@@ -4,8 +4,8 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        host_stream_pipeline::outbound_port::EncodedVideoUnit, network::outbound_port::Transporter,
-        root::outbound_port::NetworkMetricsRecorder,
+        host_stream_pipeline::outbound_port::EncodedVideoUnit,
+        network::outbound_port::{NetworkMetricsRecorder, TransporterHostSide},
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
@@ -32,7 +32,7 @@ impl FakeTransporterState {
     }
 }
 
-impl<Deps> Transporter for FakeTransporterImpl<Deps>
+impl<Deps> TransporterHostSide for FakeTransporterImpl<Deps>
 where
     Deps: AsMut<FakeTransporterState> + NetworkMetricsRecorder,
 {
