@@ -221,6 +221,18 @@ mod tests {
 
         fn unregister_metrics_target(&self) {}
 
+        fn register_capture_pool_usage(
+            &self,
+            _usage: crate::app::container::root::outbound_port::ResourceUsage,
+        ) {
+        }
+
+        fn register_packetizer_queue_usage(
+            &self,
+            _usage: crate::app::container::root::outbound_port::ResourceUsage,
+        ) {
+        }
+
         fn record_captured_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
 
         fn record_converted_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}

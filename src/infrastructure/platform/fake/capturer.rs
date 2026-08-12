@@ -92,6 +92,9 @@ where
         OnControl: FnMut() -> eros::Result<CaptureLoopAction>,
         OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
     {
+        self.prj_ref().register_capture_pool_usage(
+            self.prj_ref().as_ref().frame_pool.usage(),
+        );
         self.prj_ref_mut()
             .as_mut()
             .frame_pool

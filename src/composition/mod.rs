@@ -1,7 +1,9 @@
 use crate::{
     app::container::{
-        packetization::PacketizerContainer, root::outbound_port::MetricsRecorder,
-        screen_capture::ScreenCaptureContainer, stream_pipeline::StreamPipelineContainer,
+        packetization::PacketizerContainer,
+        root::outbound_port::{MetricsRecorder, ResourceUsage},
+        screen_capture::ScreenCaptureContainer,
+        stream_pipeline::StreamPipelineContainer,
     },
     domain::stream::models::vo::FrameId,
     infrastructure::common::OpenTelemetryMetricsRecorderImpl,
@@ -14,6 +16,20 @@ impl<State> MetricsRecorder for ScreenCaptureContainer<State> {
 
     fn unregister_metrics_target(&self) {
         MetricsRecorder::unregister_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
+    }
+
+    fn register_capture_pool_usage(&self, usage: ResourceUsage) {
+        MetricsRecorder::register_capture_pool_usage(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            usage,
+        );
+    }
+
+    fn register_packetizer_queue_usage(&self, usage: ResourceUsage) {
+        MetricsRecorder::register_packetizer_queue_usage(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            usage,
+        );
     }
 
     fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
@@ -58,6 +74,20 @@ impl<CvtSt, EcdSt> MetricsRecorder for StreamPipelineContainer<CvtSt, EcdSt> {
         MetricsRecorder::unregister_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
     }
 
+    fn register_capture_pool_usage(&self, usage: ResourceUsage) {
+        MetricsRecorder::register_capture_pool_usage(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            usage,
+        );
+    }
+
+    fn register_packetizer_queue_usage(&self, usage: ResourceUsage) {
+        MetricsRecorder::register_packetizer_queue_usage(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            usage,
+        );
+    }
+
     fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         MetricsRecorder::record_captured_frame(
             OpenTelemetryMetricsRecorderImpl::inj_ref(self),
@@ -98,6 +128,20 @@ impl<State> MetricsRecorder for PacketizerContainer<State> {
 
     fn unregister_metrics_target(&self) {
         MetricsRecorder::unregister_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
+    }
+
+    fn register_capture_pool_usage(&self, usage: ResourceUsage) {
+        MetricsRecorder::register_capture_pool_usage(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            usage,
+        );
+    }
+
+    fn register_packetizer_queue_usage(&self, usage: ResourceUsage) {
+        MetricsRecorder::register_packetizer_queue_usage(
+            OpenTelemetryMetricsRecorderImpl::inj_ref(self),
+            usage,
+        );
     }
 
     fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {

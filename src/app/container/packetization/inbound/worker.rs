@@ -128,6 +128,7 @@ where
     let mut packetizer =
         PacketizerContainer::new(capture_source_id, stream_id, state_constructor()?);
     packetizer.register_metrics_target();
+    packetizer.register_packetizer_queue_usage(frame_queue.usage());
 
     let result = (|| {
         started_sender

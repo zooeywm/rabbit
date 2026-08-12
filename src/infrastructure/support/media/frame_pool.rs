@@ -3,6 +3,8 @@ use std::{
     sync::{Arc, Condvar, Mutex, PoisonError},
 };
 
+use crate::app::container::root::outbound_port::ResourceUsage;
+
 pub(crate) struct FramePool<Frame> {
     inner: Arc<FramePoolInner<Frame>>,
 }
@@ -10,6 +12,7 @@ pub(crate) struct FramePool<Frame> {
 struct FramePoolInner<Frame> {
     state: Mutex<FramePoolState<Frame>>,
     frame_available: Condvar,
+    usage: ResourceUsage,
 }
 
 struct FramePoolState<Frame> {
@@ -76,6 +79,7 @@ impl<Frame: Default> FramePool<Frame> {
                     wake_requested: false,
                 }),
                 frame_available: Condvar::new(),
+                usage: ResourceUsage::new(0, pool_size),
             }),
         }
     }
@@ -177,6 +181,8 @@ impl<Frame: Default> FramePool<Frame> {
                 state.next_index = 0;
             }
 
+            self.inner.usage.set_total(state.slots.len());
+
             (added_available_frames, removed_frames)
         }; // Frame pool state lock dropped here.
 
@@ -190,6 +196,10 @@ impl<Frame: Default> FramePool<Frame> {
 }
 
 impl<Frame> FramePool<Frame> {
+    pub(crate) fn usage(&self) -> ResourceUsage {
+        self.inner.usage.clone()
+    }
+
     pub(crate) fn blocking_acquire(&self) -> FrameLease<Frame> {
         self.blocking_acquire_inner(false)
             .expect("a non-interruptible frame acquire cannot be woken")
@@ -244,6 +254,7 @@ impl<Frame> FramePool<Frame> {
                 }
 
                 if let Some((slot_id, frame, slot_index)) = acquired {
+                    self.inner.usage.increment_used();
                     state.next_index = slot_index + 1;
 
                     if state.next_index == slot_count {
@@ -334,6 +345,8 @@ impl<Frame> Drop for FrameLeaseInner<Frame> {
                 .position(|slot| slot.id == self.slot_id)
                 .expect("frame lease slot must still exist");
 
+            self.pool.usage.decrement_used();
+
             if state.slots[slot_index].retiring {
                 debug_assert!(
                     state.slots[slot_index].frame.is_none(),
@@ -341,6 +354,7 @@ impl<Frame> Drop for FrameLeaseInner<Frame> {
                 );
 
                 state.slots.remove(slot_index);
+                self.pool.usage.set_total(state.slots.len());
 
                 if state.slots.is_empty() {
                     state.next_index = 0;

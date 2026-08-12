@@ -20,14 +20,15 @@ use opentelemetry_sdk::{
 };
 
 use crate::{
-    app::container::root::outbound_port::MetricsTarget,
+    app::container::root::outbound_port::{MetricsTarget, ResourceUsageSnapshot},
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
 use super::metrics_recorder::{
     CAPTURE_DURATION_METRIC, CAPTURE_SOURCE_ID_ATTRIBUTE, CONVERT_DURATION_METRIC,
     CompletedSourceFrameCounts, ENCODE_DURATION_METRIC, PACKETIZE_DURATION_METRIC,
-    STREAM_ID_ATTRIBUTE, take_completed_source_frame_counts, with_registered_metrics_targets,
+    STREAM_ID_ATTRIBUTE, TargetResourceUsageSnapshots, snapshot_metrics_resource_usages,
+    take_completed_source_frame_counts, with_registered_metrics_targets,
 };
 
 struct TracingMetricExporter {
@@ -68,8 +69,15 @@ impl PushMetricExporter for TracingMetricExporter {
 
         let export_period = self.take_export_period();
         let completed_source_frames = take_completed_source_frame_counts();
+        let resource_usages = snapshot_metrics_resource_usages();
         with_registered_metrics_targets(|targets| {
-            export_registered_targets(metrics, targets, &completed_source_frames, export_period);
+            export_registered_targets(
+                metrics,
+                targets,
+                &completed_source_frames,
+                &resource_usages,
+                export_period,
+            );
         });
 
         Ok(())
@@ -139,6 +147,7 @@ fn duration_histogram_view(instrument: &Instrument) -> Option<Stream> {
 #[derive(Default)]
 struct SourceMetrics {
     completed_capture_frames: usize,
+    capture_pool: ResourceUsageSnapshot,
     capture_duration: DurationMetrics,
     streams: HashMap<StreamId, StreamMetrics>,
 }
@@ -148,6 +157,7 @@ struct StreamMetrics {
     completed_converted_frames: usize,
     completed_encoded_frames: usize,
     completed_packetized_frames: usize,
+    packetizer_queue: ResourceUsageSnapshot,
     convert_duration: DurationMetrics,
     encode_duration: DurationMetrics,
     packetize_duration: DurationMetrics,
@@ -165,6 +175,7 @@ fn export_registered_targets(
     resource_metrics: &ResourceMetrics,
     targets: &HashMap<MetricsTarget, usize>,
     completed_source_frames: &HashMap<MetricsTarget, CompletedSourceFrameCounts>,
+    resource_usages: &HashMap<MetricsTarget, TargetResourceUsageSnapshots>,
     export_period: Duration,
 ) {
     let mut source_metrics = HashMap::<CaptureSourceId, SourceMetrics>::new();
@@ -223,6 +234,35 @@ fn export_registered_targets(
         }
     }
 
+    for (target, usages) in resource_usages {
+        if !targets.contains_key(target) {
+            continue;
+        }
+
+        match target {
+            MetricsTarget::CaptureSource(capture_source_id) => {
+                if let Some(capture_pool) = usages.capture_pool {
+                    source_metrics
+                        .get_mut(capture_source_id)
+                        .expect("registered capture source metrics should exist")
+                        .capture_pool = capture_pool;
+                }
+            }
+            MetricsTarget::Stream {
+                capture_source_id,
+                stream_id,
+            } => {
+                if let Some(packetizer_queue) = usages.packetizer_queue {
+                    source_metrics
+                        .get_mut(capture_source_id)
+                        .and_then(|source| source.streams.get_mut(stream_id))
+                        .expect("registered stream metrics should exist")
+                        .packetizer_queue = packetizer_queue;
+                }
+            }
+        }
+    }
+
     let mut capture_source_ids = source_metrics.keys().copied().collect::<Vec<_>>();
     capture_source_ids.sort_unstable_by_key(|capture_source_id| capture_source_id.value());
 
@@ -238,11 +278,13 @@ fn export_registered_targets(
             .into_iter()
             .map(|(stream_id, values)| {
                 format!(
-                    "{{stream_id={} source_frame_fps={{converted={:.2} encoded={:.2} packetized={:.2}}} convert_ms={} encode_ms={} packetize_ms={}}}",
+                    "{{stream_id={} source_frame_fps={{converted={:.2} encoded={:.2} packetized={:.2}}} packetizer_queue={{used={} total={}}} convert_ms={} encode_ms={} packetize_ms={}}}",
                     stream_id.value(),
                     frames_per_second(values.completed_converted_frames, export_period),
                     frames_per_second(values.completed_encoded_frames, export_period),
                     frames_per_second(values.completed_packetized_frames, export_period),
+                    values.packetizer_queue.used,
+                    values.packetizer_queue.total,
                     format_duration(values.convert_duration),
                     format_duration(values.encode_duration),
                     format_duration(values.packetize_duration),
@@ -256,6 +298,11 @@ fn export_registered_targets(
             target: "rabbit::metrics",
             capture_source_id = capture_source_id.value(),
             capture_fps = %format_args!("{capture_fps:.2}"),
+            capture_pool = %format_args!(
+                "{{used={} total={}}}",
+                values.capture_pool.used,
+                values.capture_pool.total,
+            ),
             capture_ms = %capture_ms,
             streams = %streams,
             "runtime metrics"

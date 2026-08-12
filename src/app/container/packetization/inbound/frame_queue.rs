@@ -3,6 +3,8 @@ use std::{
     sync::{Condvar, Mutex},
 };
 
+use crate::app::container::root::outbound_port::ResourceUsage;
+
 const PACKETIZER_FRAME_QUEUE_CAPACITY: usize = 32;
 
 struct PacketizerFrameQueueState<Frame> {
@@ -13,6 +15,7 @@ struct PacketizerFrameQueueState<Frame> {
 pub(super) struct PacketizerFrameQueue<Frame> {
     state: Mutex<PacketizerFrameQueueState<Frame>>,
     frame_available: Condvar,
+    usage: ResourceUsage,
 }
 
 impl<Frame> PacketizerFrameQueue<Frame> {
@@ -23,7 +26,12 @@ impl<Frame> PacketizerFrameQueue<Frame> {
                 closed: false,
             }),
             frame_available: Condvar::new(),
+            usage: ResourceUsage::new(0, PACKETIZER_FRAME_QUEUE_CAPACITY),
         }
+    }
+
+    pub(super) fn usage(&self) -> ResourceUsage {
+        self.usage.clone()
     }
 
     /// Returns false when the queue is closed.
@@ -46,6 +54,7 @@ impl<Frame> PacketizerFrameQueue<Frame> {
                     )
                 });
             state.frames.push_back(frame);
+            self.usage.set_used(state.frames.len());
             discarded_backlog
         };
 
@@ -69,7 +78,9 @@ impl<Frame> PacketizerFrameQueue<Frame> {
             )
             .expect("packetizer frame queue mutex poisoned");
 
-        state.frames.pop_front()
+        let frame = state.frames.pop_front();
+        self.usage.set_used(state.frames.len());
+        frame
     }
 
     pub(super) fn close(&self) {

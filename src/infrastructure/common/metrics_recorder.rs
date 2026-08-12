@@ -9,7 +9,9 @@ use opentelemetry::{
 };
 
 use crate::{
-    app::container::root::outbound_port::{MetricsRecorder, MetricsTarget},
+    app::container::root::outbound_port::{
+        MetricsRecorder, MetricsTarget, ResourceUsage, ResourceUsageSnapshot,
+    },
     domain::stream::models::vo::FrameId,
 };
 
@@ -38,6 +40,18 @@ pub(super) struct CompletedSourceFrameCounts {
     pub(super) converted: usize,
     pub(super) encoded: usize,
     pub(super) packetized: usize,
+}
+
+#[derive(Default)]
+struct TargetResourceUsages {
+    capture_pool: Option<ResourceUsage>,
+    packetizer_queue: Option<ResourceUsage>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct TargetResourceUsageSnapshots {
+    pub(super) capture_pool: Option<ResourceUsageSnapshot>,
+    pub(super) packetizer_queue: Option<ResourceUsageSnapshot>,
 }
 
 #[derive(Clone, Copy)]
@@ -122,6 +136,7 @@ where
 
         if should_activate {
             clear_completed_source_frames(target);
+            clear_metrics_resource_usages(target);
             Instruments::global()
                 .active_targets
                 .add(1, &target_attributes(target));
@@ -153,10 +168,41 @@ where
 
         if should_deactivate {
             clear_completed_source_frames(target);
+            clear_metrics_resource_usages(target);
             Instruments::global()
                 .active_targets
                 .add(-1, &target_attributes(target));
         }
+    }
+
+    fn register_capture_pool_usage(&self, usage: ResourceUsage) {
+        let target = *self.prj_ref().as_ref();
+        assert!(
+            matches!(target, MetricsTarget::CaptureSource(_)),
+            "capture pool usage requires a capture source metrics target",
+        );
+
+        metrics_resource_usages()
+            .lock()
+            .expect("metrics resource usage registry mutex should not be poisoned")
+            .entry(target)
+            .or_default()
+            .capture_pool = Some(usage);
+    }
+
+    fn register_packetizer_queue_usage(&self, usage: ResourceUsage) {
+        let target = *self.prj_ref().as_ref();
+        assert!(
+            matches!(target, MetricsTarget::Stream { .. }),
+            "packetizer queue usage requires a stream metrics target",
+        );
+
+        metrics_resource_usages()
+            .lock()
+            .expect("metrics resource usage registry mutex should not be poisoned")
+            .entry(target)
+            .or_default()
+            .packetizer_queue = Some(usage);
     }
 
     fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
@@ -269,6 +315,27 @@ pub(super) fn take_completed_source_frame_counts()
         .collect()
 }
 
+pub(super) fn snapshot_metrics_resource_usages()
+-> HashMap<MetricsTarget, TargetResourceUsageSnapshots> {
+    metrics_resource_usages()
+        .lock()
+        .expect("metrics resource usage registry mutex should not be poisoned")
+        .iter()
+        .map(|(target, usages)| {
+            (
+                *target,
+                TargetResourceUsageSnapshots {
+                    capture_pool: usages.capture_pool.as_ref().map(ResourceUsage::snapshot),
+                    packetizer_queue: usages
+                        .packetizer_queue
+                        .as_ref()
+                        .map(ResourceUsage::snapshot),
+                },
+            )
+        })
+        .collect()
+}
+
 pub(super) fn with_registered_metrics_targets<R>(
     f: impl FnOnce(&HashMap<MetricsTarget, usize>) -> R,
 ) -> R {
@@ -310,10 +377,24 @@ fn completed_source_frames() -> &'static Mutex<HashMap<MetricsTarget, CompletedS
     COMPLETED_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn metrics_resource_usages() -> &'static Mutex<HashMap<MetricsTarget, TargetResourceUsages>> {
+    static RESOURCE_USAGES: OnceLock<Mutex<HashMap<MetricsTarget, TargetResourceUsages>>> =
+        OnceLock::new();
+
+    RESOURCE_USAGES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn clear_completed_source_frames(target: MetricsTarget) {
     completed_source_frames()
         .lock()
         .expect("completed source frame registry mutex should not be poisoned")
+        .remove(&target);
+}
+
+fn clear_metrics_resource_usages(target: MetricsTarget) {
+    metrics_resource_usages()
+        .lock()
+        .expect("metrics resource usage registry mutex should not be poisoned")
         .remove(&target);
 }
 
