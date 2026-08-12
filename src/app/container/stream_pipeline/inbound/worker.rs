@@ -7,8 +7,8 @@ use eros::Context;
 
 use crate::app::{
     container::{
+        host::outbound_port::MetricsRecorder,
         network::inbound::EncodedUnitSender,
-        root::outbound_port::MetricsRecorder,
         stream_pipeline::{
             StreamPipelineContainer,
             inbound::LatestFrameSlot,

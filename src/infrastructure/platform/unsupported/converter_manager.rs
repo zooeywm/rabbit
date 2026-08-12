@@ -1,4 +1,4 @@
-use crate::app::container::root::outbound_port::{ConverterManager, ConverterManagerStateSpec};
+use crate::app::container::host::outbound_port::{ConverterManager, ConverterManagerStateSpec};
 
 #[derive(kudi::DepInj)]
 #[target(UnsupportedConverterManagerImpl)]

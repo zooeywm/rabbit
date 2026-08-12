@@ -5,13 +5,18 @@ mod runtime;
 
 use config::Config;
 use container::{
+    host::{
+        CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer, StreamPipelineFor,
+        outbound_port::{
+            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec,
+        },
+    },
     network::{NetworkContainer, outbound_port::Transporter},
     root::{
         AppContainer, TransporterStateFor,
         outbound_port::{
-            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
-            EncoderManager, EncoderManagerStateSpec, MetricsRecorder, NetworkMetricsRecorder,
-            TransporterConstructor, TransporterConstructorStateSpec,
+            NetworkMetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
         },
     },
     stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -19,8 +24,6 @@ use container::{
 use directories::ProjectDirs;
 use eros::Context;
 use runtime::AppRuntime;
-
-use container::root::{CapturedFrameFor, EncodedBufferFor, EncoderInputFor, StreamPipelineFor};
 
 pub(crate) use runtime::AppHandle;
 
@@ -39,10 +42,10 @@ where
     TprCstSt: TransporterConstructorStateSpec,
     NetworkContainer<TransporterStateFor<TprCstSt>>:
         Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + NetworkMetricsRecorder,
-    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: CapturerManager<State = CapMgrSt>
+    HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>
-        + TransporterConstructor<State = TprCstSt>,
+        + EncoderManager<State = EcdMgrSt>,
+    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: TransporterConstructor<State = TprCstSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,

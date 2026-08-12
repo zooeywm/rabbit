@@ -1,5 +1,5 @@
 use crate::app::container::{
-    root::outbound_port::MetricsRecorder, screen_capture::outbound_port::ScreenCapturer,
+    host::outbound_port::MetricsRecorder, screen_capture::outbound_port::ScreenCapturer,
 };
 use crate::domain::stream::models::vo::CaptureSourceId;
 

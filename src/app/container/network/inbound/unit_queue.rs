@@ -4,9 +4,7 @@ use std::sync::{
 };
 
 use crate::{
-    app::container::{
-        root::outbound_port::ResourceUsage, stream_pipeline::outbound_port::EncodedVideoUnit,
-    },
+    app::container::{ResourceUsage, stream_pipeline::outbound_port::EncodedVideoUnit},
     domain::stream::models::vo::StreamId,
 };
 

@@ -1,4 +1,4 @@
-use crate::app::container::root::outbound_port::{EncoderManager, EncoderManagerStateSpec};
+use crate::app::container::host::outbound_port::{EncoderManager, EncoderManagerStateSpec};
 
 #[derive(kudi::DepInj)]
 #[target(UnsupportedEncoderManagerImpl)]

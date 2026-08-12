@@ -7,15 +7,19 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        network::{NetworkContainer, inbound::NetworkWorker, outbound_port::Transporter},
-        root::{
-            AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor, StreamPipelineFor,
-            TransporterStateFor,
+        host::{
+            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer, StreamPipelineFor,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                MetricsRecorder, NetworkMetricsRecorder, TransporterConstructor,
-                TransporterConstructorStateSpec,
+                MetricsRecorder,
+            },
+        },
+        network::{NetworkContainer, inbound::NetworkWorker, outbound_port::Transporter},
+        root::{
+            AppContainer, TransporterStateFor,
+            outbound_port::{
+                NetworkMetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
             },
         },
         stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
@@ -73,10 +77,11 @@ impl AppRuntime {
         TprCstSt: TransporterConstructorStateSpec,
         NetworkContainer<TransporterStateFor<TprCstSt>>: Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>
             + NetworkMetricsRecorder,
-        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: CapturerManager<State = CapMgrSt>
+        HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
             + ConverterManager<State = CvtMgrSt>
-            + EncoderManager<State = EcdMgrSt>
-            + TransporterConstructor<State = TprCstSt>,
+            + EncoderManager<State = EcdMgrSt>,
+        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>:
+            TransporterConstructor<State = TprCstSt>,
         StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
             + MetricsRecorder,

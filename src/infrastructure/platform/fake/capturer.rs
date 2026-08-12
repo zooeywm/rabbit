@@ -4,7 +4,7 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        root::outbound_port::MetricsRecorder,
+        host::outbound_port::MetricsRecorder,
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId},

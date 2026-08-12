@@ -20,7 +20,7 @@ use opentelemetry_sdk::{
 };
 
 use crate::{
-    app::container::root::outbound_port::{MetricsTarget, ResourceUsageSnapshot},
+    app::container::{ResourceUsageSnapshot, host::outbound_port::MetricsTarget},
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 

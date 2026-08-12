@@ -9,9 +9,10 @@ use opentelemetry::{
 };
 
 use crate::{
-    app::container::root::outbound_port::{
-        MetricsRecorder, MetricsTarget, NetworkMetricsRecorder, ResourceUsage,
-        ResourceUsageSnapshot,
+    app::container::{
+        ResourceUsage, ResourceUsageSnapshot,
+        host::outbound_port::{MetricsRecorder, MetricsTarget},
+        root::outbound_port::NetworkMetricsRecorder,
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
 };

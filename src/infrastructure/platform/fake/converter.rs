@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::{
     app::container::{
-        root::outbound_port::MetricsRecorder, stream_pipeline::outbound_port::EncoderFrameConverter,
+        host::outbound_port::MetricsRecorder, stream_pipeline::outbound_port::EncoderFrameConverter,
     },
     domain::stream::models::vo::FrameId,
     infrastructure::fake::capturer::FakeCapturedFrame,

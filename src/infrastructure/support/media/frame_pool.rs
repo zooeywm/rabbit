@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Condvar, Mutex, PoisonError},
 };
 
-use crate::app::container::root::outbound_port::ResourceUsage;
+use crate::app::container::ResourceUsage;
 
 pub(crate) struct FramePool<Frame> {
     inner: Arc<FramePoolInner<Frame>>,

@@ -2,7 +2,7 @@ pub(crate) mod inbound;
 pub(crate) mod outbound_port;
 
 use crate::{
-    app::container::root::outbound_port::MetricsTarget,
+    app::container::host::outbound_port::MetricsTarget,
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 

@@ -4,7 +4,7 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        root::outbound_port::MetricsRecorder,
+        host::outbound_port::MetricsRecorder,
         stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber, VideoEncoder},
     },
     infrastructure::fake::converter::FakeEncoderInput,

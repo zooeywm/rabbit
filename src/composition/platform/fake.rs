@@ -1,13 +1,16 @@
 use crate::{
     app::container::{
-        network::{NetworkContainer, outbound_port::Transporter},
-        root::{
-            AppContainer,
+        host::{
+            HostContainer,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                TransporterConstructor, TransporterConstructorStateSpec,
             },
+        },
+        network::{NetworkContainer, outbound_port::Transporter},
+        root::{
+            AppContainer,
+            outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
         },
         screen_capture::{
             ScreenCaptureContainer,
@@ -35,24 +38,24 @@ impl CapturerManagerStateSpec for FakeCapturerManagerState {
     type ScreenCapturer = ScreenCaptureContainer<FakeScreenCapturerState>;
 }
 
-impl<CvtMgrSt, EcdMgrSt, TprCstSt> AsRef<FakeCapturerManagerState>
-    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt, TprCstSt>
+impl<CvtMgrSt, EcdMgrSt> AsRef<FakeCapturerManagerState>
+    for HostContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
 {
     fn as_ref(&self) -> &FakeCapturerManagerState {
         self.capturer_manager_state()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt, TprCstSt> AsMut<FakeCapturerManagerState>
-    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt, TprCstSt>
+impl<CvtMgrSt, EcdMgrSt> AsMut<FakeCapturerManagerState>
+    for HostContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
 {
     fn as_mut(&mut self) -> &mut FakeCapturerManagerState {
         self.capturer_manager_state_mut()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt, TprCstSt> CapturerManager
-    for AppContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt, TprCstSt>
+impl<CvtMgrSt, EcdMgrSt> CapturerManager
+    for HostContainer<FakeCapturerManagerState, CvtMgrSt, EcdMgrSt>
 {
     type State = FakeCapturerManagerState;
 
@@ -63,7 +66,7 @@ impl<CvtMgrSt, EcdMgrSt, TprCstSt> CapturerManager
         -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
     + Send
     + 'static
-    + use<CvtMgrSt, EcdMgrSt, TprCstSt> {
+    + use<CvtMgrSt, EcdMgrSt> {
         CapturerManager::compose_screen_capturer_state(
             FakeCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
@@ -117,8 +120,8 @@ impl ConverterManagerStateSpec for FakeConverterManagerState {
     type EncoderFrameConverterState = FakeEncoderFrameConverterState;
 }
 
-impl<CapMgrSt, EcdMgrSt, TprCstSt> AsRef<FakeConverterManagerState>
-    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt, TprCstSt>
+impl<CapMgrSt, EcdMgrSt> AsRef<FakeConverterManagerState>
+    for HostContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -127,8 +130,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt, TprCstSt> AsMut<FakeConverterManagerState>
-    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt, TprCstSt>
+impl<CapMgrSt, EcdMgrSt> AsMut<FakeConverterManagerState>
+    for HostContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -137,8 +140,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt, TprCstSt> ConverterManager
-    for AppContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt, TprCstSt>
+impl<CapMgrSt, EcdMgrSt> ConverterManager
+    for HostContainer<CapMgrSt, FakeConverterManagerState, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -151,7 +154,7 @@ where
     >
     + Send
     + 'static
-    + use<CapMgrSt, EcdMgrSt, TprCstSt> {
+    + use<CapMgrSt, EcdMgrSt> {
         ConverterManager::compose_encoder_frame_converter_state(
             FakeConverterManagerImpl::inj_ref_mut(self),
         )
@@ -189,8 +192,8 @@ impl EncoderManagerStateSpec for FakeEncoderManagerState {
     type VideoEncoderState = FakeVideoEncoderState;
 }
 
-impl<CapMgrSt, CvtMgrSt, TprCstSt> AsRef<FakeEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState, TprCstSt>
+impl<CapMgrSt, CvtMgrSt> AsRef<FakeEncoderManagerState>
+    for HostContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -199,8 +202,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, TprCstSt> AsMut<FakeEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState, TprCstSt>
+impl<CapMgrSt, CvtMgrSt> AsMut<FakeEncoderManagerState>
+    for HostContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -209,8 +212,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, TprCstSt> EncoderManager
-    for AppContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState, TprCstSt>
+impl<CapMgrSt, CvtMgrSt> EncoderManager
+    for HostContainer<CapMgrSt, CvtMgrSt, FakeEncoderManagerState>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -221,7 +224,7 @@ where
     ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
     + Send
     + 'static
-    + use<CapMgrSt, CvtMgrSt, TprCstSt> {
+    + use<CapMgrSt, CvtMgrSt> {
         EncoderManager::compose_video_encoder_state(FakeEncoderManagerImpl::inj_ref_mut(self))
     }
 }
@@ -260,7 +263,7 @@ where
     CapMgrSt: CapturerManagerStateSpec,
 {
     fn as_ref(&self) -> &FakeTransporterConstructorState {
-        self.transporter_constructor_state()
+        self.network_constructor_state()
     }
 }
 
@@ -296,9 +299,11 @@ pub(super) type PlatformApp = AppContainer<
 pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
     || {
         Ok(AppContainer::new(
-            FakeCapturerManagerState::new()?,
-            FakeConverterManagerState::new()?,
-            FakeEncoderManagerState::new()?,
+            HostContainer::new(
+                FakeCapturerManagerState::new()?,
+                FakeConverterManagerState::new()?,
+                FakeEncoderManagerState::new()?,
+            ),
             FakeTransporterConstructorState::new()?,
         ))
     }

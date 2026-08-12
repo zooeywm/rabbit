@@ -1,8 +1,7 @@
 use crate::{
     app::container::{
-        network::NetworkContainer,
-        root::outbound_port::{MetricsRecorder, NetworkMetricsRecorder, ResourceUsage},
-        screen_capture::ScreenCaptureContainer,
+        ResourceUsage, host::outbound_port::MetricsRecorder, network::NetworkContainer,
+        root::outbound_port::NetworkMetricsRecorder, screen_capture::ScreenCaptureContainer,
         stream_pipeline::StreamPipelineContainer,
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},

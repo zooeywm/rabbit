@@ -2,7 +2,7 @@ use crate::app::runtime::capture_only::CaptureOnlyMessage;
 
 use super::*;
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
@@ -62,7 +62,7 @@ where
         capture_source_runtime.shutdown().await
     }
 
-    pub(super) async fn handle_capture_only_message(
+    pub(crate) async fn handle_capture_only_message(
         &mut self,
         message: CaptureOnlyMessage,
         app_message_sender: &flume::Sender<AppMessage>,

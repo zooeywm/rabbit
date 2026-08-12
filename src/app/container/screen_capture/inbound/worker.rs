@@ -10,7 +10,7 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        root::outbound_port::MetricsRecorder,
+        host::outbound_port::MetricsRecorder,
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
         stream_pipeline::inbound::LatestFrameSlot,
     },
@@ -413,11 +413,7 @@ mod tests {
 
         fn unregister_metrics_target(&self) {}
 
-        fn register_capture_pool_usage(
-            &self,
-            _usage: crate::app::container::root::outbound_port::ResourceUsage,
-        ) {
-        }
+        fn register_capture_pool_usage(&self, _usage: crate::app::container::ResourceUsage) {}
 
         fn record_captured_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
 
