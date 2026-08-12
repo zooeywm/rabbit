@@ -33,7 +33,13 @@ where
                     let Some(event) = event else {
                         break;
                     };
-                    self.client.handle_network_input(event.stream_id, event.input)?;
+                    if let Err(failure) = self
+                        .client
+                        .handle_network_input(event.stream_id, event.input)
+                    {
+                        let _ = self.shutdown_applications().await;
+                        return Err(failure);
+                    }
                     None
                 },
             };

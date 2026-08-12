@@ -27,12 +27,15 @@ pub(crate) struct NetworkWorker;
 pub(crate) struct NetworkWorkerHandle<Buffer, ClientInput> {
     sender: EncodedUnitSender<Buffer>,
     client_event_receiver: Option<NetworkClientEventReceiver<ClientInput>>,
+    shutdown_sender: flume::Sender<()>,
     worker_thread: JoinHandle<eros::Result<()>>,
 }
 
 struct NetworkWorkerExitGuard {
     app_message_sender: flume::Sender<AppMessage>,
 }
+
+struct NetworkQueueMetricsGuard;
 
 enum NetworkTaskExit {
     EventLoop(eros::Result<()>),
@@ -61,6 +64,7 @@ impl NetworkWorker {
     {
         let (sender, receiver) = EncodedUnitReceiver::channel();
         let (client_event_sender, client_event_receiver) = NetworkClientEventSender::channel();
+        let (shutdown_sender, shutdown_receiver) = flume::bounded(1);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
         let worker_thread = thread::Builder::new()
             .name("network".to_owned())
@@ -73,6 +77,7 @@ impl NetworkWorker {
                     transporter_constructor,
                     receiver,
                     client_event_sender,
+                    shutdown_receiver,
                     started_sender,
                 ))
             })
@@ -86,6 +91,7 @@ impl NetworkWorker {
         Ok(NetworkWorkerHandle {
             sender,
             client_event_receiver: Some(client_event_receiver),
+            shutdown_sender,
             worker_thread,
         })
     }
@@ -117,9 +123,11 @@ impl<Buffer, ClientInput> NetworkWorkerHandle<Buffer, ClientInput> {
         let Self {
             sender,
             client_event_receiver,
+            shutdown_sender,
             worker_thread,
         } = self;
         drop(sender);
+        let _ = shutdown_sender.try_send(());
         drop(client_event_receiver);
 
         match compio::runtime::spawn_blocking(move || join_network_worker(worker_thread)).await {
@@ -137,6 +145,7 @@ async fn run_network_worker<State, Constructor>(
     client_event_sender: NetworkClientEventSender<
         <NetworkContainer<State> as TransporterClientSide>::Depacketized,
     >,
+    worker_shutdown_receiver: flume::Receiver<()>,
     started_sender: mpsc::SyncSender<()>,
 ) -> eros::Result<()>
 where
@@ -157,6 +166,7 @@ where
     let (receive_shutdown_sender, receive_shutdown_receiver) = flume::bounded(1);
 
     network.register_network_queue_usage(encoded_receiver.usage());
+    let _metrics_guard = NetworkQueueMetricsGuard;
     started_sender
         .send(())
         .with_context(|| "Failed to report network worker startup")?;
@@ -172,6 +182,7 @@ where
                 packetize_permits,
                 client_event_sender,
                 event_shutdown_receiver,
+                worker_shutdown_receiver,
             )
             .await,
         )
@@ -207,11 +218,10 @@ where
             }
         };
 
-        let (is_event_loop, result) = match exit {
-            NetworkTaskExit::EventLoop(result) => (true, result),
-            NetworkTaskExit::SendLoop(result) | NetworkTaskExit::ReceiveLoop(result) => {
-                (false, result)
-            }
+        let (is_event_loop, is_receive_loop, result) = match exit {
+            NetworkTaskExit::EventLoop(result) => (true, false, result),
+            NetworkTaskExit::SendLoop(result) => (false, false, result),
+            NetworkTaskExit::ReceiveLoop(result) => (false, true, result),
         };
 
         if let Err(error) = result {
@@ -222,11 +232,10 @@ where
             let _ = receive_shutdown_sender.try_send(());
         } else if is_event_loop {
             let _ = receive_shutdown_sender.try_send(());
+        } else if is_receive_loop {
+            let _ = event_shutdown_sender.try_send(());
         }
     }
-
-    // All task-owned transporter parts have been dropped at this point.
-    crate::app::container::network::NetworkMetricsHandle::new().unregister_network_queue_usage();
 
     match first_error {
         Some(error) => Err(error),
@@ -241,20 +250,26 @@ async fn run_network_event_loop<Network>(
     packetized_sender: PacketizedSendSender<Network::Packetized>,
     packetize_permits: PacketizePermitReceiver,
     client_event_sender: NetworkClientEventSender<Network::Depacketized>,
-    shutdown_receiver: flume::Receiver<()>,
+    supervisor_shutdown_receiver: flume::Receiver<()>,
+    worker_shutdown_receiver: flume::Receiver<()>,
 ) -> eros::Result<()>
 where
     Network: TransporterHostSide + TransporterClientSide,
 {
     let mut may_packetize = false;
     let mut may_route_client_event = false;
+    let mut send_loop_alive = true;
+    let mut receive_loop_alive = true;
+    let mut client_event_sink_alive = true;
 
     loop {
-        let wait_for_packetize_permit = !may_packetize;
-        let wait_for_client_event_permit = !may_route_client_event;
-        let receive_encoded = may_packetize;
-        let receive_network = may_route_client_event;
-        let shutdown = shutdown_receiver.recv_async().fuse();
+        let wait_for_packetize_permit = send_loop_alive && !may_packetize;
+        let wait_for_client_event_permit = client_event_sink_alive && !may_route_client_event;
+        let receive_encoded = send_loop_alive && may_packetize;
+        let receive_network =
+            receive_loop_alive && client_event_sink_alive && may_route_client_event;
+        let supervisor_shutdown = supervisor_shutdown_receiver.recv_async().fuse();
+        let worker_shutdown = worker_shutdown_receiver.recv_async().fuse();
         let packetize_permit = async {
             if wait_for_packetize_permit {
                 packetize_permits.acquire().await
@@ -288,7 +303,8 @@ where
         }
         .fuse();
         futures_util::pin_mut!(
-            shutdown,
+            supervisor_shutdown,
+            worker_shutdown,
             packetize_permit,
             client_event_permit,
             encoded,
@@ -296,14 +312,25 @@ where
         );
 
         futures_util::select_biased! {
-            _ = shutdown => break,
+            _ = supervisor_shutdown => break,
+            _ = worker_shutdown => break,
             permit = packetize_permit => {
-                permit?;
-                may_packetize = true;
+                match permit {
+                    Ok(()) => may_packetize = true,
+                    Err(_) => {
+                        send_loop_alive = false;
+                        may_packetize = false;
+                    }
+                }
             },
             permit = client_event_permit => {
-                permit?;
-                may_route_client_event = true;
+                match permit {
+                    Ok(()) => may_route_client_event = true,
+                    Err(_) => {
+                        client_event_sink_alive = false;
+                        may_route_client_event = false;
+                    }
+                }
             },
             item = encoded => {
                 let Some(item) = item else {
@@ -315,7 +342,8 @@ where
             },
             item = received => {
                 let Some(item) = item else {
-                    eros::bail!("Network receive loop stopped unexpectedly");
+                    receive_loop_alive = false;
+                    continue;
                 };
                 let (stream_id, input) = network.depacketize(item)?;
                 client_event_sender.send(NetworkClientEvent { stream_id, input })?;
@@ -325,6 +353,13 @@ where
     }
 
     Ok(())
+}
+
+impl Drop for NetworkQueueMetricsGuard {
+    fn drop(&mut self) {
+        crate::app::container::network::NetworkMetricsHandle::new()
+            .unregister_network_queue_usage();
+    }
 }
 
 async fn run_send_loop<Network>(
@@ -380,7 +415,7 @@ mod tests {
         marker::PhantomData,
         rc::Rc,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         },
         thread,
@@ -388,11 +423,100 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::container::host_stream_pipeline::outbound_port::EncodedVideoUnit,
-        domain::stream::models::vo::StreamId,
+        app::container::host_stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber},
+        domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
     };
 
     struct NonSendTransporterState(PhantomData<Rc<()>>);
+
+    struct DrainTransporterState {
+        packetized_sender: flume::Sender<u64>,
+        sender: Option<DrainSender>,
+        receiver: Option<(flume::Sender<()>, flume::Receiver<()>)>,
+    }
+
+    struct DrainSender {
+        gate_receiver: flume::Receiver<()>,
+        sent: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl TransporterHostSide
+        for crate::app::container::network::NetworkContainer<DrainTransporterState>
+    {
+        type EncodedBuffer = u64;
+        type Packetized = u64;
+        type Sender = DrainSender;
+
+        fn take_sender(&mut self) -> eros::Result<Self::Sender> {
+            Ok(self
+                .state_mut()
+                .sender
+                .take()
+                .with_context(|| "Drain test sender has already been taken")?)
+        }
+
+        fn packetize(
+            &mut self,
+            _stream_id: StreamId,
+            unit: EncodedVideoUnit<Self::EncodedBuffer>,
+        ) -> eros::Result<Self::Packetized> {
+            self.state_mut()
+                .packetized_sender
+                .send(unit.data)
+                .with_context(|| "Drain test stopped observing packetized units")?;
+            Ok(unit.data)
+        }
+
+        async fn send(sender: &mut Self::Sender, packetized: Self::Packetized) -> eros::Result<()> {
+            sender
+                .gate_receiver
+                .recv_async()
+                .await
+                .with_context(|| "Drain test send gate closed")?;
+            sender
+                .sent
+                .lock()
+                .expect("drain test sent mutex should not be poisoned")
+                .push(packetized);
+            Ok(())
+        }
+    }
+
+    impl TransporterClientSide
+        for crate::app::container::network::NetworkContainer<DrainTransporterState>
+    {
+        type Receiver = (flume::Sender<()>, flume::Receiver<()>);
+        type Received = ();
+        type Depacketized = ();
+
+        fn take_receiver(&mut self) -> eros::Result<Self::Receiver> {
+            Ok(self
+                .state_mut()
+                .receiver
+                .take()
+                .with_context(|| "Drain test receiver has already been taken")?)
+        }
+
+        async fn receive(receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
+            Ok(receiver.1.recv_async().await.ok())
+        }
+
+        fn depacketize(
+            &mut self,
+            _received: Self::Received,
+        ) -> eros::Result<(StreamId, Self::Depacketized)> {
+            Ok((StreamId::new(0), ()))
+        }
+    }
+
+    fn encoded_unit(value: u64) -> EncodedVideoUnit<u64> {
+        EncodedVideoUnit::new(
+            FrameId::new(CaptureSourceId::new(0), value),
+            UnitNumber::new(value),
+            false,
+            value,
+        )
+    }
 
     impl TransporterHostSide
         for crate::app::container::network::NetworkContainer<NonSendTransporterState>
@@ -468,5 +592,115 @@ mod tests {
             .block_on(worker.shutdown())
             .expect("network worker should stop");
         assert!(constructed_on_network_thread.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn shutdown_drains_the_in_flight_and_queued_packetized_units() -> eros::Result<()> {
+        let (gate_sender, gate_receiver) = flume::unbounded();
+        let (packetized_sender, packetized_receiver) = flume::unbounded();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sent_from_network = Arc::clone(&sent);
+        let (app_message_sender, _app_message_receiver) = flume::unbounded();
+        let mut worker = NetworkWorker::spawn(
+            move || {
+                Ok(DrainTransporterState {
+                    packetized_sender,
+                    sender: Some(DrainSender {
+                        gate_receiver,
+                        sent: sent_from_network,
+                    }),
+                    receiver: Some(flume::unbounded()),
+                })
+            },
+            app_message_sender,
+        )?;
+        let encoded_sender = worker.sender();
+        let _client_event_receiver = worker.take_client_event_receiver()?;
+        encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
+
+        let runtime = compio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            packetized_receiver
+                .recv_async()
+                .await
+                .with_context(|| "First unit was not packetized")?;
+            encoded_sender.send(StreamId::new(0), encoded_unit(2))?;
+            packetized_receiver
+                .recv_async()
+                .await
+                .with_context(|| "Second unit was not packetized")?;
+            drop(encoded_sender);
+
+            let (shutdown_result, release_result) = futures_util::join!(worker.shutdown(), async {
+                gate_sender
+                    .send_async(())
+                    .await
+                    .with_context(|| "Failed to release in-flight send")?;
+                gate_sender
+                    .send_async(())
+                    .await
+                    .with_context(|| "Failed to release queued send")?;
+                eros::Result::<()>::Ok(())
+            });
+            release_result?;
+            shutdown_result
+        })?;
+
+        assert_eq!(
+            *sent
+                .lock()
+                .expect("drain test sent mutex should not be poisoned"),
+            vec![1, 2]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn send_failure_cancels_the_other_network_tasks_and_reaches_shutdown() -> eros::Result<()> {
+        let (gate_sender, gate_receiver) = flume::unbounded();
+        let (packetized_sender, packetized_receiver) = flume::unbounded();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let (app_message_sender, _app_message_receiver) = flume::unbounded();
+        let mut worker = NetworkWorker::spawn(
+            move || {
+                Ok(DrainTransporterState {
+                    packetized_sender,
+                    sender: Some(DrainSender {
+                        gate_receiver,
+                        sent,
+                    }),
+                    receiver: Some(flume::unbounded()),
+                })
+            },
+            app_message_sender,
+        )?;
+        let encoded_sender = worker.sender();
+        let _client_event_receiver = worker.take_client_event_receiver()?;
+        encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
+
+        let runtime = compio::runtime::Runtime::new()?;
+        runtime.block_on(async {
+            packetized_receiver
+                .recv_async()
+                .await
+                .with_context(|| "Failure test unit was not packetized")?;
+            drop(gate_sender);
+            drop(encoded_sender);
+            assert!(worker.shutdown().await.is_err());
+            eros::Result::<()>::Ok(())
+        })
+    }
+
+    #[test]
+    fn constructor_failure_is_reported_without_leaving_a_worker_thread() {
+        let (app_message_sender, _app_message_receiver) = flume::unbounded();
+        let result = NetworkWorker::spawn(
+            || -> eros::Result<NonSendTransporterState> {
+                eros::bail!("Intentional constructor failure")
+            },
+            app_message_sender,
+        );
+
+        assert!(result.is_err());
     }
 }
