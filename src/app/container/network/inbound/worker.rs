@@ -7,7 +7,9 @@ use eros::Context;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use super::{
-    client_event_queue::{NetworkClientEventReceiver, NetworkClientEventSender},
+    client_event_queue::{
+        NetworkClientEventReceiver, NetworkClientEventReceiverKeepalive, NetworkClientEventSender,
+    },
     packetized_send_queue::{
         PacketizePermitReceiver, PacketizedSendReceiver, PacketizedSendSender,
     },
@@ -29,6 +31,7 @@ pub(crate) struct NetworkWorker;
 pub(crate) struct NetworkWorkerHandle<Buffer, ClientInput> {
     sender: EncodedUnitSender<Buffer>,
     client_event_receiver: Option<NetworkClientEventReceiver<ClientInput>>,
+    client_event_receiver_keepalive: NetworkClientEventReceiverKeepalive<ClientInput>,
     shutdown_sender: flume::Sender<()>,
     worker_thread: JoinHandle<eros::Result<()>>,
 }
@@ -43,6 +46,11 @@ enum NetworkTaskExit {
     EventLoop(eros::Result<()>),
     SendLoop(eros::Result<()>),
     ReceiveLoop(eros::Result<()>),
+}
+
+enum NetworkEventLoopStep {
+    Continue,
+    Stop,
 }
 
 impl NetworkWorker {
@@ -66,6 +74,7 @@ impl NetworkWorker {
     {
         let (sender, receiver) = EncodedUnitReceiver::channel();
         let (client_event_sender, client_event_receiver) = NetworkClientEventSender::channel();
+        let client_event_receiver_keepalive = client_event_receiver.keepalive();
         let (shutdown_sender, shutdown_receiver) = flume::bounded(1);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
         let worker_thread = thread::Builder::new()
@@ -93,6 +102,7 @@ impl NetworkWorker {
         Ok(NetworkWorkerHandle {
             sender,
             client_event_receiver: Some(client_event_receiver),
+            client_event_receiver_keepalive,
             shutdown_sender,
             worker_thread,
         })
@@ -123,14 +133,13 @@ impl<Buffer, ClientInput> NetworkWorkerHandle<Buffer, ClientInput> {
 
     pub(crate) async fn shutdown(self) -> eros::Result<()> {
         let Self {
-            sender,
-            client_event_receiver,
+            sender: _sender,
+            client_event_receiver: _client_event_receiver,
+            client_event_receiver_keepalive: _client_event_receiver_keepalive,
             shutdown_sender,
             worker_thread,
         } = self;
-        drop(sender);
         let _ = shutdown_sender.try_send(());
-        drop(client_event_receiver);
 
         match compio::runtime::spawn_blocking(move || join_network_worker(worker_thread)).await {
             Ok(result) => result,
@@ -239,7 +248,7 @@ where
             Ok(exit) => exit,
             Err(error) => {
                 tracing::error!(%error, "Network task failed to join");
-                if first_error.is_none() {
+                if !shutdown_started && first_error.is_none() {
                     first_error = Some(eros::error!("Network task failed to join"));
                 }
                 let _ = event_shutdown_sender.try_send(());
@@ -257,7 +266,7 @@ where
         };
 
         if let Err(error) = result {
-            if first_error.is_none() {
+            if !shutdown_started && first_error.is_none() {
                 first_error = Some(error);
             }
         }
@@ -297,7 +306,6 @@ where
         let receive_encoded = send_loop_alive && may_packetize;
         let receive_network =
             receive_loop_alive && client_event_sink_alive && may_route_client_event;
-        let shutdown = shutdown_receiver.recv_async().fuse();
         let packetize_permit = async {
             if wait_for_packetize_permit {
                 packetize_permits.acquire().await
@@ -330,51 +338,61 @@ where
             }
         }
         .fuse();
-        futures_util::pin_mut!(
-            shutdown,
-            packetize_permit,
-            client_event_permit,
-            encoded,
-            received
-        );
+        let normal_event = async {
+            futures_util::pin_mut!(packetize_permit, client_event_permit, encoded, received);
 
-        futures_util::select! {
+            futures_util::select! {
+                permit = packetize_permit => {
+                    match permit {
+                        Ok(()) => may_packetize = true,
+                        Err(_) => {
+                            send_loop_alive = false;
+                            may_packetize = false;
+                        }
+                    }
+                    eros::Result::Ok(NetworkEventLoopStep::Continue)
+                },
+                permit = client_event_permit => {
+                    match permit {
+                        Ok(()) => may_route_client_event = true,
+                        Err(_) => {
+                            client_event_sink_alive = false;
+                            may_route_client_event = false;
+                        }
+                    }
+                    eros::Result::Ok(NetworkEventLoopStep::Continue)
+                },
+                item = encoded => {
+                    let Some(item) = item else {
+                        return eros::Result::Ok(NetworkEventLoopStep::Stop);
+                    };
+                    let packetized = network.packetize(item.stream_id, item.unit)?;
+                    packetized_sender.send(packetized)?;
+                    may_packetize = false;
+                    eros::Result::Ok(NetworkEventLoopStep::Continue)
+                },
+                item = received => {
+                    let Some(item) = item else {
+                        receive_loop_alive = false;
+                        return eros::Result::Ok(NetworkEventLoopStep::Continue);
+                    };
+                    let (stream_id, input) = network.depacketize(item)?;
+                    client_event_sender.send(NetworkClientEvent { stream_id, input })?;
+                    may_route_client_event = false;
+                    eros::Result::Ok(NetworkEventLoopStep::Continue)
+                },
+            }
+        }
+        .fuse();
+        let shutdown = shutdown_receiver.recv_async().fuse();
+        futures_util::pin_mut!(shutdown, normal_event);
+
+        let step = futures_util::select_biased! {
             _ = shutdown => break,
-            permit = packetize_permit => {
-                match permit {
-                    Ok(()) => may_packetize = true,
-                    Err(_) => {
-                        send_loop_alive = false;
-                        may_packetize = false;
-                    }
-                }
-            },
-            permit = client_event_permit => {
-                match permit {
-                    Ok(()) => may_route_client_event = true,
-                    Err(_) => {
-                        client_event_sink_alive = false;
-                        may_route_client_event = false;
-                    }
-                }
-            },
-            item = encoded => {
-                let Some(item) = item else {
-                    break;
-                };
-                let packetized = network.packetize(item.stream_id, item.unit)?;
-                packetized_sender.send(packetized)?;
-                may_packetize = false;
-            },
-            item = received => {
-                let Some(item) = item else {
-                    receive_loop_alive = false;
-                    continue;
-                };
-                let (stream_id, input) = network.depacketize(item)?;
-                client_event_sender.send(NetworkClientEvent { stream_id, input })?;
-                may_route_client_event = false;
-            },
+            step = normal_event => step?,
+        };
+        if matches!(step, NetworkEventLoopStep::Stop) {
+            break;
         }
     }
 
@@ -745,7 +763,7 @@ mod tests {
             app_message_sender,
         )?;
         let encoded_sender = worker.sender();
-        let _client_event_receiver = worker.take_client_event_receiver()?;
+        let client_event_receiver = worker.take_client_event_receiver()?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);
@@ -754,6 +772,7 @@ mod tests {
             1
         );
         drop(encoded_sender);
+        drop(client_event_receiver);
 
         shutdown_with_timeout(worker)?;
 
