@@ -2,21 +2,17 @@ use crate::app::runtime::capture_only::CaptureOnlyMessage;
 
 use super::*;
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
-    PktMgrSt: PacketizerManagerStateSpec,
     Self: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>
-        + PacketizerManager<State = PktMgrSt>,
+        + EncoderManager<State = EcdMgrSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
-    PacketizerFor<PktMgrSt>:
-        Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
 {
     async fn start_capture_only(
         &mut self,

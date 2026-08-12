@@ -28,7 +28,8 @@ use super::metrics_recorder::{
     CAPTURE_DURATION_METRIC, CAPTURE_SOURCE_ID_ATTRIBUTE, CONVERT_DURATION_METRIC,
     CompletedSourceFrameCounts, ENCODE_DURATION_METRIC, PACKETIZE_DURATION_METRIC,
     STREAM_ID_ATTRIBUTE, TargetResourceUsageSnapshots, snapshot_metrics_resource_usages,
-    take_completed_source_frame_counts, with_registered_metrics_targets,
+    snapshot_transporter_queue_usage, take_completed_source_frame_counts, take_sent_byte_counts,
+    with_registered_metrics_targets,
 };
 
 struct TracingMetricExporter {
@@ -74,12 +75,16 @@ impl PushMetricExporter for TracingMetricExporter {
         let export_period = self.take_export_period();
         let completed_source_frames = take_completed_source_frame_counts();
         let resource_usages = snapshot_metrics_resource_usages();
+        let transporter_queue = snapshot_transporter_queue_usage().unwrap_or_default();
+        let sent_byte_counts = take_sent_byte_counts();
         with_registered_metrics_targets(|targets| {
             export_registered_targets(
                 metrics,
                 targets,
                 &completed_source_frames,
                 &resource_usages,
+                transporter_queue,
+                &sent_byte_counts,
                 export_period,
             );
         });
@@ -160,7 +165,7 @@ struct SourceMetrics {
 struct StreamMetrics {
     completed_encoded_frames: usize,
     completed_packetized_frames: usize,
-    packetizer_queue: ResourceUsageSnapshot,
+    sent_bytes: u64,
     convert_duration: DurationMetrics,
     encode_duration: DurationMetrics,
     packetize_duration: DurationMetrics,
@@ -179,6 +184,8 @@ fn export_registered_targets(
     targets: &HashMap<MetricsTarget, usize>,
     completed_source_frames: &HashMap<MetricsTarget, CompletedSourceFrameCounts>,
     resource_usages: &HashMap<MetricsTarget, TargetResourceUsageSnapshots>,
+    transporter_queue: ResourceUsageSnapshot,
+    sent_byte_counts: &HashMap<MetricsTarget, u64>,
     export_period: Duration,
 ) {
     let mut source_metrics = HashMap::<CaptureSourceId, SourceMetrics>::new();
@@ -254,18 +261,20 @@ fn export_registered_targets(
                         .capture_pool = capture_pool;
                 }
             }
-            MetricsTarget::Stream {
-                capture_source_id,
-                stream_id,
-            } => {
-                if let Some(packetizer_queue) = usages.packetizer_queue {
-                    source_metrics
-                        .get_mut(capture_source_id)
-                        .and_then(|source| source.streams.get_mut(stream_id))
-                        .expect("registered stream metrics should exist")
-                        .packetizer_queue = packetizer_queue;
-                }
-            }
+            MetricsTarget::Stream { .. } => {}
+        }
+    }
+
+    for (target, sent_bytes) in sent_byte_counts {
+        if let MetricsTarget::Stream {
+            capture_source_id,
+            stream_id,
+        } = target
+            && let Some(stream) = source_metrics
+                .get_mut(capture_source_id)
+                .and_then(|source| source.streams.get_mut(stream_id))
+        {
+            stream.sent_bytes = *sent_bytes;
         }
     }
 
@@ -287,15 +296,14 @@ fn export_registered_targets(
                 .into_iter()
                 .map(|(stream_id, values)| {
                     format!(
-                        "{{id={} enc_fps={:.2} cvt_ms={} enc_ms={} pkt_fps={:.2} pkt_queue={}/{} pkt_ms={}}}",
+                        "{{id={} enc_fps={:.2} cvt_ms={} enc_ms={} pkt_fps={:.2} pkt_ms={} mbps={:.2}}}",
                         stream_id.value(),
                         frames_per_second(values.completed_encoded_frames, export_period),
                         format_duration(values.convert_duration),
                         format_duration(values.encode_duration),
                         frames_per_second(values.completed_packetized_frames, export_period),
-                        values.packetizer_queue.used,
-                        values.packetizer_queue.total,
                         format_duration(values.packetize_duration),
+                        megabits_per_second(values.sent_bytes, export_period),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -315,7 +323,9 @@ fn export_registered_targets(
 
     tracing::info!(
         target: "rabbit::metrics",
-        "runtime metrics: sources=[{sources}]"
+        "runtime metrics: transporter_queue={}/{} sources=[{sources}]",
+        transporter_queue.used,
+        transporter_queue.total,
     );
 }
 
@@ -418,6 +428,16 @@ fn frames_per_second(frame_count: usize, export_period: Duration) -> f64 {
         0.0
     } else {
         frame_count as f64 / seconds
+    }
+}
+
+fn megabits_per_second(byte_count: u64, export_period: Duration) -> f64 {
+    let seconds = export_period.as_secs_f64();
+
+    if seconds == 0.0 {
+        0.0
+    } else {
+        byte_count as f64 * 8.0 / 1_000_000.0 / seconds
     }
 }
 

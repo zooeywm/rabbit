@@ -11,8 +11,9 @@ use opentelemetry::{
 use crate::{
     app::container::root::outbound_port::{
         MetricsRecorder, MetricsTarget, ResourceUsage, ResourceUsageSnapshot,
+        TransporterMetricsRecorder,
     },
-    domain::stream::models::vo::FrameId,
+    domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
 };
 
 pub(super) const CAPTURE_SOURCE_ID_ATTRIBUTE: &str = "capture_source_id";
@@ -43,13 +44,11 @@ pub(super) struct CompletedSourceFrameCounts {
 #[derive(Default)]
 struct TargetResourceUsages {
     capture_pool: Option<ResourceUsage>,
-    packetizer_queue: Option<ResourceUsage>,
 }
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct TargetResourceUsageSnapshots {
     pub(super) capture_pool: Option<ResourceUsageSnapshot>,
-    pub(super) packetizer_queue: Option<ResourceUsageSnapshot>,
 }
 
 #[derive(Clone, Copy)]
@@ -187,21 +186,6 @@ where
             .capture_pool = Some(usage);
     }
 
-    fn register_packetizer_queue_usage(&self, usage: ResourceUsage) {
-        let target = *self.prj_ref().as_ref();
-        assert!(
-            matches!(target, MetricsTarget::Stream { .. }),
-            "packetizer queue usage requires a stream metrics target",
-        );
-
-        metrics_resource_usages()
-            .lock()
-            .expect("metrics resource usage registry mutex should not be poisoned")
-            .entry(target)
-            .or_default()
-            .packetizer_queue = Some(usage);
-    }
-
     fn record_captured_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
         let target = *self.prj_ref().as_ref();
         let MetricsTarget::CaptureSource(capture_source_id) = target else {
@@ -261,28 +245,54 @@ where
             ],
         );
     }
+}
 
-    fn record_packetized_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
-        let target = *self.prj_ref().as_ref();
-        let MetricsTarget::Stream {
+impl<Deps> TransporterMetricsRecorder for OpenTelemetryMetricsRecorderImpl<Deps> {
+    fn register_transporter_queue_usage(&self, usage: ResourceUsage) {
+        *transporter_queue_usage()
+            .lock()
+            .expect("transporter queue usage mutex should not be poisoned") = Some(usage);
+    }
+
+    fn unregister_transporter_queue_usage(&self) {
+        transporter_queue_usage()
+            .lock()
+            .expect("transporter queue usage mutex should not be poisoned")
+            .take();
+    }
+
+    fn record_packetized_frame(
+        &self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+        frame_id: FrameId,
+        duration: std::time::Duration,
+    ) {
+        let target = MetricsTarget::Stream {
             capture_source_id,
             stream_id,
-        } = target
-        else {
-            unreachable!("packetized frames require a stream metrics target");
         };
         record_completed_source_frame(target, SourceFrameStage::Packetize, frame_id);
+        Instruments::global()
+            .packetize_duration
+            .record(duration.as_secs_f64() * 1_000.0, &target_attributes(target));
+    }
 
-        Instruments::global().packetize_duration.record(
-            duration.as_secs_f64() * 1_000.0,
-            &[
-                KeyValue::new(
-                    CAPTURE_SOURCE_ID_ATTRIBUTE,
-                    i64::from(capture_source_id.value()),
-                ),
-                KeyValue::new(STREAM_ID_ATTRIBUTE, i64::from(stream_id.value())),
-            ],
-        );
+    fn record_sent_bytes(
+        &self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+        bytes: usize,
+    ) {
+        let target = MetricsTarget::Stream {
+            capture_source_id,
+            stream_id,
+        };
+        let mut counts = sent_byte_counts()
+            .lock()
+            .expect("sent byte count mutex should not be poisoned");
+        let count = counts.entry(target).or_default();
+        *count = count.saturating_add(bytes as u64);
     }
 }
 
@@ -320,14 +330,26 @@ pub(super) fn snapshot_metrics_resource_usages()
                 *target,
                 TargetResourceUsageSnapshots {
                     capture_pool: usages.capture_pool.as_ref().map(ResourceUsage::snapshot),
-                    packetizer_queue: usages
-                        .packetizer_queue
-                        .as_ref()
-                        .map(ResourceUsage::snapshot),
                 },
             )
         })
         .collect()
+}
+
+pub(super) fn snapshot_transporter_queue_usage() -> Option<ResourceUsageSnapshot> {
+    transporter_queue_usage()
+        .lock()
+        .expect("transporter queue usage mutex should not be poisoned")
+        .as_ref()
+        .map(ResourceUsage::snapshot)
+}
+
+pub(super) fn take_sent_byte_counts() -> HashMap<MetricsTarget, u64> {
+    std::mem::take(
+        &mut *sent_byte_counts()
+            .lock()
+            .expect("sent byte count mutex should not be poisoned"),
+    )
 }
 
 pub(super) fn with_registered_metrics_targets<R>(
@@ -375,6 +397,16 @@ fn metrics_resource_usages() -> &'static Mutex<HashMap<MetricsTarget, TargetReso
         OnceLock::new();
 
     RESOURCE_USAGES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn transporter_queue_usage() -> &'static Mutex<Option<ResourceUsage>> {
+    static USAGE: OnceLock<Mutex<Option<ResourceUsage>>> = OnceLock::new();
+    USAGE.get_or_init(|| Mutex::new(None))
+}
+
+fn sent_byte_counts() -> &'static Mutex<HashMap<MetricsTarget, u64>> {
+    static COUNTS: OnceLock<Mutex<HashMap<MetricsTarget, u64>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn clear_completed_source_frames(target: MetricsTarget) {

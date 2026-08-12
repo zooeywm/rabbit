@@ -72,8 +72,6 @@ pub(crate) trait MetricsRecorder {
 
     fn register_capture_pool_usage(&self, usage: ResourceUsage);
 
-    fn register_packetizer_queue_usage(&self, usage: ResourceUsage);
-
     /// Records completion of one source capture frame.
     fn record_captured_frame(&self, frame_id: FrameId, duration: Duration);
 
@@ -82,7 +80,26 @@ pub(crate) trait MetricsRecorder {
 
     /// Records encoding completion for a source capture frame.
     fn record_encoded_frame(&self, frame_id: FrameId, duration: Duration);
+}
+
+pub(crate) trait TransporterMetricsRecorder {
+    fn register_transporter_queue_usage(&self, usage: ResourceUsage);
+
+    fn unregister_transporter_queue_usage(&self);
 
     /// Records packetization completion for a source capture frame.
-    fn record_packetized_frame(&self, frame_id: FrameId, duration: Duration);
+    fn record_packetized_frame(
+        &self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+        frame_id: FrameId,
+        duration: Duration,
+    );
+
+    fn record_sent_bytes(
+        &self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+        bytes: usize,
+    );
 }

@@ -7,17 +7,13 @@ use eros::Context;
 
 use crate::app::{
     container::{
-        packetization::{
-            PacketizerContainer,
-            inbound::{PacketizerWorker, PacketizerWorkerHandle},
-            outbound_port::Packetizer,
-        },
         root::outbound_port::MetricsRecorder,
         stream_pipeline::{
             StreamPipelineContainer,
             inbound::LatestFrameSlot,
             outbound_port::{EncoderFrameConverter, VideoEncoder},
         },
+        transporter::inbound::EncodedUnitSender,
     },
     runtime::AppMessage,
 };
@@ -47,13 +43,13 @@ struct StreamPipelineWorkerExitGuard<Frame> {
 }
 
 impl StreamPipelineWorker {
-    pub(crate) async fn spawn<CvtSt, EcdSt, PktSt>(
+    pub(crate) async fn spawn<CvtSt, EcdSt>(
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
         stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>
         + Send
         + 'static,
-        packetizer_state_constructor: impl FnOnce() -> eros::Result<PktSt> + Send + 'static,
+        encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtSt, EcdSt>>,
         app_message_sender: flume::Sender<AppMessage>,
     ) -> eros::Result<StreamPipelineWorkerHandle<PipelineFrameFor<CvtSt, EcdSt>>>
     where
@@ -63,8 +59,6 @@ impl StreamPipelineWorker {
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
             + MetricsRecorder
             + 'static,
-        PacketizerContainer<PktSt>:
-            Packetizer<EncodedBuffer = EncodedBufferFor<CvtSt, EcdSt>> + MetricsRecorder + 'static,
     {
         let frame_slot = Arc::new(LatestFrameSlot::new());
         let worker_frame_slot = Arc::clone(&frame_slot);
@@ -78,17 +72,16 @@ impl StreamPipelineWorker {
                     capture_source_id,
                     stream_id,
                     frame_slot: exit_frame_slot,
-                    app_message_sender: app_message_sender.clone(),
+                    app_message_sender,
                 };
 
                 run_stream_pipeline_worker(
                     capture_source_id,
                     stream_id,
                     stream_pipeline_states_constructor,
-                    packetizer_state_constructor,
+                    encoded_unit_sender,
                     worker_frame_slot,
                     started_sender,
-                    app_message_sender,
                 )
             })
             .with_context(|| "Failed to spawn stream pipeline worker thread")?;
@@ -143,51 +136,13 @@ impl<Frame> StreamPipelineWorkerHandle<Frame> {
     }
 }
 
-fn run_stream_pipeline_worker<CvtSt, EcdSt, PktSt>(
+fn run_stream_pipeline_worker<CvtSt, EcdSt>(
     capture_source_id: CaptureSourceId,
     stream_id: StreamId,
     stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
-    packetizer_state_constructor: impl FnOnce() -> eros::Result<PktSt> + Send + 'static,
+    encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtSt, EcdSt>>,
     frame_slot: Arc<LatestFrameSlot<PipelineFrameFor<CvtSt, EcdSt>>>,
     started_sender: flume::Sender<()>,
-    app_message_sender: flume::Sender<AppMessage>,
-) -> eros::Result<()>
-where
-    EncodedBufferFor<CvtSt, EcdSt>: Send + 'static,
-    StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter
-        + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
-        + MetricsRecorder,
-    PacketizerContainer<PktSt>:
-        Packetizer<EncodedBuffer = EncodedBufferFor<CvtSt, EcdSt>> + MetricsRecorder + 'static,
-{
-    let packetizer_worker = PacketizerWorker::spawn(
-        capture_source_id,
-        stream_id,
-        packetizer_state_constructor,
-        app_message_sender,
-    )?;
-
-    let pipeline_result = run_encoder_worker(
-        capture_source_id,
-        stream_id,
-        stream_pipeline_states_constructor,
-        frame_slot,
-        started_sender,
-        &packetizer_worker,
-    );
-    let packetizer_result = packetizer_worker.shutdown();
-
-    pipeline_result?;
-    packetizer_result
-}
-
-fn run_encoder_worker<CvtSt, EcdSt>(
-    capture_source_id: CaptureSourceId,
-    stream_id: StreamId,
-    stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
-    frame_slot: Arc<LatestFrameSlot<PipelineFrameFor<CvtSt, EcdSt>>>,
-    started_sender: flume::Sender<()>,
-    packetizer_worker: &PacketizerWorkerHandle<EncodedBufferFor<CvtSt, EcdSt>>,
 ) -> eros::Result<()>
 where
     StreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter
@@ -211,8 +166,8 @@ where
 
         while let Some(frame) = frame_slot.blocking_take() {
             let encoder_input = EncoderFrameConverter::convert(&mut stream_pipeline, frame)?;
-            let encoded_frame = VideoEncoder::encode(&mut stream_pipeline, encoder_input)?;
-            packetizer_worker.submit(encoded_frame)?;
+            let encoded_unit = VideoEncoder::encode(&mut stream_pipeline, encoder_input)?;
+            encoded_unit_sender.send(stream_id, encoded_unit)?;
         }
 
         Ok(())
@@ -226,131 +181,5 @@ fn join_stream_pipeline_worker(worker_thread: JoinHandle<eros::Result<()>>) -> e
     match worker_thread.join() {
         Ok(result) => result,
         Err(_) => eros::bail!("Stream pipeline worker thread panicked"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        marker::PhantomData,
-        rc::Rc,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
-        },
-        thread,
-    };
-
-    use super::*;
-    use crate::app::container::stream_pipeline::outbound_port::EncodedVideoFrame;
-
-    #[derive(Default)]
-    struct NonSendConverterState(PhantomData<Rc<()>>);
-
-    #[derive(Default)]
-    struct NonSendEncoderState(PhantomData<Rc<()>>);
-
-    #[derive(Default)]
-    struct NonSendPacketizerState(PhantomData<Rc<()>>);
-
-    impl EncoderFrameConverter for StreamPipelineContainer<NonSendConverterState, NonSendEncoderState> {
-        type CapturedFrame = ();
-        type EncoderInput = ();
-
-        fn convert(&mut self, _frame: Self::CapturedFrame) -> eros::Result<Self::EncoderInput> {
-            Ok(())
-        }
-    }
-
-    impl VideoEncoder for StreamPipelineContainer<NonSendConverterState, NonSendEncoderState> {
-        type EncoderInput = ();
-        type EncodedBuffer = ();
-
-        fn encode(
-            &mut self,
-            _input: Self::EncoderInput,
-        ) -> eros::Result<EncodedVideoFrame<Self::EncodedBuffer>> {
-            unreachable!("the test does not submit frames")
-        }
-    }
-
-    impl Packetizer for PacketizerContainer<NonSendPacketizerState> {
-        type EncodedBuffer = ();
-
-        fn packetize(&mut self, _frame: EncodedVideoFrame<()>) -> eros::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn creates_non_send_pipeline_states_on_worker_thread() {
-        let runtime = compio::runtime::Runtime::new().expect("runtime should start");
-
-        runtime.block_on(async {
-            let caller_thread_id = thread::current().id();
-            let packetizer_caller_thread_id = caller_thread_id;
-            let created_on_worker = Arc::new(AtomicBool::new(false));
-            let worker_flag = Arc::clone(&created_on_worker);
-            let packetizer_created_on_worker = Arc::new(AtomicBool::new(false));
-            let packetizer_worker_flag = Arc::clone(&packetizer_created_on_worker);
-            let pipeline_thread_id = Arc::new(Mutex::new(None));
-            let pipeline_thread_id_slot = Arc::clone(&pipeline_thread_id);
-            let packetizer_thread_id = Arc::new(Mutex::new(None));
-            let packetizer_thread_id_slot = Arc::clone(&packetizer_thread_id);
-            let (app_message_sender, app_message_receiver) = flume::unbounded();
-
-            let worker = StreamPipelineWorker::spawn(
-                CaptureSourceId::new(0),
-                StreamId::new(0),
-                move || {
-                    let current_thread_id = thread::current().id();
-                    worker_flag.store(current_thread_id != caller_thread_id, Ordering::Relaxed);
-                    *pipeline_thread_id_slot
-                        .lock()
-                        .expect("thread ID mutex should not be poisoned") = Some(current_thread_id);
-                    Ok((
-                        NonSendConverterState::default(),
-                        NonSendEncoderState::default(),
-                    ))
-                },
-                move || {
-                    let current_thread_id = thread::current().id();
-                    packetizer_worker_flag.store(
-                        current_thread_id != packetizer_caller_thread_id,
-                        Ordering::Relaxed,
-                    );
-                    *packetizer_thread_id_slot
-                        .lock()
-                        .expect("thread ID mutex should not be poisoned") = Some(current_thread_id);
-                    Ok(NonSendPacketizerState::default())
-                },
-                app_message_sender,
-            )
-            .await
-            .expect("worker should start with non-Send pipeline states");
-
-            assert!(created_on_worker.load(Ordering::Relaxed));
-            assert!(packetizer_created_on_worker.load(Ordering::Relaxed));
-            assert_ne!(
-                *pipeline_thread_id
-                    .lock()
-                    .expect("thread ID mutex should not be poisoned"),
-                *packetizer_thread_id
-                    .lock()
-                    .expect("thread ID mutex should not be poisoned"),
-            );
-
-            worker.close();
-            join_stream_pipeline_worker(worker.worker_thread).expect("worker should stop cleanly");
-
-            assert!(matches!(
-                app_message_receiver.recv(),
-                Ok(AppMessage::StreamPipelineWorkerExited {
-                    capture_source_id,
-                    stream_id,
-                }) if capture_source_id == CaptureSourceId::new(0)
-                    && stream_id == StreamId::new(0)
-            ));
-        });
     }
 }

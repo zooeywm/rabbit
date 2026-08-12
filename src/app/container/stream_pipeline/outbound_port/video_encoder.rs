@@ -1,4 +1,4 @@
-use crate::app::container::stream_pipeline::outbound_port::EncodedVideoFrame;
+use crate::app::container::stream_pipeline::outbound_port::EncodedVideoUnit;
 
 pub(crate) trait VideoEncoder {
     type EncoderInput;
@@ -8,5 +8,5 @@ pub(crate) trait VideoEncoder {
     fn encode(
         &mut self,
         input: Self::EncoderInput,
-    ) -> eros::Result<EncodedVideoFrame<Self::EncodedBuffer>>;
+    ) -> eros::Result<EncodedVideoUnit<Self::EncodedBuffer>>;
 }

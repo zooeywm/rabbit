@@ -1,5 +1,5 @@
-mod encoded_video_frame;
-mod frame_number;
+mod encoded_video_unit;
+mod unit_number;
 
-pub(crate) use encoded_video_frame::EncodedVideoFrame;
-pub(crate) use frame_number::FrameNumber;
+pub(crate) use encoded_video_unit::EncodedVideoUnit;
+pub(crate) use unit_number::UnitNumber;

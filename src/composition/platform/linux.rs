@@ -2,13 +2,12 @@ use std::convert::Infallible;
 
 use crate::{
     app::container::{
-        packetization::{PacketizerContainer, outbound_port::Packetizer},
         root::{
             AppContainer,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                PacketizerManager, PacketizerManagerStateSpec,
+                TransporterConstructor, TransporterConstructorStateSpec,
             },
         },
         screen_capture::{
@@ -17,16 +16,17 @@ use crate::{
         },
         stream_pipeline::{
             StreamPipelineContainer,
-            outbound_port::{EncodedVideoFrame, EncoderFrameConverter, VideoEncoder},
+            outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
         },
+        transporter::{TransporterContainer, outbound_port::Transporter},
     },
     domain::stream::models::vo::CaptureSourceId,
     infrastructure::platform::{
         LinuxCapturerManagerImpl, LinuxCapturerManagerState, LinuxConverterManagerImpl,
         LinuxConverterManagerState, LinuxEncoderFrameConverterState, LinuxEncoderManagerImpl,
-        LinuxEncoderManagerState, LinuxPacketizerImpl, LinuxPacketizerManagerImpl,
-        LinuxPacketizerManagerState, LinuxPacketizerState, LinuxScreenCapturerImpl,
-        LinuxScreenCapturerState, LinuxVideoEncoderState,
+        LinuxEncoderManagerState, LinuxScreenCapturerImpl, LinuxScreenCapturerState,
+        LinuxTransporterConstructorImpl, LinuxTransporterConstructorState, LinuxTransporterImpl,
+        LinuxTransporterState, LinuxVideoEncoderState,
     },
 };
 
@@ -35,24 +35,24 @@ impl CapturerManagerStateSpec for LinuxCapturerManagerState {
     type ScreenCapturer = ScreenCaptureContainer<LinuxScreenCapturerState>;
 }
 
-impl<CvtMgrSt, EcdMgrSt, PktMgrSt> AsRef<LinuxCapturerManagerState>
-    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
+impl<CvtMgrSt, EcdMgrSt, TprCstSt> AsRef<LinuxCapturerManagerState>
+    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt, TprCstSt>
 {
     fn as_ref(&self) -> &LinuxCapturerManagerState {
         self.capturer_manager_state()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt, PktMgrSt> AsMut<LinuxCapturerManagerState>
-    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
+impl<CvtMgrSt, EcdMgrSt, TprCstSt> AsMut<LinuxCapturerManagerState>
+    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt, TprCstSt>
 {
     fn as_mut(&mut self) -> &mut LinuxCapturerManagerState {
         self.capturer_manager_state_mut()
     }
 }
 
-impl<CvtMgrSt, EcdMgrSt, PktMgrSt> CapturerManager
-    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt, PktMgrSt>
+impl<CvtMgrSt, EcdMgrSt, TprCstSt> CapturerManager
+    for AppContainer<LinuxCapturerManagerState, CvtMgrSt, EcdMgrSt, TprCstSt>
 {
     type State = LinuxCapturerManagerState;
 
@@ -63,7 +63,7 @@ impl<CvtMgrSt, EcdMgrSt, PktMgrSt> CapturerManager
         -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
     + Send
     + 'static
-    + use<CvtMgrSt, EcdMgrSt, PktMgrSt> {
+    + use<CvtMgrSt, EcdMgrSt, TprCstSt> {
         CapturerManager::compose_screen_capturer_state(
             LinuxCapturerManagerImpl::inj_ref_mut(self),
             capture_source_id,
@@ -105,8 +105,8 @@ impl ConverterManagerStateSpec for LinuxConverterManagerState {
     type EncoderFrameConverterState = LinuxEncoderFrameConverterState;
 }
 
-impl<CapMgrSt, EcdMgrSt, PktMgrSt> AsRef<LinuxConverterManagerState>
-    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt, PktMgrSt>
+impl<CapMgrSt, EcdMgrSt, TprCstSt> AsRef<LinuxConverterManagerState>
+    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -115,8 +115,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt, PktMgrSt> AsMut<LinuxConverterManagerState>
-    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt, PktMgrSt>
+impl<CapMgrSt, EcdMgrSt, TprCstSt> AsMut<LinuxConverterManagerState>
+    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -125,8 +125,8 @@ where
     }
 }
 
-impl<CapMgrSt, EcdMgrSt, PktMgrSt> ConverterManager
-    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt, PktMgrSt>
+impl<CapMgrSt, EcdMgrSt, TprCstSt> ConverterManager
+    for AppContainer<CapMgrSt, LinuxConverterManagerState, EcdMgrSt, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -139,7 +139,7 @@ where
     >
     + Send
     + 'static
-    + use<CapMgrSt, EcdMgrSt, PktMgrSt> {
+    + use<CapMgrSt, EcdMgrSt, TprCstSt> {
         ConverterManager::compose_encoder_frame_converter_state(
             LinuxConverterManagerImpl::inj_ref_mut(self),
         )
@@ -177,8 +177,8 @@ impl EncoderManagerStateSpec for LinuxEncoderManagerState {
     type VideoEncoderState = LinuxVideoEncoderState;
 }
 
-impl<CapMgrSt, CvtMgrSt, PktMgrSt> AsRef<LinuxEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState, PktMgrSt>
+impl<CapMgrSt, CvtMgrSt, TprCstSt> AsRef<LinuxEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -187,8 +187,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, PktMgrSt> AsMut<LinuxEncoderManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState, PktMgrSt>
+impl<CapMgrSt, CvtMgrSt, TprCstSt> AsMut<LinuxEncoderManagerState>
+    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -197,8 +197,8 @@ where
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, PktMgrSt> EncoderManager
-    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState, PktMgrSt>
+impl<CapMgrSt, CvtMgrSt, TprCstSt> EncoderManager
+    for AppContainer<CapMgrSt, CvtMgrSt, LinuxEncoderManagerState, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
@@ -209,7 +209,7 @@ where
     ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
     + Send
     + 'static
-    + use<CapMgrSt, CvtMgrSt, PktMgrSt> {
+    + use<CapMgrSt, CvtMgrSt, TprCstSt> {
         EncoderManager::compose_video_encoder_state(LinuxEncoderManagerImpl::inj_ref_mut(self))
     }
 }
@@ -237,63 +237,44 @@ impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, LinuxVideoEncoderSta
     fn encode(
         &mut self,
         input: Self::EncoderInput,
-    ) -> eros::Result<EncodedVideoFrame<Self::EncodedBuffer>> {
+    ) -> eros::Result<EncodedVideoUnit<Self::EncodedBuffer>> {
         match input {}
     }
 }
 
-impl PacketizerManagerStateSpec for LinuxPacketizerManagerState {
-    type PacketizerState = LinuxPacketizerState;
+impl TransporterConstructorStateSpec for LinuxTransporterConstructorState {
+    type TransporterState = LinuxTransporterState;
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsRef<LinuxPacketizerManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, LinuxPacketizerManagerState>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsRef<LinuxTransporterConstructorState>
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, LinuxTransporterConstructorState>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
-    fn as_ref(&self) -> &LinuxPacketizerManagerState {
-        self.packetizer_manager_state()
+    fn as_ref(&self) -> &LinuxTransporterConstructorState {
+        self.transporter_constructor_state()
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsMut<LinuxPacketizerManagerState>
-    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, LinuxPacketizerManagerState>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> TransporterConstructor
+    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, LinuxTransporterConstructorState>
 where
     CapMgrSt: CapturerManagerStateSpec,
 {
-    fn as_mut(&mut self) -> &mut LinuxPacketizerManagerState {
-        self.packetizer_manager_state_mut()
-    }
-}
+    type State = LinuxTransporterConstructorState;
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> PacketizerManager
-    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, LinuxPacketizerManagerState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    type State = LinuxPacketizerManagerState;
-
-    fn compose_packetizer_state(
-        &mut self,
-    ) -> impl FnOnce() -> eros::Result<<Self::State as PacketizerManagerStateSpec>::PacketizerState>
-    + Send
-    + 'static
-    + use<CapMgrSt, CvtMgrSt, EcdMgrSt> {
-        PacketizerManager::compose_packetizer_state(LinuxPacketizerManagerImpl::inj_ref_mut(self))
-    }
-}
-
-impl AsMut<LinuxPacketizerState> for PacketizerContainer<LinuxPacketizerState> {
-    fn as_mut(&mut self) -> &mut LinuxPacketizerState {
-        self.state_mut()
-    }
-}
-
-impl Packetizer for PacketizerContainer<LinuxPacketizerState> {
-    type EncodedBuffer = Infallible;
-
-    fn packetize(&mut self, frame: EncodedVideoFrame<Self::EncodedBuffer>) -> eros::Result<()> {
-        Packetizer::packetize(LinuxPacketizerImpl::inj_ref_mut(self), frame)
+    fn compose_transporter_state(
+        &self,
+    ) -> eros::Result<
+        impl FnOnce()
+            -> eros::Result<<Self::State as TransporterConstructorStateSpec>::TransporterState>
+        + Send
+        + 'static
+        + use<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+    > {
+        TransporterConstructor::compose_transporter_state(LinuxTransporterConstructorImpl::inj_ref(
+            self,
+        ))
     }
 }
 
@@ -301,7 +282,7 @@ pub(super) type PlatformApp = AppContainer<
     LinuxCapturerManagerState,
     LinuxConverterManagerState,
     LinuxEncoderManagerState,
-    LinuxPacketizerManagerState,
+    LinuxTransporterConstructorState,
 >;
 
 pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
@@ -310,7 +291,30 @@ pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send
             LinuxCapturerManagerState::new()?,
             LinuxConverterManagerState::new()?,
             LinuxEncoderManagerState::new()?,
-            LinuxPacketizerManagerState::new()?,
+            LinuxTransporterConstructorState::new()?,
         ))
+    }
+}
+
+impl AsMut<LinuxTransporterState> for TransporterContainer<LinuxTransporterState> {
+    fn as_mut(&mut self) -> &mut LinuxTransporterState {
+        self.state_mut()
+    }
+}
+
+impl Transporter for TransporterContainer<LinuxTransporterState> {
+    type EncodedBuffer = Infallible;
+    type Packetized = Infallible;
+
+    fn packetize(
+        &mut self,
+        stream_id: crate::domain::stream::models::vo::StreamId,
+        unit: EncodedVideoUnit<Self::EncodedBuffer>,
+    ) -> eros::Result<Self::Packetized> {
+        Transporter::packetize(LinuxTransporterImpl::inj_ref_mut(self), stream_id, unit)
+    }
+
+    async fn send(&mut self, packetized: Self::Packetized) -> eros::Result<()> {
+        Transporter::send(LinuxTransporterImpl::inj_ref_mut(self), packetized).await
     }
 }

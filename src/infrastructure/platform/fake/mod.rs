@@ -6,8 +6,8 @@ mod converter_manager;
 
 mod encoder;
 mod encoder_manager;
-mod packetizer;
-mod packetizer_manager;
+mod transporter;
+mod transporter_constructor;
 
 pub(crate) use capturer::{
     FakeCapturedFrame, FakeScreenCapturerControl, FakeScreenCapturerImpl, FakeScreenCapturerState,
@@ -19,5 +19,7 @@ pub(crate) use converter::{
 pub(crate) use converter_manager::{FakeConverterManagerImpl, FakeConverterManagerState};
 pub(crate) use encoder::{FakeVideoEncoderImpl, FakeVideoEncoderState};
 pub(crate) use encoder_manager::{FakeEncoderManagerImpl, FakeEncoderManagerState};
-pub(crate) use packetizer::{FakePacketizerImpl, FakePacketizerState};
-pub(crate) use packetizer_manager::{FakePacketizerManagerImpl, FakePacketizerManagerState};
+pub(crate) use transporter::{FakePacketized, FakeTransporterImpl, FakeTransporterState};
+pub(crate) use transporter_constructor::{
+    FakeTransporterConstructorImpl, FakeTransporterConstructorState,
+};

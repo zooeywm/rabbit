@@ -14,7 +14,7 @@ impl FrameId {
         }
     }
 
-    pub fn sequence(self) -> u64 {
-        self.sequence
+    pub fn capture_source_id(self) -> CaptureSourceId {
+        self.capture_source_id
     }
 }

@@ -8,14 +8,13 @@ use eros::Context;
 use crate::{
     app::{
         container::{
-            packetization::outbound_port::Packetizer,
             root::{
-                AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor, PacketizerFor,
+                AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor,
                 StreamPipelineFor,
                 outbound_port::{
                     CapturerManager, CapturerManagerStateSpec, ConverterManager,
                     ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                    MetricsRecorder, PacketizerManager, PacketizerManagerStateSpec,
+                    MetricsRecorder,
                 },
             },
             screen_capture::inbound::CaptureWorker,
@@ -23,28 +22,25 @@ use crate::{
                 inbound::StreamPipelineWorker,
                 outbound_port::{EncoderFrameConverter, VideoEncoder},
             },
+            transporter::inbound::EncodedUnitSender,
         },
         runtime::AppMessage,
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt> AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>
 where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
-    PktMgrSt: PacketizerManagerStateSpec,
     Self: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>
-        + PacketizerManager<State = PktMgrSt>,
+        + EncoderManager<State = EcdMgrSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
-    PacketizerFor<PktMgrSt>:
-        Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
 {
     fn compose_stream_pipeline_states(
         &mut self,
@@ -54,7 +50,7 @@ where
     )>
     + Send
     + 'static
-    + use<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt> {
+    + use<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt> {
         let encoder_frame_converter_state_constructor =
             self.compose_encoder_frame_converter_state();
         let video_encoder_state_constructor = self.compose_video_encoder_state();
@@ -70,6 +66,7 @@ where
     pub(crate) async fn start_stream(
         &mut self,
         capture_source_id: CaptureSourceId,
+        encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
         app_message_sender: &flume::Sender<AppMessage>,
     ) -> eros::Result<StreamId> {
         let stream_id = StreamId::new(self.next_stream_id);
@@ -88,12 +85,11 @@ where
         };
 
         let stream_pipeline_states_constructor = self.compose_stream_pipeline_states();
-        let packetizer_state_constructor = self.compose_packetizer_state();
         let stream_pipeline_handle = StreamPipelineWorker::spawn(
             capture_source_id,
             stream_id,
             stream_pipeline_states_constructor,
-            packetizer_state_constructor,
+            encoded_unit_sender,
             app_message_sender.clone(),
         )
         .await?;
@@ -202,6 +198,7 @@ where
 
     pub(crate) async fn run(
         mut self,
+        encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
         app_message_sender: flume::Sender<AppMessage>,
         message_receiver: flume::Receiver<AppMessage>,
     ) -> eros::Result<()> {
@@ -217,8 +214,12 @@ where
                     response_sender,
                 }) => {
                     let _ = response_sender.send(
-                        self.start_stream(capture_source_id, &app_message_sender)
-                            .await,
+                        self.start_stream(
+                            capture_source_id,
+                            encoded_unit_sender.clone(),
+                            &app_message_sender,
+                        )
+                        .await,
                     );
                 }
                 Ok(AppMessage::RemoveStream {
@@ -266,6 +267,10 @@ where
 
                     let _ = self.shutdown().await;
                     return Err(failure);
+                }
+                Ok(AppMessage::TransporterWorkerExited) => {
+                    let _ = self.shutdown().await;
+                    eros::bail!("Transporter worker exited unexpectedly");
                 }
                 Ok(AppMessage::Shutdown) | Err(_) => break,
             }

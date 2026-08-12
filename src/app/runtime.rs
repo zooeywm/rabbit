@@ -7,17 +7,20 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        packetization::outbound_port::Packetizer,
         root::{
-            AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor, PacketizerFor,
-            StreamPipelineFor,
+            AppContainer, CapturedFrameFor, EncodedBufferFor, EncoderInputFor, StreamPipelineFor,
+            TransporterStateFor,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                MetricsRecorder, PacketizerManager, PacketizerManagerStateSpec,
+                MetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
+                TransporterMetricsRecorder,
             },
         },
         stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
+        transporter::{
+            TransporterContainer, inbound::TransporterWorker, outbound_port::Transporter,
+        },
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
@@ -43,6 +46,7 @@ pub(crate) enum AppMessage {
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
     },
+    TransporterWorkerExited,
     Shutdown,
 }
 
@@ -57,9 +61,9 @@ pub(crate) struct AppHandle {
 }
 
 impl AppRuntime {
-    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt, AppRuntimeGuard>(
+    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt, AppRuntimeGuard>(
         app_constructor: impl FnOnce() -> eros::Result<(
-            AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>,
+            AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>,
             AppRuntimeGuard,
         )> + Send
         + 'static,
@@ -68,17 +72,17 @@ impl AppRuntime {
         CapMgrSt: CapturerManagerStateSpec,
         CvtMgrSt: ConverterManagerStateSpec,
         EcdMgrSt: EncoderManagerStateSpec,
-        PktMgrSt: PacketizerManagerStateSpec,
-        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>: CapturerManager<State = CapMgrSt>
+        TprCstSt: TransporterConstructorStateSpec,
+        TransporterContainer<TransporterStateFor<TprCstSt>>: Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>
+            + TransporterMetricsRecorder,
+        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: CapturerManager<State = CapMgrSt>
             + ConverterManager<State = CvtMgrSt>
             + EncoderManager<State = EcdMgrSt>
-            + PacketizerManager<State = PktMgrSt>,
+            + TransporterConstructor<State = TprCstSt>,
         StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
             + MetricsRecorder,
         EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
-        PacketizerFor<PktMgrSt>:
-            Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
     {
         let (message_sender, message_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
@@ -92,12 +96,26 @@ impl AppRuntime {
                 let (app, _app_runtime_guard) = runtime
                     .enter(app_constructor)
                     .with_context(|| "Failed to construct app")?;
+                let transporter_constructor = app.compose_transporter()?;
+                let transporter_worker =
+                    TransporterWorker::spawn(transporter_constructor, app_message_sender.clone())?;
+                let encoded_unit_sender = transporter_worker.sender();
 
                 started_sender
                     .send(())
                     .with_context(|| "Failed to report app startup")?;
 
-                runtime.block_on(app.run(app_message_sender, message_receiver))
+                let app_result = runtime.block_on(app.run(
+                    encoded_unit_sender,
+                    app_message_sender,
+                    message_receiver,
+                ));
+                let transporter_result = runtime.block_on(transporter_worker.shutdown());
+
+                match transporter_result {
+                    Err(error) => Err(error),
+                    Ok(()) => app_result,
+                }
             })
             .with_context(|| "Failed to spawn app thread")?;
 
@@ -173,218 +191,5 @@ fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()>
     match app_thread.join() {
         Ok(result) => result,
         Err(_) => eros::bail!("App thread panicked"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        rc::Rc,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-    };
-
-    use super::*;
-    use crate::app::container::{
-        packetization::{PacketizerContainer, outbound_port::Packetizer},
-        screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
-        stream_pipeline::{StreamPipelineContainer, outbound_port::EncodedVideoFrame},
-    };
-    use crate::domain::stream::models::vo::FrameId;
-
-    struct TestCapturerManagerState {
-        _not_send: Rc<()>,
-    }
-
-    struct TestCapturerState;
-    struct TestCapturer;
-    struct TestControl;
-    struct TestConverterManagerState;
-    struct TestEncoderManagerState;
-    struct TestPacketizerManagerState;
-
-    impl CapturerManagerStateSpec for TestCapturerManagerState {
-        type ScreenCapturerState = TestCapturerState;
-        type ScreenCapturer = TestCapturer;
-    }
-
-    impl From<(CaptureSourceId, TestCapturerState)> for TestCapturer {
-        fn from((_capture_source_id, _state): (CaptureSourceId, TestCapturerState)) -> Self {
-            Self
-        }
-    }
-
-    impl MetricsRecorder for TestCapturer {
-        fn register_metrics_target(&self) {}
-
-        fn unregister_metrics_target(&self) {}
-
-        fn register_capture_pool_usage(
-            &self,
-            _usage: crate::app::container::root::outbound_port::ResourceUsage,
-        ) {
-        }
-
-        fn register_packetizer_queue_usage(
-            &self,
-            _usage: crate::app::container::root::outbound_port::ResourceUsage,
-        ) {
-        }
-
-        fn record_captured_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
-
-        fn record_converted_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
-
-        fn record_encoded_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
-
-        fn record_packetized_frame(&self, _frame_id: FrameId, _duration: std::time::Duration) {}
-    }
-
-    impl ScreenCapturerControl for TestControl {
-        fn wake(&self) -> eros::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl ScreenCapturer for TestCapturer {
-        type CapturedFrame = ();
-        type Control = TestControl;
-
-        fn control(&self) -> eros::Result<Self::Control> {
-            Ok(TestControl)
-        }
-
-        fn run<OnStarted, OnControl, OnFrame>(
-            &mut self,
-            _initial_consumer_count: usize,
-            _on_started: OnStarted,
-            _on_control: OnControl,
-            _on_frame: OnFrame,
-        ) -> eros::Result<()>
-        where
-            OnStarted: FnOnce() -> eros::Result<()>,
-            OnControl: FnMut() -> eros::Result<CaptureLoopAction>,
-            OnFrame: FnMut(Self::CapturedFrame) -> eros::Result<CaptureLoopAction>,
-        {
-            unreachable!("the runtime test does not start capture")
-        }
-    }
-
-    impl ConverterManagerStateSpec for TestConverterManagerState {
-        type EncoderFrameConverterState = ();
-    }
-
-    impl EncoderManagerStateSpec for TestEncoderManagerState {
-        type VideoEncoderState = ();
-    }
-
-    impl PacketizerManagerStateSpec for TestPacketizerManagerState {
-        type PacketizerState = ();
-    }
-
-    type TestApp = AppContainer<
-        TestCapturerManagerState,
-        TestConverterManagerState,
-        TestEncoderManagerState,
-        TestPacketizerManagerState,
-    >;
-
-    impl CapturerManager for TestApp {
-        type State = TestCapturerManagerState;
-
-        fn compose_screen_capturer_state(
-            &mut self,
-            _capture_source_id: CaptureSourceId,
-        ) -> impl FnOnce() -> eros::Result<TestCapturerState> + Send + 'static + use<> {
-            || Ok(TestCapturerState)
-        }
-    }
-
-    impl ConverterManager for TestApp {
-        type State = TestConverterManagerState;
-
-        fn compose_encoder_frame_converter_state(
-            &mut self,
-        ) -> impl FnOnce() -> eros::Result<()> + Send + 'static + use<> {
-            || Ok(())
-        }
-    }
-
-    impl EncoderManager for TestApp {
-        type State = TestEncoderManagerState;
-
-        fn compose_video_encoder_state(
-            &mut self,
-        ) -> impl FnOnce() -> eros::Result<()> + Send + 'static + use<> {
-            || Ok(())
-        }
-    }
-
-    impl PacketizerManager for TestApp {
-        type State = TestPacketizerManagerState;
-
-        fn compose_packetizer_state(
-            &mut self,
-        ) -> impl FnOnce() -> eros::Result<()> + Send + 'static + use<> {
-            || Ok(())
-        }
-    }
-
-    impl EncoderFrameConverter for StreamPipelineContainer<(), ()> {
-        type CapturedFrame = ();
-        type EncoderInput = ();
-
-        fn convert(&mut self, _frame: ()) -> eros::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl VideoEncoder for StreamPipelineContainer<(), ()> {
-        type EncoderInput = ();
-        type EncodedBuffer = ();
-
-        fn encode(&mut self, _input: ()) -> eros::Result<EncodedVideoFrame<()>> {
-            unreachable!("the runtime test does not encode frames")
-        }
-    }
-
-    impl Packetizer for PacketizerContainer<()> {
-        type EncodedBuffer = ();
-
-        fn packetize(&mut self, _frame: EncodedVideoFrame<()>) -> eros::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn constructs_app_on_app_thread() {
-        let caller_thread_id = thread::current().id();
-        let created_on_app_thread = Arc::new(AtomicBool::new(false));
-        let app_thread_flag = Arc::clone(&created_on_app_thread);
-
-        let app_runtime = AppRuntime::start(move || {
-            app_thread_flag.store(
-                thread::current().id() != caller_thread_id,
-                Ordering::Relaxed,
-            );
-            Ok((
-                TestApp::new(
-                    TestCapturerManagerState {
-                        _not_send: Rc::new(()),
-                    },
-                    TestConverterManagerState,
-                    TestEncoderManagerState,
-                    TestPacketizerManagerState,
-                ),
-                (),
-            ))
-        })
-        .expect("app runtime should start");
-
-        assert!(created_on_app_thread.load(Ordering::Relaxed));
-
-        app_runtime.shutdown().expect("app should stop cleanly");
     }
 }

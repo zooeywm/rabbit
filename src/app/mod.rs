@@ -5,30 +5,28 @@ mod runtime;
 
 use config::Config;
 use container::{
-    packetization::outbound_port::Packetizer,
     root::{
-        AppContainer,
+        AppContainer, TransporterStateFor,
         outbound_port::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
-            EncoderManager, EncoderManagerStateSpec, MetricsRecorder, PacketizerManager,
-            PacketizerManagerStateSpec,
+            EncoderManager, EncoderManagerStateSpec, MetricsRecorder, TransporterConstructor,
+            TransporterConstructorStateSpec, TransporterMetricsRecorder,
         },
     },
     stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
+    transporter::{TransporterContainer, outbound_port::Transporter},
 };
 use directories::ProjectDirs;
 use eros::Context;
 use runtime::AppRuntime;
 
-use container::root::{
-    CapturedFrameFor, EncodedBufferFor, EncoderInputFor, PacketizerFor, StreamPipelineFor,
-};
+use container::root::{CapturedFrameFor, EncodedBufferFor, EncoderInputFor, StreamPipelineFor};
 
 pub(crate) use runtime::AppHandle;
 
-pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt, AppRuntimeGuard>(
+pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt, AppRuntimeGuard>(
     app_constructor: impl FnOnce() -> eros::Result<(
-        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>,
+        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>,
         AppRuntimeGuard,
     )> + Send
     + 'static,
@@ -38,16 +36,16 @@ where
     CapMgrSt: CapturerManagerStateSpec,
     CvtMgrSt: ConverterManagerStateSpec,
     EcdMgrSt: EncoderManagerStateSpec,
-    PktMgrSt: PacketizerManagerStateSpec,
-    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, PktMgrSt>: CapturerManager<State = CapMgrSt>
+    TprCstSt: TransporterConstructorStateSpec,
+    TransporterContainer<TransporterStateFor<TprCstSt>>: Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>
+        + TransporterMetricsRecorder,
+    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
         + EncoderManager<State = EcdMgrSt>
-        + PacketizerManager<State = PktMgrSt>,
+        + TransporterConstructor<State = TprCstSt>,
     StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
-    PacketizerFor<PktMgrSt>:
-        Packetizer<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + MetricsRecorder,
 {
     let project_dirs = ProjectDirs::from("", "", "rabbit")
         .with_context(|| "Failed looking for app project dir")?;

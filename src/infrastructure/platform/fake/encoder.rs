@@ -5,7 +5,7 @@ use eros::Context;
 use crate::{
     app::container::{
         root::outbound_port::MetricsRecorder,
-        stream_pipeline::outbound_port::{EncodedVideoFrame, FrameNumber, VideoEncoder},
+        stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber, VideoEncoder},
     },
     infrastructure::fake::converter::FakeEncoderInput,
 };
@@ -13,13 +13,13 @@ use crate::{
 #[derive(kudi::DepInj)]
 #[target(FakeVideoEncoderImpl)]
 pub(crate) struct FakeVideoEncoderState {
-    next_frame_number: u64,
+    next_unit_number: u64,
 }
 
 impl FakeVideoEncoderState {
     pub(crate) fn new() -> Self {
         Self {
-            next_frame_number: 0,
+            next_unit_number: 0,
         }
     }
 }
@@ -34,26 +34,26 @@ where
     fn encode(
         &mut self,
         input: Self::EncoderInput,
-    ) -> eros::Result<EncodedVideoFrame<Self::EncodedBuffer>> {
+    ) -> eros::Result<EncodedVideoUnit<Self::EncodedBuffer>> {
         let encode_started_at = Instant::now();
         let state = self.prj_ref_mut().as_mut();
-        let frame_number = state.next_frame_number;
+        let unit_number = state.next_unit_number;
 
-        state.next_frame_number = state
-            .next_frame_number
+        state.next_unit_number = state
+            .next_unit_number
             .checked_add(1)
-            .with_context(|| "Fake video encoder frame number space is exhausted")?;
+            .with_context(|| "Fake video encoder unit number space is exhausted")?;
 
-        let frame = EncodedVideoFrame::new(
+        let unit = EncodedVideoUnit::new(
             input.frame_id,
-            FrameNumber::new(frame_number),
-            frame_number == 0,
-            input.frame_id.sequence().to_le_bytes(),
+            UnitNumber::new(unit_number),
+            unit_number == 0,
+            unit_number.to_le_bytes(),
         );
 
         self.prj_ref()
             .record_encoded_frame(input.frame_id, encode_started_at.elapsed());
 
-        Ok(frame)
+        Ok(unit)
     }
 }

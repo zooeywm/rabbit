@@ -1,7 +1,7 @@
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct FrameNumber(u64);
+pub struct UnitNumber(u64);
 
-impl FrameNumber {
+impl UnitNumber {
     pub fn new(value: u64) -> Self {
         Self(value)
     }

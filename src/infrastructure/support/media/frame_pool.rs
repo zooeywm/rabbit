@@ -430,7 +430,7 @@ mod tests {
 
         let encoder_worker = thread::spawn(move || {
             while let Ok(frame) = frame_receiver.recv() {
-                let _frame_number = frame.value;
+                let _unit_number = frame.value;
 
                 thread::sleep(encode_duration);
                 worker_encoded_count.fetch_add(1, Ordering::SeqCst);
@@ -567,7 +567,7 @@ mod tests {
         encoded_counts: &[Arc<AtomicUsize>],
         capture_interval: Duration,
         simulation_duration: Duration,
-        frame_number: &mut usize,
+        unit_number: &mut usize,
     ) {
         let counts_before_interval = encoded_counts
             .iter()
@@ -579,8 +579,8 @@ mod tests {
         while Instant::now() < interval_deadline {
             let mut frame = pool.blocking_acquire();
 
-            *frame_number += 1;
-            frame.value = *frame_number;
+            *unit_number += 1;
+            frame.value = *unit_number;
 
             for stream_sender in stream_senders {
                 stream_sender
@@ -613,8 +613,8 @@ mod tests {
         let mut stream_senders = Vec::with_capacity(TOTAL_STREAM_COUNT);
         let mut encoder_workers = Vec::with_capacity(TOTAL_STREAM_COUNT);
         let mut encoded_counts = Vec::with_capacity(TOTAL_STREAM_COUNT);
-        let mut encoder_start_frame_numbers = Vec::with_capacity(TOTAL_STREAM_COUNT);
-        let mut frame_number = 0;
+        let mut encoder_start_unit_numbers = Vec::with_capacity(TOTAL_STREAM_COUNT);
+        let mut unit_number = 0;
 
         for stream_count in 1..=TOTAL_STREAM_COUNT {
             if stream_count > 1 {
@@ -631,7 +631,7 @@ mod tests {
             stream_senders.push(frame_sender);
             encoder_workers.push(encoder_worker);
             encoded_counts.push(encoded_count);
-            encoder_start_frame_numbers.push(frame_number);
+            encoder_start_unit_numbers.push(unit_number);
 
             simulate_capture_and_encoding(
                 &pool,
@@ -639,7 +639,7 @@ mod tests {
                 &encoded_counts,
                 capture_interval,
                 STREAM_CHANGE_INTERVAL,
-                &mut frame_number,
+                &mut unit_number,
             );
         }
 
@@ -659,13 +659,13 @@ mod tests {
             let encoded_count = encoded_counts
                 .pop()
                 .expect("the encoded count should exist");
-            let start_frame_number = encoder_start_frame_numbers
+            let start_unit_number = encoder_start_unit_numbers
                 .pop()
                 .expect("the encoder start frame number should exist");
 
             assert_eq!(
                 encoded_count.load(Ordering::SeqCst),
-                frame_number - start_frame_number,
+                unit_number - start_unit_number,
             );
 
             pool.set_pool_size(remaining_stream_count);
@@ -681,7 +681,7 @@ mod tests {
                     &encoded_counts,
                     capture_interval,
                     STREAM_CHANGE_INTERVAL,
-                    &mut frame_number,
+                    &mut unit_number,
                 );
             }
         }
@@ -690,12 +690,12 @@ mod tests {
         assert!(stream_senders.is_empty());
         assert!(encoder_workers.is_empty());
         assert!(encoded_counts.is_empty());
-        assert!(encoder_start_frame_numbers.is_empty());
+        assert!(encoder_start_unit_numbers.is_empty());
 
         pool.set_pool_size(1);
 
         let (frame_sender, encoder_worker, encoded_count) = spawn_encoder(encode_duration);
-        let recreated_stream_start_frame_number = frame_number;
+        let recreated_stream_start_unit_number = unit_number;
 
         simulate_capture_and_encoding(
             &pool,
@@ -703,7 +703,7 @@ mod tests {
             std::slice::from_ref(&encoded_count),
             capture_interval,
             STREAM_CHANGE_INTERVAL,
-            &mut frame_number,
+            &mut unit_number,
         );
 
         drop(frame_sender);
@@ -711,7 +711,7 @@ mod tests {
 
         assert_eq!(
             encoded_count.load(Ordering::SeqCst),
-            frame_number - recreated_stream_start_frame_number,
+            unit_number - recreated_stream_start_unit_number,
         );
 
         pool.set_pool_size(0);
