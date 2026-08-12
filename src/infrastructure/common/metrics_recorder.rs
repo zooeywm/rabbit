@@ -29,7 +29,6 @@ pub(crate) struct OpenTelemetryMetricsRecorder;
 #[derive(Default)]
 struct CompletedSourceFrameIds {
     captured: HashSet<FrameId>,
-    converted: HashSet<FrameId>,
     encoded: HashSet<FrameId>,
     packetized: HashSet<FrameId>,
 }
@@ -37,7 +36,6 @@ struct CompletedSourceFrameIds {
 #[derive(Clone, Copy, Default)]
 pub(super) struct CompletedSourceFrameCounts {
     pub(super) captured: usize,
-    pub(super) converted: usize,
     pub(super) encoded: usize,
     pub(super) packetized: usize,
 }
@@ -57,7 +55,6 @@ pub(super) struct TargetResourceUsageSnapshots {
 #[derive(Clone, Copy)]
 enum SourceFrameStage {
     Capture,
-    Convert,
     Encode,
     Packetize,
 }
@@ -221,7 +218,7 @@ where
         );
     }
 
-    fn record_converted_frame(&self, frame_id: FrameId, duration: std::time::Duration) {
+    fn record_converted_frame(&self, _frame_id: FrameId, duration: std::time::Duration) {
         let target = *self.prj_ref().as_ref();
         let MetricsTarget::Stream {
             capture_source_id,
@@ -230,8 +227,6 @@ where
         else {
             unreachable!("converted frames require a stream metrics target");
         };
-        record_completed_source_frame(target, SourceFrameStage::Convert, frame_id);
-
         Instruments::global().convert_duration.record(
             duration.as_secs_f64() * 1_000.0,
             &[
@@ -306,7 +301,6 @@ pub(super) fn take_completed_source_frame_counts()
                 target,
                 CompletedSourceFrameCounts {
                     captured: frames.captured.len(),
-                    converted: frames.converted.len(),
                     encoded: frames.encoded.len(),
                     packetized: frames.packetized.len(),
                 },
@@ -364,7 +358,6 @@ fn record_completed_source_frame(
 
     match stage {
         SourceFrameStage::Capture => frames.captured.insert(frame_id),
-        SourceFrameStage::Convert => frames.converted.insert(frame_id),
         SourceFrameStage::Encode => frames.encoded.insert(frame_id),
         SourceFrameStage::Packetize => frames.packetized.insert(frame_id),
     };

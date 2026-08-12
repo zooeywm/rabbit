@@ -51,7 +51,10 @@ impl ResourceUsage {
 
     pub(crate) fn decrement_used(&self) {
         let previous = self.used.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(previous > 0, "resource usage must be positive before decrement");
+        debug_assert!(
+            previous > 0,
+            "resource usage must be positive before decrement"
+        );
     }
 
     pub(crate) fn snapshot(&self) -> ResourceUsageSnapshot {

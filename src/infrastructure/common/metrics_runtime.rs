@@ -48,6 +48,10 @@ pub(crate) fn init_metrics() -> MetricsRuntime {
         .build();
 
     global::set_meter_provider(meter_provider.clone());
+    tracing::info!(
+        target: "rabbit::metrics",
+        "runtime metrics initialized: ms=(avg p50 p95 p99)"
+    );
 
     MetricsRuntime { meter_provider }
 }
@@ -154,7 +158,6 @@ struct SourceMetrics {
 
 #[derive(Default)]
 struct StreamMetrics {
-    completed_converted_frames: usize,
     completed_encoded_frames: usize,
     completed_packetized_frames: usize,
     packetizer_queue: ResourceUsageSnapshot,
@@ -199,6 +202,10 @@ fn export_registered_targets(
         }
     }
 
+    if source_metrics.is_empty() {
+        return;
+    }
+
     for metric in resource_metrics
         .scope_metrics()
         .flat_map(|scope_metrics| scope_metrics.metrics())
@@ -227,7 +234,6 @@ fn export_registered_targets(
                     .and_then(|source| source.streams.get_mut(stream_id))
                     .expect("registered stream metrics should exist");
 
-                stream.completed_converted_frames = completed_frames.converted;
                 stream.completed_encoded_frames = completed_frames.encoded;
                 stream.completed_packetized_frames = completed_frames.packetized;
             }
@@ -266,48 +272,51 @@ fn export_registered_targets(
     let mut capture_source_ids = source_metrics.keys().copied().collect::<Vec<_>>();
     capture_source_ids.sort_unstable_by_key(|capture_source_id| capture_source_id.value());
 
-    for capture_source_id in capture_source_ids {
-        let values = &source_metrics[&capture_source_id];
-        let capture_fps = frames_per_second(values.completed_capture_frames, export_period);
-        let capture_ms = format_duration(values.capture_duration);
-        let mut streams = values.streams.iter().collect::<Vec<_>>();
+    let sources = capture_source_ids
+        .into_iter()
+        .map(|capture_source_id| {
+            let values = &source_metrics[&capture_source_id];
+            let capture_fps =
+                frames_per_second(values.completed_capture_frames, export_period);
+            let capture_ms = format_duration(values.capture_duration);
+            let mut streams = values.streams.iter().collect::<Vec<_>>();
 
-        streams.sort_unstable_by_key(|(stream_id, _)| stream_id.value());
+            streams.sort_unstable_by_key(|(stream_id, _)| stream_id.value());
 
-        let streams = streams
-            .into_iter()
-            .map(|(stream_id, values)| {
-                format!(
-                    "{{stream_id={} source_frame_fps={{converted={:.2} encoded={:.2} packetized={:.2}}} packetizer_queue={{used={} total={}}} convert_ms={} encode_ms={} packetize_ms={}}}",
-                    stream_id.value(),
-                    frames_per_second(values.completed_converted_frames, export_period),
-                    frames_per_second(values.completed_encoded_frames, export_period),
-                    frames_per_second(values.completed_packetized_frames, export_period),
-                    values.packetizer_queue.used,
-                    values.packetizer_queue.total,
-                    format_duration(values.convert_duration),
-                    format_duration(values.encode_duration),
-                    format_duration(values.packetize_duration),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let streams = format!("[{streams}]");
+            let streams = streams
+                .into_iter()
+                .map(|(stream_id, values)| {
+                    format!(
+                        "{{id={} enc_fps={:.2} cvt_ms={} enc_ms={} pkt_fps={:.2} pkt_queue={}/{} pkt_ms={}}}",
+                        stream_id.value(),
+                        frames_per_second(values.completed_encoded_frames, export_period),
+                        format_duration(values.convert_duration),
+                        format_duration(values.encode_duration),
+                        frames_per_second(values.completed_packetized_frames, export_period),
+                        values.packetizer_queue.used,
+                        values.packetizer_queue.total,
+                        format_duration(values.packetize_duration),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let streams = format!("[{streams}]");
 
-        tracing::info!(
-            target: "rabbit::metrics",
-            capture_source_id = capture_source_id.value(),
-            capture_fps = %format_args!("{capture_fps:.2}"),
-            capture_pool = %format_args!(
-                "{{used={} total={}}}",
+            format!(
+                "{{id={} cap_fps={capture_fps:.2} cap_pool={}/{} cap_ms={} streams={streams}}}",
+                capture_source_id.value(),
                 values.capture_pool.used,
                 values.capture_pool.total,
-            ),
-            capture_ms = %capture_ms,
-            streams = %streams,
-            "runtime metrics"
-        );
-    }
+                capture_ms,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    tracing::info!(
+        target: "rabbit::metrics",
+        "runtime metrics: sources=[{sources}]"
+    );
 }
 
 fn aggregate_duration_metric(
@@ -414,7 +423,7 @@ fn frames_per_second(frame_count: usize, export_period: Duration) -> f64 {
 
 fn format_duration(duration: DurationMetrics) -> String {
     format!(
-        "{{avg={:.3} p50={:.3} p95={:.3} p99={:.3}}}",
+        "{{{:.3} {:.3} {:.3} {:.3}}}",
         duration.average_ms, duration.p50_ms, duration.p95_ms, duration.p99_ms,
     )
 }
