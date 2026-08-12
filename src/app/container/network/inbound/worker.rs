@@ -165,6 +165,7 @@ where
         PacketizedSendSender::channel();
     let (received_sender, received_receiver) = flume::bounded(1);
     let (event_shutdown_sender, event_shutdown_receiver) = flume::bounded(1);
+    let (send_shutdown_sender, send_shutdown_receiver) = flume::bounded(1);
     let (receive_shutdown_sender, receive_shutdown_receiver) = flume::bounded(1);
 
     network.register_network_queue_usage(encoded_receiver.usage());
@@ -184,7 +185,6 @@ where
                 packetize_permits,
                 client_event_sender,
                 event_shutdown_receiver,
-                worker_shutdown_receiver,
             )
             .await,
         )
@@ -194,6 +194,7 @@ where
             run_send_loop::<NetworkContainer<State>>(
                 sender,
                 packetized_receiver,
+                send_shutdown_receiver,
                 NetworkMetricsHandle::new(),
             )
             .await,
@@ -211,10 +212,29 @@ where
     }));
 
     let mut first_error = None;
-    let mut event_loop_finished = false;
-    let mut send_loop_finished = false;
-    let mut receive_loop_finished = false;
-    while let Some(joined) = tasks.next().await {
+    let mut shutdown_started = false;
+    while !tasks.is_empty() {
+        let joined = if shutdown_started {
+            tasks.next().await
+        } else {
+            let worker_shutdown = worker_shutdown_receiver.recv_async().fuse();
+            let task_exit = tasks.next().fuse();
+            futures_util::pin_mut!(worker_shutdown, task_exit);
+
+            futures_util::select_biased! {
+                joined = task_exit => joined,
+                _ = worker_shutdown => {
+                    shutdown_started = true;
+                    let _ = event_shutdown_sender.try_send(());
+                    let _ = send_shutdown_sender.try_send(());
+                    let _ = receive_shutdown_sender.try_send(());
+                    None
+                },
+            }
+        };
+        let Some(joined) = joined else {
+            continue;
+        };
         let exit = match joined {
             Ok(exit) => exit,
             Err(error) => {
@@ -223,35 +243,28 @@ where
                     first_error = Some(eros::error!("Network task failed to join"));
                 }
                 let _ = event_shutdown_sender.try_send(());
+                let _ = send_shutdown_sender.try_send(());
                 let _ = receive_shutdown_sender.try_send(());
+                shutdown_started = true;
                 continue;
             }
         };
 
-        let (is_event_loop, is_send_loop, is_receive_loop, result) = match exit {
-            NetworkTaskExit::EventLoop(result) => (true, false, false, result),
-            NetworkTaskExit::SendLoop(result) => (false, true, false, result),
-            NetworkTaskExit::ReceiveLoop(result) => (false, false, true, result),
+        let result = match exit {
+            NetworkTaskExit::EventLoop(result)
+            | NetworkTaskExit::SendLoop(result)
+            | NetworkTaskExit::ReceiveLoop(result) => result,
         };
 
         if let Err(error) = result {
             if first_error.is_none() {
                 first_error = Some(error);
             }
-            let _ = event_shutdown_sender.try_send(());
-            let _ = receive_shutdown_sender.try_send(());
-        } else {
-            event_loop_finished |= is_event_loop;
-            send_loop_finished |= is_send_loop;
-            receive_loop_finished |= is_receive_loop;
-
-            if is_receive_loop && !event_loop_finished {
-                let _ = event_shutdown_sender.try_send(());
-            }
-            if event_loop_finished && send_loop_finished && !receive_loop_finished {
-                let _ = receive_shutdown_sender.try_send(());
-            }
         }
+        shutdown_started = true;
+        let _ = event_shutdown_sender.try_send(());
+        let _ = send_shutdown_sender.try_send(());
+        let _ = receive_shutdown_sender.try_send(());
     }
 
     match first_error {
@@ -267,8 +280,7 @@ async fn run_network_event_loop<Network>(
     packetized_sender: PacketizedSendSender<Network::Packetized>,
     packetize_permits: PacketizePermitReceiver,
     client_event_sender: NetworkClientEventSender<Network::Depacketized>,
-    supervisor_shutdown_receiver: flume::Receiver<()>,
-    worker_shutdown_receiver: flume::Receiver<()>,
+    shutdown_receiver: flume::Receiver<()>,
 ) -> eros::Result<()>
 where
     Network: TransporterHostSide + TransporterClientSide,
@@ -285,8 +297,7 @@ where
         let receive_encoded = send_loop_alive && may_packetize;
         let receive_network =
             receive_loop_alive && client_event_sink_alive && may_route_client_event;
-        let supervisor_shutdown = supervisor_shutdown_receiver.recv_async().fuse();
-        let worker_shutdown = worker_shutdown_receiver.recv_async().fuse();
+        let shutdown = shutdown_receiver.recv_async().fuse();
         let packetize_permit = async {
             if wait_for_packetize_permit {
                 packetize_permits.acquire().await
@@ -320,8 +331,7 @@ where
         }
         .fuse();
         futures_util::pin_mut!(
-            supervisor_shutdown,
-            worker_shutdown,
+            shutdown,
             packetize_permit,
             client_event_permit,
             encoded,
@@ -329,8 +339,7 @@ where
         );
 
         futures_util::select! {
-            _ = supervisor_shutdown => break,
-            _ = worker_shutdown => break,
+            _ = shutdown => break,
             permit = packetize_permit => {
                 match permit {
                     Ok(()) => may_packetize = true,
@@ -382,17 +391,37 @@ impl Drop for NetworkQueueMetricsGuard {
 async fn run_send_loop<Network>(
     mut sender: Network::Sender,
     packetized_receiver: PacketizedSendReceiver<Network::Packetized>,
+    shutdown_receiver: flume::Receiver<()>,
     metrics: impl NetworkMetricsRecorder,
 ) -> eros::Result<()>
 where
     Network: TransporterHostSide,
 {
-    while let Some(packetized) = packetized_receiver.receive().await {
+    loop {
+        let shutdown = shutdown_receiver.recv_async().fuse();
+        let receive = packetized_receiver.receive().fuse();
+        futures_util::pin_mut!(shutdown, receive);
+
+        let packetized = futures_util::select_biased! {
+            _ = shutdown => break,
+            packetized = receive => packetized,
+        };
+        let Some(packetized) = packetized else {
+            break;
+        };
+
+        let shutdown = shutdown_receiver.recv_async().fuse();
+        let send = Network::send(&mut sender, packetized).fuse();
+        futures_util::pin_mut!(shutdown, send);
+        let sent = futures_util::select_biased! {
+            _ = shutdown => break,
+            sent = send => sent?,
+        };
         let SentBytes {
             capture_source_id,
             stream_id,
             bytes,
-        } = Network::send(&mut sender, packetized).await?;
+        } = sent;
         metrics.record_sent_bytes(capture_source_id, stream_id, bytes);
     }
     Ok(())
@@ -418,7 +447,17 @@ where
         let Some(received) = received else {
             break;
         };
-        let _ = received_sender.send_async(received).await;
+        let shutdown = shutdown_receiver.recv_async().fuse();
+        let forward = received_sender.send_async(received).fuse();
+        futures_util::pin_mut!(shutdown, forward);
+        futures_util::select_biased! {
+            _ = shutdown => break,
+            result = forward => {
+                if result.is_err() {
+                    break;
+                }
+            },
+        }
     }
     Ok(())
 }
@@ -440,6 +479,7 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         },
         thread,
+        time::Duration,
     };
 
     use super::*;
@@ -448,32 +488,51 @@ mod tests {
         domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
     };
 
-    struct NonSendTransporterState(PhantomData<Rc<()>>);
-
-    struct DrainTransporterState {
-        packetized_sender: flume::Sender<u64>,
-        sender: Option<DrainSender>,
-        receiver: Option<(flume::Sender<()>, flume::Receiver<()>)>,
+    struct NonSendTransporterState {
+        _not_send: PhantomData<Rc<()>>,
+        caller_thread_id: thread::ThreadId,
+        dropped_on_network_thread: Arc<AtomicBool>,
     }
 
-    struct DrainSender {
+    struct CancellationTransporterState {
+        packetized_sender: flume::Sender<u64>,
+        sender: Option<CancellationSender>,
+        receiver: Option<CancellationReceiver>,
+    }
+
+    struct CancellationSender {
         gate_receiver: flume::Receiver<()>,
+        send_started_sender: flume::Sender<u64>,
         sent: Arc<Mutex<Vec<u64>>>,
     }
 
+    enum CancellationReceiver {
+        Pending(flume::Sender<()>, flume::Receiver<()>),
+        Fail,
+    }
+
+    impl Drop for NonSendTransporterState {
+        fn drop(&mut self) {
+            self.dropped_on_network_thread.store(
+                thread::current().id() != self.caller_thread_id,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
     impl TransporterHostSide
-        for crate::app::container::network::NetworkContainer<DrainTransporterState>
+        for crate::app::container::network::NetworkContainer<CancellationTransporterState>
     {
         type EncodedBuffer = u64;
         type Packetized = u64;
-        type Sender = DrainSender;
+        type Sender = CancellationSender;
 
         fn take_sender(&mut self) -> eros::Result<Self::Sender> {
             Ok(self
                 .state_mut()
                 .sender
                 .take()
-                .with_context(|| "Drain test sender has already been taken")?)
+                .with_context(|| "Cancellation test sender has already been taken")?)
         }
 
         fn packetize(
@@ -484,7 +543,7 @@ mod tests {
             self.state_mut()
                 .packetized_sender
                 .send(unit.data)
-                .with_context(|| "Drain test stopped observing packetized units")?;
+                .with_context(|| "Cancellation test stopped observing packetized units")?;
             Ok(unit.data)
         }
 
@@ -493,14 +552,18 @@ mod tests {
             packetized: Self::Packetized,
         ) -> eros::Result<SentBytes> {
             sender
+                .send_started_sender
+                .send(packetized)
+                .with_context(|| "Cancellation test stopped observing started sends")?;
+            sender
                 .gate_receiver
                 .recv_async()
                 .await
-                .with_context(|| "Drain test send gate closed")?;
+                .with_context(|| "Cancellation test send gate closed")?;
             sender
                 .sent
                 .lock()
-                .expect("drain test sent mutex should not be poisoned")
+                .expect("cancellation test sent mutex should not be poisoned")
                 .push(packetized);
             Ok(SentBytes::new(
                 CaptureSourceId::new(0),
@@ -511,9 +574,9 @@ mod tests {
     }
 
     impl TransporterClientSide
-        for crate::app::container::network::NetworkContainer<DrainTransporterState>
+        for crate::app::container::network::NetworkContainer<CancellationTransporterState>
     {
-        type Receiver = (flume::Sender<()>, flume::Receiver<()>);
+        type Receiver = CancellationReceiver;
         type Received = ();
         type Depacketized = ();
 
@@ -522,11 +585,18 @@ mod tests {
                 .state_mut()
                 .receiver
                 .take()
-                .with_context(|| "Drain test receiver has already been taken")?)
+                .with_context(|| "Cancellation test receiver has already been taken")?)
         }
 
         async fn receive(receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
-            Ok(receiver.1.recv_async().await.ok())
+            match receiver {
+                CancellationReceiver::Pending(_sender, receiver) => {
+                    Ok(receiver.recv_async().await.ok())
+                }
+                CancellationReceiver::Fail => {
+                    eros::bail!("Intentional receive failure")
+                }
+            }
         }
 
         fn depacketize(
@@ -544,6 +614,29 @@ mod tests {
             false,
             value,
         )
+    }
+
+    fn pending_cancellation_receiver() -> CancellationReceiver {
+        let (sender, receiver) = flume::unbounded();
+        CancellationReceiver::Pending(sender, receiver)
+    }
+
+    fn shutdown_with_timeout(worker: NetworkWorkerHandle<u64, ()>) -> eros::Result<()> {
+        let (result_sender, result_receiver) = mpsc::sync_channel(1);
+        let shutdown_thread = thread::spawn(move || {
+            let result = match compio::runtime::Runtime::new() {
+                Ok(runtime) => runtime.block_on(worker.shutdown()),
+                Err(_) => Err(eros::error!("Failed to create shutdown test runtime")),
+            };
+            let _ = result_sender.send(result);
+        });
+        let result = result_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .with_context(|| "Network worker shutdown did not complete promptly")?;
+        shutdown_thread
+            .join()
+            .map_err(|_| eros::error!("Network worker shutdown test thread panicked"))?;
+        result
     }
 
     impl TransporterHostSide
@@ -597,19 +690,25 @@ mod tests {
     }
 
     #[test]
-    fn constructs_non_send_transporter_on_the_network_thread() {
+    fn constructs_and_drops_non_send_transporter_on_the_network_thread() {
         let caller_thread_id = thread::current().id();
         let constructed_on_network_thread = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&constructed_on_network_thread);
+        let constructed_flag = Arc::clone(&constructed_on_network_thread);
+        let dropped_on_network_thread = Arc::new(AtomicBool::new(false));
+        let dropped_flag = Arc::clone(&dropped_on_network_thread);
         let (app_message_sender, _app_message_receiver) = flume::unbounded();
 
         let worker = NetworkWorker::spawn(
             move || {
-                flag.store(
+                constructed_flag.store(
                     thread::current().id() != caller_thread_id,
                     Ordering::Relaxed,
                 );
-                Ok(NonSendTransporterState(PhantomData))
+                Ok(NonSendTransporterState {
+                    _not_send: PhantomData,
+                    caller_thread_id,
+                    dropped_on_network_thread: dropped_flag,
+                })
             },
             app_message_sender,
         )
@@ -620,24 +719,27 @@ mod tests {
             .block_on(worker.shutdown())
             .expect("network worker should stop");
         assert!(constructed_on_network_thread.load(Ordering::Relaxed));
+        assert!(dropped_on_network_thread.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn shutdown_drains_the_in_flight_and_queued_packetized_units() -> eros::Result<()> {
+    fn shutdown_cancels_a_blocked_in_flight_send() -> eros::Result<()> {
         let (gate_sender, gate_receiver) = flume::unbounded();
         let (packetized_sender, packetized_receiver) = flume::unbounded();
+        let (send_started_sender, send_started_receiver) = flume::unbounded();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sent_from_network = Arc::clone(&sent);
         let (app_message_sender, _app_message_receiver) = flume::unbounded();
         let mut worker = NetworkWorker::spawn(
             move || {
-                Ok(DrainTransporterState {
+                Ok(CancellationTransporterState {
                     packetized_sender,
-                    sender: Some(DrainSender {
+                    sender: Some(CancellationSender {
                         gate_receiver,
+                        send_started_sender,
                         sent: sent_from_network,
                     }),
-                    receiver: Some(flume::unbounded()),
+                    receiver: Some(pending_cancellation_receiver()),
                 })
             },
             app_message_sender,
@@ -646,40 +748,67 @@ mod tests {
         let _client_event_receiver = worker.take_client_event_receiver()?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
-        let runtime = compio::runtime::Runtime::new()?;
-        runtime.block_on(async {
-            packetized_receiver
-                .recv_async()
-                .await
-                .with_context(|| "First unit was not packetized")?;
-            encoded_sender.send(StreamId::new(0), encoded_unit(2))?;
-            packetized_receiver
-                .recv_async()
-                .await
-                .with_context(|| "Second unit was not packetized")?;
-            drop(encoded_sender);
+        assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);
+        assert_eq!(
+            send_started_receiver.recv_timeout(Duration::from_secs(1))?,
+            1
+        );
+        drop(encoded_sender);
 
-            let (shutdown_result, release_result) = futures_util::join!(worker.shutdown(), async {
-                gate_sender
-                    .send_async(())
-                    .await
-                    .with_context(|| "Failed to release in-flight send")?;
-                gate_sender
-                    .send_async(())
-                    .await
-                    .with_context(|| "Failed to release queued send")?;
-                eros::Result::<()>::Ok(())
-            });
-            release_result?;
-            shutdown_result
-        })?;
+        shutdown_with_timeout(worker)?;
+
+        assert!(
+            sent.lock()
+                .expect("cancellation test sent mutex should not be poisoned")
+                .is_empty()
+        );
+        assert!(gate_sender.is_disconnected());
+        Ok(())
+    }
+
+    #[test]
+    fn shutdown_drops_a_queued_packetized_unit() -> eros::Result<()> {
+        let (gate_sender, gate_receiver) = flume::unbounded();
+        let (packetized_sender, packetized_receiver) = flume::unbounded();
+        let (send_started_sender, send_started_receiver) = flume::unbounded();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sent_from_network = Arc::clone(&sent);
+        let (app_message_sender, _app_message_receiver) = flume::unbounded();
+        let mut worker = NetworkWorker::spawn(
+            move || {
+                Ok(CancellationTransporterState {
+                    packetized_sender,
+                    sender: Some(CancellationSender {
+                        gate_receiver,
+                        send_started_sender,
+                        sent: sent_from_network,
+                    }),
+                    receiver: Some(pending_cancellation_receiver()),
+                })
+            },
+            app_message_sender,
+        )?;
+        let encoded_sender = worker.sender();
+        let _client_event_receiver = worker.take_client_event_receiver()?;
+        encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(
-            *sent
-                .lock()
-                .expect("drain test sent mutex should not be poisoned"),
-            vec![1, 2]
+            send_started_receiver.recv_timeout(Duration::from_secs(1))?,
+            1
         );
+        encoded_sender.send(StreamId::new(0), encoded_unit(2))?;
+        assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);
+        assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 2);
+        drop(encoded_sender);
+
+        shutdown_with_timeout(worker)?;
+
+        assert!(
+            sent.lock()
+                .expect("cancellation test sent mutex should not be poisoned")
+                .is_empty()
+        );
+        assert!(gate_sender.is_disconnected());
         Ok(())
     }
 
@@ -687,17 +816,19 @@ mod tests {
     fn send_failure_cancels_the_other_network_tasks_and_reaches_shutdown() -> eros::Result<()> {
         let (gate_sender, gate_receiver) = flume::unbounded();
         let (packetized_sender, packetized_receiver) = flume::unbounded();
+        let (send_started_sender, send_started_receiver) = flume::unbounded();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let (app_message_sender, _app_message_receiver) = flume::unbounded();
         let mut worker = NetworkWorker::spawn(
             move || {
-                Ok(DrainTransporterState {
+                Ok(CancellationTransporterState {
                     packetized_sender,
-                    sender: Some(DrainSender {
+                    sender: Some(CancellationSender {
                         gate_receiver,
+                        send_started_sender,
                         sent,
                     }),
-                    receiver: Some(flume::unbounded()),
+                    receiver: Some(pending_cancellation_receiver()),
                 })
             },
             app_message_sender,
@@ -706,17 +837,46 @@ mod tests {
         let _client_event_receiver = worker.take_client_event_receiver()?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
-        let runtime = compio::runtime::Runtime::new()?;
-        runtime.block_on(async {
-            packetized_receiver
-                .recv_async()
-                .await
-                .with_context(|| "Failure test unit was not packetized")?;
-            drop(gate_sender);
-            drop(encoded_sender);
-            assert!(worker.shutdown().await.is_err());
-            eros::Result::<()>::Ok(())
-        })
+        assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);
+        assert_eq!(
+            send_started_receiver.recv_timeout(Duration::from_secs(1))?,
+            1
+        );
+        drop(gate_sender);
+
+        let error = shutdown_with_timeout(worker).expect_err("send should fail");
+        let error_debug = format!("{error:?}");
+        assert!(
+            error_debug.contains("Cancellation test send gate closed"),
+            "unexpected send error: {error:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn receive_failure_cancels_the_other_network_tasks_and_reaches_shutdown() -> eros::Result<()> {
+        let (_gate_sender, gate_receiver) = flume::unbounded();
+        let (packetized_sender, _packetized_receiver) = flume::unbounded();
+        let (send_started_sender, _send_started_receiver) = flume::unbounded();
+        let (app_message_sender, _app_message_receiver) = flume::unbounded();
+        let worker = NetworkWorker::spawn(
+            move || {
+                Ok(CancellationTransporterState {
+                    packetized_sender,
+                    sender: Some(CancellationSender {
+                        gate_receiver,
+                        send_started_sender,
+                        sent: Arc::new(Mutex::new(Vec::new())),
+                    }),
+                    receiver: Some(CancellationReceiver::Fail),
+                })
+            },
+            app_message_sender,
+        )?;
+
+        let error = shutdown_with_timeout(worker).expect_err("receive should fail");
+        assert!(format!("{error:?}").contains("Intentional receive failure"));
+        Ok(())
     }
 
     #[test]

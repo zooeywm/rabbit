@@ -70,7 +70,9 @@ impl FakeTransporterSender {
 
 impl FakeTransporterReceiver {
     pub(crate) async fn receive(&mut self) -> eros::Result<Option<FakeReceived>> {
-        Ok(self.receiver.recv_async().await.ok())
+        Ok(Some(self.receiver.recv_async().await.with_context(
+            || "Fake transporter sender stopped while the connection was active",
+        )?))
     }
 }
 
@@ -174,6 +176,24 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(sender.sent_unit_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn fake_receive_propagates_an_unexpected_closed_wire() -> eros::Result<()> {
+        let mut state = FakeTransporterState::new()?;
+        drop(state.sender.take());
+        let mut receiver = state.receiver.take().expect("fake receiver should exist");
+        let runtime = compio::runtime::Runtime::new()?;
+        let error = match runtime.block_on(receiver.receive()) {
+            Ok(_) => panic!("closed fake wire should fail while active"),
+            Err(error) => error,
+        };
+
+        assert!(
+            format!("{error:?}")
+                .contains("Fake transporter sender stopped while the connection was active")
+        );
         Ok(())
     }
 }
