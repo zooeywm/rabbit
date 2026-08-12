@@ -5,14 +5,8 @@ mod runtime;
 
 use config::Config;
 use container::{
-    host::{
-        CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer, HostStreamPipelineFor,
-        outbound_port::{
-            CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
-            EncoderManager, EncoderManagerStateSpec,
-        },
-    },
-    host_stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
+    client::inbound_port::ClientApplication,
+    host::inbound_port::HostApplication,
     network::{NetworkContainer, outbound_port::Transporter},
     root::{
         AppContainer, TransporterStateFor,
@@ -27,28 +21,22 @@ use runtime::AppRuntime;
 
 pub(crate) use runtime::AppHandle;
 
-pub(crate) fn run<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt, AppRuntimeGuard>(
+pub(crate) fn run<Host, Client, NetworkConstructorState, AppRuntimeGuard>(
     app_constructor: impl FnOnce() -> eros::Result<(
-        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>,
+        AppContainer<Host, Client, NetworkConstructorState>,
         AppRuntimeGuard,
     )> + Send
     + 'static,
     run_presentation: impl FnOnce(AppHandle) -> eros::Result<()>,
 ) -> eros::Result<()>
 where
-    CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
-    TprCstSt: TransporterConstructorStateSpec,
-    NetworkContainer<TransporterStateFor<TprCstSt>>:
-        Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>> + NetworkMetricsRecorder,
-    HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
-        + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>,
-    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: TransporterConstructor<State = TprCstSt>,
-    HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
-        + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
-    EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
+    Host: HostApplication,
+    Client: ClientApplication,
+    NetworkConstructorState: TransporterConstructorStateSpec,
+    NetworkContainer<TransporterStateFor<NetworkConstructorState>>:
+        Transporter<EncodedBuffer = Host::EncodedBuffer> + NetworkMetricsRecorder,
+    AppContainer<Host, Client, NetworkConstructorState>:
+        TransporterConstructor<State = NetworkConstructorState>,
 {
     let project_dirs = ProjectDirs::from("", "", "rabbit")
         .with_context(|| "Failed looking for app project dir")?;

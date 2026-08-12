@@ -1,3 +1,4 @@
+pub(crate) mod client;
 pub(crate) mod host;
 pub(crate) mod host_stream_pipeline;
 pub(crate) mod network;

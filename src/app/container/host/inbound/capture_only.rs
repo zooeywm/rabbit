@@ -1,5 +1,3 @@
-use crate::app::runtime::capture_only::CaptureOnlyMessage;
-
 use super::*;
 
 impl<CapMgrSt, CvtMgrSt, EcdMgrSt> HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
@@ -14,10 +12,10 @@ where
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
 {
-    async fn start_capture_only(
+    pub(super) async fn start_capture_only<EventReporter: HostEventReporter>(
         &mut self,
         capture_source_id: CaptureSourceId,
-        app_message_sender: &flume::Sender<AppMessage>,
+        event_reporter: EventReporter,
     ) -> eros::Result<()> {
         if self
             .capture_source_runtimes
@@ -29,10 +27,10 @@ where
         let screen_capturer_state_constructor =
             self.compose_screen_capturer_state(capture_source_id);
         let capture_worker_handle =
-            CaptureWorker::spawn_capture_only::<CapMgrSt::ScreenCapturer, _>(
+            CaptureWorker::spawn_capture_only::<CapMgrSt::ScreenCapturer, _, _>(
                 capture_source_id,
                 screen_capturer_state_constructor,
-                app_message_sender.clone(),
+                event_reporter,
             )
             .await?;
 
@@ -44,7 +42,10 @@ where
         Ok(())
     }
 
-    async fn stop_capture_only(&mut self, capture_source_id: CaptureSourceId) -> eros::Result<()> {
+    pub(super) async fn stop_capture_only(
+        &mut self,
+        capture_source_id: CaptureSourceId,
+    ) -> eros::Result<()> {
         let capture_source_runtime = self
             .capture_source_runtimes
             .get(&capture_source_id)
@@ -60,29 +61,5 @@ where
             .with_context(|| "Capture source disappeared before shutdown")?;
 
         capture_source_runtime.shutdown().await
-    }
-
-    pub(crate) async fn handle_capture_only_message(
-        &mut self,
-        message: CaptureOnlyMessage,
-        app_message_sender: &flume::Sender<AppMessage>,
-    ) {
-        match message {
-            CaptureOnlyMessage::Start {
-                capture_source_id,
-                response_sender,
-            } => {
-                let _ = response_sender.send(
-                    self.start_capture_only(capture_source_id, app_message_sender)
-                        .await,
-                );
-            }
-            CaptureOnlyMessage::Stop {
-                capture_source_id,
-                response_sender,
-            } => {
-                let _ = response_sender.send(self.stop_capture_only(capture_source_id).await);
-            }
-        }
     }
 }

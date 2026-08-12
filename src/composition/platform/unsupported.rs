@@ -2,6 +2,7 @@ use std::convert::Infallible;
 
 use crate::{
     app::container::{
+        client::ClientContainer,
         host::{
             HostContainer,
             outbound_port::{
@@ -253,20 +254,16 @@ impl TransporterConstructorStateSpec for UnsupportedTransporterConstructorState 
     type TransporterState = UnsupportedTransporterState;
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> AsRef<UnsupportedTransporterConstructorState>
-    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, UnsupportedTransporterConstructorState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
+impl<Host, Client> AsRef<UnsupportedTransporterConstructorState>
+    for AppContainer<Host, Client, UnsupportedTransporterConstructorState>
 {
     fn as_ref(&self) -> &UnsupportedTransporterConstructorState {
         self.network_constructor_state()
     }
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> TransporterConstructor
-    for AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, UnsupportedTransporterConstructorState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
+impl<Host, Client> TransporterConstructor
+    for AppContainer<Host, Client, UnsupportedTransporterConstructorState>
 {
     type State = UnsupportedTransporterConstructorState;
 
@@ -277,7 +274,7 @@ where
             -> eros::Result<<Self::State as TransporterConstructorStateSpec>::TransporterState>
         + Send
         + 'static
-        + use<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+        + use<Host, Client>,
     > {
         TransporterConstructor::compose_transporter_state(
             UnsupportedTransporterConstructorImpl::inj_ref(self),
@@ -285,21 +282,25 @@ where
     }
 }
 
-pub(super) type PlatformApp = AppContainer<
+pub(super) type PlatformHost = HostContainer<
     UnsupportedCapturerManagerState,
     UnsupportedConverterManagerState,
     UnsupportedEncoderManagerState,
-    UnsupportedTransporterConstructorState,
 >;
+pub(super) type PlatformClient = ClientContainer;
+pub(super) type PlatformNetworkConstructorState = UnsupportedTransporterConstructorState;
+pub(super) type PlatformApp =
+    AppContainer<PlatformHost, PlatformClient, PlatformNetworkConstructorState>;
 
 pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
     || {
         Ok(AppContainer::new(
-            HostContainer::new(
+            PlatformHost::new(
                 UnsupportedCapturerManagerState::new()?,
                 UnsupportedConverterManagerState::new()?,
                 UnsupportedEncoderManagerState::new()?,
             ),
+            PlatformClient::new(),
             UnsupportedTransporterConstructorState::new()?,
         ))
     }

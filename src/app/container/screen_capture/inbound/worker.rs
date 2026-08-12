@@ -10,11 +10,10 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        host::outbound_port::MetricsRecorder,
+        host::outbound_port::{HostEventReporter, MetricsRecorder},
         host_stream_pipeline::inbound::LatestFrameSlot,
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
     },
-    app::runtime::AppMessage,
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
@@ -38,10 +37,10 @@ enum CaptureCommand<Frame> {
     Shutdown,
 }
 
-struct CaptureWorkerExitGuard<Frame> {
+struct CaptureWorkerExitGuard<Frame, EventReporter: HostEventReporter> {
     capture_source_id: CaptureSourceId,
     state: Rc<RefCell<CaptureWorkerState<Frame>>>,
-    app_message_sender: flume::Sender<AppMessage>,
+    event_reporter: EventReporter,
 }
 
 pub(crate) struct CaptureWorker;
@@ -53,33 +52,35 @@ pub(crate) struct CaptureWorkerHandle<Capturer: ScreenCapturer> {
 }
 
 impl CaptureWorker {
-    pub(crate) async fn spawn<Capturer, State>(
+    pub(crate) async fn spawn<Capturer, State, EventReporter>(
         capture_source_id: CaptureSourceId,
         screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
         initial_stream_id: StreamId,
         initial_frame_slot: Arc<LatestFrameSlot<Capturer::CapturedFrame>>,
-        app_message_sender: flume::Sender<AppMessage>,
+        event_reporter: EventReporter,
     ) -> eros::Result<CaptureWorkerHandle<Capturer>>
     where
         Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
+        EventReporter: HostEventReporter,
     {
         Self::spawn_with_frame_slots(
             capture_source_id,
             screen_capturer_state_constructor,
             HashMap::from([(initial_stream_id, initial_frame_slot)]),
-            app_message_sender,
+            event_reporter,
         )
         .await
     }
 
-    async fn spawn_with_frame_slots<Capturer, State>(
+    async fn spawn_with_frame_slots<Capturer, State, EventReporter>(
         capture_source_id: CaptureSourceId,
         screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State> + Send + 'static,
         initial_frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Capturer::CapturedFrame>>>,
-        app_message_sender: flume::Sender<AppMessage>,
+        event_reporter: EventReporter,
     ) -> eros::Result<CaptureWorkerHandle<Capturer>>
     where
         Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
+        EventReporter: HostEventReporter,
     {
         let (command_sender, command_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = flume::bounded(1);
@@ -87,12 +88,12 @@ impl CaptureWorker {
         let worker_thread = thread::Builder::new()
             .name("capture".to_owned())
             .spawn(move || {
-                run_capture_worker::<Capturer, State>(
+                run_capture_worker::<Capturer, State, EventReporter>(
                     capture_source_id,
                     screen_capturer_state_constructor,
                     initial_frame_slots,
                     command_receiver,
-                    app_message_sender,
+                    event_reporter,
                     started_sender,
                 )
             })
@@ -201,33 +202,33 @@ impl<Capturer: ScreenCapturer> CaptureWorkerHandle<Capturer> {
     }
 }
 
-impl<Frame> Drop for CaptureWorkerExitGuard<Frame> {
+impl<Frame, EventReporter: HostEventReporter> Drop
+    for CaptureWorkerExitGuard<Frame, EventReporter>
+{
     fn drop(&mut self) {
-        let _ = self
-            .app_message_sender
-            .send(AppMessage::CaptureWorkerExited {
-                capture_source_id: self.capture_source_id,
-            });
+        self.event_reporter
+            .report_capture_worker_exited(self.capture_source_id);
         self.state.borrow().close_frame_slots();
     }
 }
 
-fn run_capture_worker<Capturer, State>(
+fn run_capture_worker<Capturer, State, EventReporter>(
     capture_source_id: CaptureSourceId,
     screen_capturer_state_constructor: impl FnOnce() -> eros::Result<State>,
     initial_frame_slots: HashMap<StreamId, Arc<LatestFrameSlot<Capturer::CapturedFrame>>>,
     command_receiver: flume::Receiver<CaptureCommand<Capturer::CapturedFrame>>,
-    app_message_sender: flume::Sender<AppMessage>,
+    event_reporter: EventReporter,
     started_sender: flume::Sender<Capturer::Control>,
 ) -> eros::Result<()>
 where
     Capturer: ScreenCapturer + MetricsRecorder + From<(CaptureSourceId, State)> + 'static,
+    EventReporter: HostEventReporter,
 {
     let state = Rc::new(RefCell::new(CaptureWorkerState::new(initial_frame_slots)));
     let _exit_guard = CaptureWorkerExitGuard {
         capture_source_id,
         state: Rc::clone(&state),
-        app_message_sender,
+        event_reporter,
     };
     let screen_capturer_state = screen_capturer_state_constructor()?;
     let mut screen_capturer = Capturer::from((capture_source_id, screen_capturer_state));
@@ -393,6 +394,22 @@ mod tests {
 
     struct TestScreenCapturerControl(flume::Sender<()>);
 
+    #[derive(Clone)]
+    struct TestHostEventReporter(flume::Sender<CaptureSourceId>);
+
+    impl HostEventReporter for TestHostEventReporter {
+        fn report_capture_worker_exited(&self, capture_source_id: CaptureSourceId) {
+            let _ = self.0.send(capture_source_id);
+        }
+
+        fn report_host_stream_pipeline_worker_exited(
+            &self,
+            _capture_source_id: CaptureSourceId,
+            _stream_id: StreamId,
+        ) {
+        }
+    }
+
     impl ScreenCapturerControl for TestScreenCapturerControl {
         fn wake(&self) -> eros::Result<()> {
             Ok(self
@@ -465,10 +482,10 @@ mod tests {
             let caller_thread_id = thread::current().id();
             let created_on_worker = Arc::new(AtomicBool::new(false));
             let worker_flag = Arc::clone(&created_on_worker);
-            let (app_message_sender, app_message_receiver) = flume::unbounded();
+            let (exit_sender, exit_receiver) = flume::unbounded();
             let frame_slot = Arc::new(LatestFrameSlot::new());
 
-            let worker = CaptureWorker::spawn::<TestCapturer, _>(
+            let worker = CaptureWorker::spawn::<TestCapturer, _, _>(
                 CaptureSourceId::new(0),
                 move || {
                     worker_flag.store(
@@ -479,7 +496,7 @@ mod tests {
                 },
                 StreamId::new(0),
                 Arc::clone(&frame_slot),
-                app_message_sender,
+                TestHostEventReporter(exit_sender),
             )
             .await
             .expect("worker should start with a non-Send capturer state");
@@ -490,9 +507,8 @@ mod tests {
 
             assert!(frame_slot.blocking_take().is_none());
             assert!(matches!(
-                app_message_receiver.recv(),
-                Ok(AppMessage::CaptureWorkerExited { capture_source_id })
-                    if capture_source_id == CaptureSourceId::new(0)
+                exit_receiver.recv(),
+                Ok(capture_source_id) if capture_source_id == CaptureSourceId::new(0)
             ));
         });
     }

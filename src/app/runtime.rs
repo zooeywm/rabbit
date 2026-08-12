@@ -7,16 +7,8 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        host::{
-            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer,
-            HostStreamPipelineFor,
-            outbound_port::{
-                CapturerManager, CapturerManagerStateSpec, ConverterManager,
-                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                MetricsRecorder,
-            },
-        },
-        host_stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
+        client::inbound_port::ClientApplication,
+        host::{inbound_port::HostApplication, outbound_port::HostEventReporter},
         network::{NetworkContainer, inbound::NetworkWorker, outbound_port::Transporter},
         root::{
             AppContainer, TransporterStateFor,
@@ -53,6 +45,23 @@ pub(crate) enum AppMessage {
     Shutdown,
 }
 
+impl HostEventReporter for flume::Sender<AppMessage> {
+    fn report_capture_worker_exited(&self, capture_source_id: CaptureSourceId) {
+        let _ = self.send(AppMessage::CaptureWorkerExited { capture_source_id });
+    }
+
+    fn report_host_stream_pipeline_worker_exited(
+        &self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+    ) {
+        let _ = self.send(AppMessage::HostStreamPipelineWorkerExited {
+            capture_source_id,
+            stream_id,
+        });
+    }
+}
+
 pub(super) struct AppRuntime {
     app_handle: AppHandle,
     app_thread: JoinHandle<eros::Result<()>>,
@@ -64,29 +73,21 @@ pub(crate) struct AppHandle {
 }
 
 impl AppRuntime {
-    pub(super) fn start<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt, AppRuntimeGuard>(
+    pub(super) fn start<Host, Client, NetworkConstructorState, AppRuntimeGuard>(
         app_constructor: impl FnOnce() -> eros::Result<(
-            AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>,
+            AppContainer<Host, Client, NetworkConstructorState>,
             AppRuntimeGuard,
         )> + Send
         + 'static,
     ) -> eros::Result<Self>
     where
-        CapMgrSt: CapturerManagerStateSpec,
-        CvtMgrSt: ConverterManagerStateSpec,
-        EcdMgrSt: EncoderManagerStateSpec,
-        TprCstSt: TransporterConstructorStateSpec,
-        NetworkContainer<TransporterStateFor<TprCstSt>>: Transporter<EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>>
-            + NetworkMetricsRecorder,
-        HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
-            + ConverterManager<State = CvtMgrSt>
-            + EncoderManager<State = EcdMgrSt>,
-        AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>:
-            TransporterConstructor<State = TprCstSt>,
-        HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
-            + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
-            + MetricsRecorder,
-        EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
+        Host: HostApplication,
+        Client: ClientApplication,
+        NetworkConstructorState: TransporterConstructorStateSpec,
+        NetworkContainer<TransporterStateFor<NetworkConstructorState>>:
+            Transporter<EncodedBuffer = Host::EncodedBuffer> + NetworkMetricsRecorder,
+        AppContainer<Host, Client, NetworkConstructorState>:
+            TransporterConstructor<State = NetworkConstructorState>,
     {
         let (message_sender, message_receiver) = flume::unbounded();
         let (started_sender, started_receiver) = mpsc::sync_channel(1);

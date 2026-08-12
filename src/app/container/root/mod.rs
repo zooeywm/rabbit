@@ -2,33 +2,28 @@ mod inbound;
 
 pub(crate) mod outbound_port;
 
-use crate::app::container::{
-    host::{HostContainer, outbound_port::CapturerManagerStateSpec},
-    root::outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
+use crate::app::container::root::outbound_port::{
+    TransporterConstructor, TransporterConstructorStateSpec,
 };
 
 pub(crate) type TransporterStateFor<NetworkConstructorState> =
     <NetworkConstructorState as TransporterConstructorStateSpec>::TransporterState;
 
-pub(crate) struct AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, NetworkConstructorState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    host: HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+pub(crate) struct AppContainer<Host, Client, NetworkConstructorState> {
+    host: Host,
+    client: Client,
     network_constructor_state: NetworkConstructorState,
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt, NetworkConstructorState>
-    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, NetworkConstructorState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
+impl<Host, Client, NetworkConstructorState> AppContainer<Host, Client, NetworkConstructorState> {
     pub(crate) fn new(
-        host: HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>,
+        host: Host,
+        client: Client,
         network_constructor_state: NetworkConstructorState,
     ) -> Self {
         Self {
             host,
+            client,
             network_constructor_state,
         }
     }
@@ -43,7 +38,7 @@ where
         impl FnOnce() -> eros::Result<TransporterStateFor<NetworkConstructorState>>
         + Send
         + 'static
-        + use<CapMgrSt, CvtMgrSt, EcdMgrSt, NetworkConstructorState>,
+        + use<Host, Client, NetworkConstructorState>,
     >
     where
         NetworkConstructorState: TransporterConstructorStateSpec,

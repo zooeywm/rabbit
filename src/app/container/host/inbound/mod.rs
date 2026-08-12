@@ -7,25 +7,23 @@ pub(super) use capture_source_runtime::CaptureSourceRuntime;
 use eros::Context;
 
 use crate::{
-    app::{
-        container::{
-            host::{
-                CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer,
-                HostStreamPipelineFor,
-                outbound_port::{
-                    CapturerManager, CapturerManagerStateSpec, ConverterManager,
-                    ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                    MetricsRecorder,
-                },
+    app::container::{
+        host::{
+            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer,
+            HostStreamPipelineFor,
+            inbound_port::HostApplication,
+            outbound_port::{
+                CapturerManager, CapturerManagerStateSpec, ConverterManager,
+                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
+                HostEventReporter, MetricsRecorder,
             },
-            host_stream_pipeline::{
-                inbound::HostStreamPipelineWorker,
-                outbound_port::{EncoderFrameConverter, VideoEncoder},
-            },
-            network::inbound::EncodedUnitSender,
-            screen_capture::inbound::CaptureWorker,
         },
-        runtime::AppMessage,
+        host_stream_pipeline::{
+            inbound::HostStreamPipelineWorker,
+            outbound_port::{EncoderFrameConverter, VideoEncoder},
+        },
+        network::inbound::EncodedUnitSender,
+        screen_capture::inbound::CaptureWorker,
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
@@ -64,11 +62,11 @@ where
         }
     }
 
-    pub(crate) async fn start_stream(
+    async fn start_stream<EventReporter: HostEventReporter>(
         &mut self,
         capture_source_id: CaptureSourceId,
         encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
-        app_message_sender: &flume::Sender<AppMessage>,
+        event_reporter: EventReporter,
     ) -> eros::Result<StreamId> {
         let stream_id = StreamId::new(self.next_stream_id);
         let next_stream_id = self
@@ -91,26 +89,27 @@ where
             stream_id,
             host_stream_pipeline_states_constructor,
             encoded_unit_sender,
-            app_message_sender.clone(),
+            event_reporter.clone(),
         )
         .await?;
 
         if let Some(screen_capturer_state_constructor) = screen_capturer_state_constructor {
-            let capture_worker_handle = match CaptureWorker::spawn::<CapMgrSt::ScreenCapturer, _>(
-                capture_source_id,
-                screen_capturer_state_constructor,
-                stream_id,
-                host_stream_pipeline_handle.frame_slot(),
-                app_message_sender.clone(),
-            )
-            .await
-            {
-                Ok(capture_worker_handle) => capture_worker_handle,
-                Err(error) => {
-                    let _ = host_stream_pipeline_handle.shutdown().await;
-                    return Err(error);
-                }
-            };
+            let capture_worker_handle =
+                match CaptureWorker::spawn::<CapMgrSt::ScreenCapturer, _, _>(
+                    capture_source_id,
+                    screen_capturer_state_constructor,
+                    stream_id,
+                    host_stream_pipeline_handle.frame_slot(),
+                    event_reporter,
+                )
+                .await
+                {
+                    Ok(capture_worker_handle) => capture_worker_handle,
+                    Err(error) => {
+                        let _ = host_stream_pipeline_handle.shutdown().await;
+                        return Err(error);
+                    }
+                };
 
             self.capture_source_runtimes.insert(
                 capture_source_id,
@@ -133,7 +132,7 @@ where
         Ok(stream_id)
     }
 
-    pub(crate) async fn remove_stream(&mut self, stream_id: StreamId) -> eros::Result<()> {
+    async fn remove_stream(&mut self, stream_id: StreamId) -> eros::Result<()> {
         let capture_source_id = self
             .capture_source_runtimes
             .iter()
@@ -201,7 +200,7 @@ where
         capture_shutdown_result
     }
 
-    pub(crate) async fn handle_capture_worker_exit(
+    async fn handle_capture_worker_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
     ) -> Option<eros::Result<()>> {
@@ -218,7 +217,7 @@ where
         )
     }
 
-    pub(crate) async fn handle_host_stream_pipeline_worker_exit(
+    async fn handle_host_stream_pipeline_worker_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
@@ -243,5 +242,69 @@ where
                 Err(error) => Err(error),
             },
         )
+    }
+}
+
+impl<CapMgrSt, CvtMgrSt, EcdMgrSt> HostApplication for HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+where
+    CapMgrSt: CapturerManagerStateSpec,
+    CvtMgrSt: ConverterManagerStateSpec,
+    EcdMgrSt: EncoderManagerStateSpec,
+    Self: CapturerManager<State = CapMgrSt>
+        + ConverterManager<State = CvtMgrSt>
+        + EncoderManager<State = EcdMgrSt>,
+    HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+        + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
+        + MetricsRecorder,
+    EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
+{
+    type EncodedBuffer = EncodedBufferFor<CvtMgrSt, EcdMgrSt>;
+
+    async fn start_stream<EventReporter: HostEventReporter>(
+        &mut self,
+        capture_source_id: CaptureSourceId,
+        encoded_unit_sender: EncodedUnitSender<Self::EncodedBuffer>,
+        event_reporter: EventReporter,
+    ) -> eros::Result<StreamId> {
+        HostContainer::start_stream(self, capture_source_id, encoded_unit_sender, event_reporter)
+            .await
+    }
+
+    async fn remove_stream(&mut self, stream_id: StreamId) -> eros::Result<()> {
+        HostContainer::remove_stream(self, stream_id).await
+    }
+
+    async fn handle_capture_worker_exit(
+        &mut self,
+        capture_source_id: CaptureSourceId,
+    ) -> Option<eros::Result<()>> {
+        HostContainer::handle_capture_worker_exit(self, capture_source_id).await
+    }
+
+    async fn handle_host_stream_pipeline_worker_exit(
+        &mut self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+    ) -> Option<eros::Result<()>> {
+        HostContainer::handle_host_stream_pipeline_worker_exit(self, capture_source_id, stream_id)
+            .await
+    }
+
+    #[cfg(feature = "test-ui")]
+    async fn start_capture_only<EventReporter: HostEventReporter>(
+        &mut self,
+        capture_source_id: CaptureSourceId,
+        event_reporter: EventReporter,
+    ) -> eros::Result<()> {
+        HostContainer::start_capture_only(self, capture_source_id, event_reporter).await
+    }
+
+    #[cfg(feature = "test-ui")]
+    async fn stop_capture_only(&mut self, capture_source_id: CaptureSourceId) -> eros::Result<()> {
+        HostContainer::stop_capture_only(self, capture_source_id).await
+    }
+
+    async fn shutdown(self) -> eros::Result<()> {
+        HostContainer::shutdown(self).await
     }
 }

@@ -5,17 +5,14 @@ use std::{
 
 use eros::Context;
 
-use crate::app::{
-    container::{
-        host::outbound_port::MetricsRecorder,
-        host_stream_pipeline::{
-            HostStreamPipelineContainer,
-            inbound::LatestFrameSlot,
-            outbound_port::{EncoderFrameConverter, VideoEncoder},
-        },
-        network::inbound::EncodedUnitSender,
+use crate::app::container::{
+    host::outbound_port::{HostEventReporter, MetricsRecorder},
+    host_stream_pipeline::{
+        HostStreamPipelineContainer,
+        inbound::LatestFrameSlot,
+        outbound_port::{EncoderFrameConverter, VideoEncoder},
     },
-    runtime::AppMessage,
+    network::inbound::EncodedUnitSender,
 };
 use crate::domain::stream::models::vo::{CaptureSourceId, StreamId};
 
@@ -35,22 +32,22 @@ pub(crate) struct HostStreamPipelineWorkerHandle<Frame> {
     worker_thread: JoinHandle<eros::Result<()>>,
 }
 
-struct HostStreamPipelineWorkerExitGuard<Frame> {
+struct HostStreamPipelineWorkerExitGuard<Frame, EventReporter: HostEventReporter> {
     capture_source_id: CaptureSourceId,
     stream_id: StreamId,
     frame_slot: Arc<LatestFrameSlot<Frame>>,
-    app_message_sender: flume::Sender<AppMessage>,
+    event_reporter: EventReporter,
 }
 
 impl HostStreamPipelineWorker {
-    pub(crate) async fn spawn<CvtSt, EcdSt>(
+    pub(crate) async fn spawn<CvtSt, EcdSt, EventReporter>(
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
         host_stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>
         + Send
         + 'static,
         encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtSt, EcdSt>>,
-        app_message_sender: flume::Sender<AppMessage>,
+        event_reporter: EventReporter,
     ) -> eros::Result<HostStreamPipelineWorkerHandle<HostPipelineFrameFor<CvtSt, EcdSt>>>
     where
         HostPipelineFrameFor<CvtSt, EcdSt>: Send + 'static,
@@ -59,6 +56,7 @@ impl HostStreamPipelineWorker {
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
             + MetricsRecorder
             + 'static,
+        EventReporter: HostEventReporter,
     {
         let frame_slot = Arc::new(LatestFrameSlot::new());
         let worker_frame_slot = Arc::clone(&frame_slot);
@@ -72,7 +70,7 @@ impl HostStreamPipelineWorker {
                     capture_source_id,
                     stream_id,
                     frame_slot: exit_frame_slot,
-                    app_message_sender,
+                    event_reporter,
                 };
 
                 run_host_stream_pipeline_worker(
@@ -98,15 +96,13 @@ impl HostStreamPipelineWorker {
     }
 }
 
-impl<Frame> Drop for HostStreamPipelineWorkerExitGuard<Frame> {
+impl<Frame, EventReporter: HostEventReporter> Drop
+    for HostStreamPipelineWorkerExitGuard<Frame, EventReporter>
+{
     fn drop(&mut self) {
         self.frame_slot.close();
-        let _ = self
-            .app_message_sender
-            .send(AppMessage::HostStreamPipelineWorkerExited {
-                capture_source_id: self.capture_source_id,
-                stream_id: self.stream_id,
-            });
+        self.event_reporter
+            .report_host_stream_pipeline_worker_exited(self.capture_source_id, self.stream_id);
     }
 }
 

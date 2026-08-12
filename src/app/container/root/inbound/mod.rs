@@ -1,38 +1,19 @@
 use crate::app::{
     container::{
-        host::{
-            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer,
-            HostStreamPipelineFor,
-            outbound_port::{
-                CapturerManager, CapturerManagerStateSpec, ConverterManager,
-                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-                MetricsRecorder,
-            },
-        },
-        host_stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
-        network::inbound::EncodedUnitSender,
-        root::AppContainer,
+        client::inbound_port::ClientApplication, host::inbound_port::HostApplication,
+        network::inbound::EncodedUnitSender, root::AppContainer,
     },
     runtime::AppMessage,
 };
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt, NetworkConstructorState>
-    AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, NetworkConstructorState>
+impl<Host, Client, NetworkConstructorState> AppContainer<Host, Client, NetworkConstructorState>
 where
-    CapMgrSt: CapturerManagerStateSpec,
-    CvtMgrSt: ConverterManagerStateSpec,
-    EcdMgrSt: EncoderManagerStateSpec,
-    HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
-        + ConverterManager<State = CvtMgrSt>
-        + EncoderManager<State = EcdMgrSt>,
-    HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
-        + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
-        + MetricsRecorder,
-    EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
+    Host: HostApplication,
+    Client: ClientApplication,
 {
     pub(crate) async fn run(
         mut self,
-        encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtMgrSt, EcdMgrSt>>,
+        encoded_unit_sender: EncodedUnitSender<Host::EncodedBuffer>,
         app_message_sender: flume::Sender<AppMessage>,
         message_receiver: flume::Receiver<AppMessage>,
     ) -> eros::Result<()> {
@@ -40,9 +21,30 @@ where
             match message_receiver.recv_async().await {
                 #[cfg(feature = "test-ui")]
                 Ok(AppMessage::CaptureOnly(message)) => {
-                    self.host
-                        .handle_capture_only_message(message, &app_message_sender)
-                        .await;
+                    use crate::app::runtime::capture_only::CaptureOnlyMessage;
+
+                    match message {
+                        CaptureOnlyMessage::Start {
+                            capture_source_id,
+                            response_sender,
+                        } => {
+                            let _ = response_sender.send(
+                                self.host
+                                    .start_capture_only(
+                                        capture_source_id,
+                                        app_message_sender.clone(),
+                                    )
+                                    .await,
+                            );
+                        }
+                        CaptureOnlyMessage::Stop {
+                            capture_source_id,
+                            response_sender,
+                        } => {
+                            let _ = response_sender
+                                .send(self.host.stop_capture_only(capture_source_id).await);
+                        }
+                    }
                 }
                 Ok(AppMessage::StartStream {
                     capture_source_id,
@@ -53,7 +55,7 @@ where
                             .start_stream(
                                 capture_source_id,
                                 encoded_unit_sender.clone(),
-                                &app_message_sender,
+                                app_message_sender.clone(),
                             )
                             .await,
                     );
@@ -73,7 +75,7 @@ where
                         continue;
                     };
 
-                    let _ = self.host.shutdown().await;
+                    let _ = self.shutdown_applications().await;
                     return failure;
                 }
                 Ok(AppMessage::HostStreamPipelineWorkerExited {
@@ -88,17 +90,31 @@ where
                         continue;
                     };
 
-                    let _ = self.host.shutdown().await;
+                    let _ = self.shutdown_applications().await;
                     return failure;
                 }
                 Ok(AppMessage::NetworkWorkerExited) => {
-                    let _ = self.host.shutdown().await;
+                    let _ = self.shutdown_applications().await;
                     eros::bail!("Network worker exited unexpectedly");
                 }
                 Ok(AppMessage::Shutdown) | Err(_) => break,
             }
         }
 
-        self.host.shutdown().await
+        self.shutdown_applications().await
+    }
+
+    async fn shutdown_applications(self) -> eros::Result<()> {
+        let Self {
+            host,
+            client,
+            network_constructor_state: _,
+        } = self;
+
+        let host_result = host.shutdown().await;
+        let client_result = client.shutdown().await;
+
+        host_result?;
+        client_result
     }
 }
