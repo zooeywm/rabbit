@@ -4,8 +4,8 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        network::outbound_port::Transporter, root::outbound_port::NetworkMetricsRecorder,
-        stream_pipeline::outbound_port::EncodedVideoUnit,
+        host_stream_pipeline::outbound_port::EncodedVideoUnit, network::outbound_port::Transporter,
+        root::outbound_port::NetworkMetricsRecorder,
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };

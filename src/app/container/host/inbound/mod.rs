@@ -11,19 +11,19 @@ use crate::{
         container::{
             host::{
                 CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer,
-                StreamPipelineFor,
+                HostStreamPipelineFor,
                 outbound_port::{
                     CapturerManager, CapturerManagerStateSpec, ConverterManager,
                     ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
                     MetricsRecorder,
                 },
             },
-            network::inbound::EncodedUnitSender,
-            screen_capture::inbound::CaptureWorker,
-            stream_pipeline::{
-                inbound::StreamPipelineWorker,
+            host_stream_pipeline::{
+                inbound::HostStreamPipelineWorker,
                 outbound_port::{EncoderFrameConverter, VideoEncoder},
             },
+            network::inbound::EncodedUnitSender,
+            screen_capture::inbound::CaptureWorker,
         },
         runtime::AppMessage,
     },
@@ -38,12 +38,12 @@ where
     Self: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
         + EncoderManager<State = EcdMgrSt>,
-    StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+    HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
 {
-    fn compose_stream_pipeline_states(
+    fn compose_host_stream_pipeline_states(
         &mut self,
     ) -> impl FnOnce() -> eros::Result<(
         CvtMgrSt::EncoderFrameConverterState,
@@ -85,11 +85,11 @@ where
             Some(self.compose_screen_capturer_state(capture_source_id))
         };
 
-        let stream_pipeline_states_constructor = self.compose_stream_pipeline_states();
-        let stream_pipeline_handle = StreamPipelineWorker::spawn(
+        let host_stream_pipeline_states_constructor = self.compose_host_stream_pipeline_states();
+        let host_stream_pipeline_handle = HostStreamPipelineWorker::spawn(
             capture_source_id,
             stream_id,
-            stream_pipeline_states_constructor,
+            host_stream_pipeline_states_constructor,
             encoded_unit_sender,
             app_message_sender.clone(),
         )
@@ -100,27 +100,31 @@ where
                 capture_source_id,
                 screen_capturer_state_constructor,
                 stream_id,
-                stream_pipeline_handle.frame_slot(),
+                host_stream_pipeline_handle.frame_slot(),
                 app_message_sender.clone(),
             )
             .await
             {
                 Ok(capture_worker_handle) => capture_worker_handle,
                 Err(error) => {
-                    let _ = stream_pipeline_handle.shutdown().await;
+                    let _ = host_stream_pipeline_handle.shutdown().await;
                     return Err(error);
                 }
             };
 
             self.capture_source_runtimes.insert(
                 capture_source_id,
-                CaptureSourceRuntime::new(capture_worker_handle, stream_id, stream_pipeline_handle),
+                CaptureSourceRuntime::new(
+                    capture_worker_handle,
+                    stream_id,
+                    host_stream_pipeline_handle,
+                ),
             );
         } else {
             self.capture_source_runtimes
                 .get_mut(&capture_source_id)
                 .with_context(|| "Capture source disappeared while adding stream")?
-                .add_stream(stream_id, stream_pipeline_handle)
+                .add_stream(stream_id, host_stream_pipeline_handle)
                 .await?;
         }
 
@@ -165,7 +169,7 @@ where
         shutdown_result
     }
 
-    async fn remove_stream_after_pipeline_exit(
+    async fn remove_stream_after_host_pipeline_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
@@ -176,7 +180,7 @@ where
                 .get_mut(&capture_source_id)
                 .with_context(|| "Capture source does not exist")?;
             let pipeline_result = capture_source_runtime
-                .remove_stream_after_pipeline_exit(stream_id)
+                .remove_stream_after_host_pipeline_exit(stream_id)
                 .await;
 
             (pipeline_result, capture_source_runtime.is_empty())
@@ -214,7 +218,7 @@ where
         )
     }
 
-    pub(crate) async fn handle_stream_pipeline_worker_exit(
+    pub(crate) async fn handle_host_stream_pipeline_worker_exit(
         &mut self,
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
@@ -230,10 +234,12 @@ where
 
         Some(
             match self
-                .remove_stream_after_pipeline_exit(capture_source_id, stream_id)
+                .remove_stream_after_host_pipeline_exit(capture_source_id, stream_id)
                 .await
             {
-                Ok(()) => Err(eros::error!("Stream pipeline worker exited unexpectedly")),
+                Ok(()) => Err(eros::error!(
+                    "Host stream pipeline worker exited unexpectedly"
+                )),
                 Err(error) => Err(error),
             },
         )

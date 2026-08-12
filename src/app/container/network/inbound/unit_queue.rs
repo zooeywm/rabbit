@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use crate::{
-    app::container::{ResourceUsage, stream_pipeline::outbound_port::EncodedVideoUnit},
+    app::container::{ResourceUsage, host_stream_pipeline::outbound_port::EncodedVideoUnit},
     domain::stream::models::vo::StreamId,
 };
 
@@ -135,7 +135,7 @@ impl<Buffer> Drop for EncodedUnitReceiver<Buffer> {
 mod tests {
     use super::*;
     use crate::{
-        app::container::stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber},
+        app::container::host_stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber},
         domain::stream::models::vo::{CaptureSourceId, FrameId},
     };
 

@@ -11,11 +11,11 @@ use crate::{
                 CapturerManagerStateSpec, ConverterManagerStateSpec, EncoderManagerStateSpec,
             },
         },
-        screen_capture::outbound_port::ScreenCapturer,
-        stream_pipeline::{
-            StreamPipelineContainer,
+        host_stream_pipeline::{
+            HostStreamPipelineContainer,
             outbound_port::{EncoderFrameConverter, VideoEncoder},
         },
+        screen_capture::outbound_port::ScreenCapturer,
     },
     domain::stream::models::vo::CaptureSourceId,
 };
@@ -23,16 +23,16 @@ use crate::{
 pub(crate) type CapturedFrameFor<CapMgrSt> =
     <<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer as ScreenCapturer>::CapturedFrame;
 
-pub(crate) type StreamPipelineFor<CvtMgrSt, EcdMgrSt> = StreamPipelineContainer<
+pub(crate) type HostStreamPipelineFor<CvtMgrSt, EcdMgrSt> = HostStreamPipelineContainer<
     <CvtMgrSt as ConverterManagerStateSpec>::EncoderFrameConverterState,
     <EcdMgrSt as EncoderManagerStateSpec>::VideoEncoderState,
 >;
 
 pub(crate) type EncoderInputFor<CvtMgrSt, EcdMgrSt> =
-    <StreamPipelineFor<CvtMgrSt, EcdMgrSt> as EncoderFrameConverter>::EncoderInput;
+    <HostStreamPipelineFor<CvtMgrSt, EcdMgrSt> as EncoderFrameConverter>::EncoderInput;
 
 pub(crate) type EncodedBufferFor<CvtMgrSt, EcdMgrSt> =
-    <StreamPipelineFor<CvtMgrSt, EcdMgrSt> as VideoEncoder>::EncodedBuffer;
+    <HostStreamPipelineFor<CvtMgrSt, EcdMgrSt> as VideoEncoder>::EncodedBuffer;
 
 type CaptureSourceRuntimeFor<CapMgrSt> =
     CaptureSourceRuntime<<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer>;

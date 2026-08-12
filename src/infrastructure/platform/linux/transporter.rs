@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use crate::{
     app::container::{
-        network::outbound_port::Transporter, stream_pipeline::outbound_port::EncodedVideoUnit,
+        host_stream_pipeline::outbound_port::EncodedVideoUnit, network::outbound_port::Transporter,
     },
     domain::stream::models::vo::StreamId,
 };

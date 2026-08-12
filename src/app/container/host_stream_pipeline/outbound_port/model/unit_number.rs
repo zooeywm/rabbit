@@ -1,3 +1,4 @@
+/// Sequence number of an encoded Host video unit.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct UnitNumber(u64);
 

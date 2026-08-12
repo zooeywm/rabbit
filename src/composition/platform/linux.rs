@@ -9,6 +9,10 @@ use crate::{
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
             },
         },
+        host_stream_pipeline::{
+            HostStreamPipelineContainer,
+            outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
+        },
         network::{NetworkContainer, outbound_port::Transporter},
         root::{
             AppContainer,
@@ -17,10 +21,6 @@ use crate::{
         screen_capture::{
             ScreenCaptureContainer,
             outbound_port::{CaptureLoopAction, ScreenCapturer},
-        },
-        stream_pipeline::{
-            StreamPipelineContainer,
-            outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
         },
     },
     domain::stream::models::vo::CaptureSourceId,
@@ -150,7 +150,7 @@ where
 }
 
 impl<EcdSt> AsRef<LinuxEncoderFrameConverterState>
-    for StreamPipelineContainer<LinuxEncoderFrameConverterState, EcdSt>
+    for HostStreamPipelineContainer<LinuxEncoderFrameConverterState, EcdSt>
 {
     fn as_ref(&self) -> &LinuxEncoderFrameConverterState {
         self.encoder_frame_converter_state()
@@ -158,7 +158,7 @@ impl<EcdSt> AsRef<LinuxEncoderFrameConverterState>
 }
 
 impl<EcdSt> AsMut<LinuxEncoderFrameConverterState>
-    for StreamPipelineContainer<LinuxEncoderFrameConverterState, EcdSt>
+    for HostStreamPipelineContainer<LinuxEncoderFrameConverterState, EcdSt>
 {
     fn as_mut(&mut self) -> &mut LinuxEncoderFrameConverterState {
         self.encoder_frame_converter_state_mut()
@@ -166,7 +166,7 @@ impl<EcdSt> AsMut<LinuxEncoderFrameConverterState>
 }
 
 impl<EcdSt> EncoderFrameConverter
-    for StreamPipelineContainer<LinuxEncoderFrameConverterState, EcdSt>
+    for HostStreamPipelineContainer<LinuxEncoderFrameConverterState, EcdSt>
 {
     type CapturedFrame = Infallible;
     type EncoderInput = Infallible;
@@ -218,7 +218,7 @@ where
 }
 
 impl<CvtSt> AsRef<LinuxVideoEncoderState>
-    for StreamPipelineContainer<CvtSt, LinuxVideoEncoderState>
+    for HostStreamPipelineContainer<CvtSt, LinuxVideoEncoderState>
 {
     fn as_ref(&self) -> &LinuxVideoEncoderState {
         self.video_encoder_state()
@@ -226,14 +226,14 @@ impl<CvtSt> AsRef<LinuxVideoEncoderState>
 }
 
 impl<CvtSt> AsMut<LinuxVideoEncoderState>
-    for StreamPipelineContainer<CvtSt, LinuxVideoEncoderState>
+    for HostStreamPipelineContainer<CvtSt, LinuxVideoEncoderState>
 {
     fn as_mut(&mut self) -> &mut LinuxVideoEncoderState {
         self.video_encoder_state_mut()
     }
 }
 
-impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, LinuxVideoEncoderState> {
+impl<CvtSt> VideoEncoder for HostStreamPipelineContainer<CvtSt, LinuxVideoEncoderState> {
     type EncoderInput = Infallible;
     type EncodedBuffer = Infallible;
 

@@ -4,15 +4,16 @@ use eros::Context;
 
 use crate::{
     app::container::{
+        host_stream_pipeline::inbound::HostStreamPipelineWorkerHandle,
         screen_capture::{inbound::CaptureWorkerHandle, outbound_port::ScreenCapturer},
-        stream_pipeline::inbound::StreamPipelineWorkerHandle,
     },
     domain::stream::models::vo::StreamId,
 };
 
 pub(in crate::app::container::host) struct CaptureSourceRuntime<Capturer: ScreenCapturer> {
     capture_worker_handle: CaptureWorkerHandle<Capturer>,
-    stream_pipeline_handles: HashMap<StreamId, StreamPipelineWorkerHandle<Capturer::CapturedFrame>>,
+    host_stream_pipeline_handles:
+        HashMap<StreamId, HostStreamPipelineWorkerHandle<Capturer::CapturedFrame>>,
 }
 
 impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
@@ -22,20 +23,22 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
     ) -> Self {
         Self {
             capture_worker_handle,
-            stream_pipeline_handles: HashMap::new(),
+            host_stream_pipeline_handles: HashMap::new(),
         }
     }
 
     pub(in crate::app::container::host) fn new(
         capture_worker_handle: CaptureWorkerHandle<Capturer>,
         initial_stream_id: StreamId,
-        initial_stream_pipeline_handle: StreamPipelineWorkerHandle<Capturer::CapturedFrame>,
+        initial_host_stream_pipeline_handle: HostStreamPipelineWorkerHandle<
+            Capturer::CapturedFrame,
+        >,
     ) -> Self {
         Self {
             capture_worker_handle,
-            stream_pipeline_handles: HashMap::from([(
+            host_stream_pipeline_handles: HashMap::from([(
                 initial_stream_id,
-                initial_stream_pipeline_handle,
+                initial_host_stream_pipeline_handle,
             )]),
         }
     }
@@ -43,17 +46,17 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
     pub(in crate::app::container::host) async fn shutdown(self) -> eros::Result<()> {
         let Self {
             capture_worker_handle,
-            stream_pipeline_handles,
+            host_stream_pipeline_handles,
         } = self;
 
-        for stream_pipeline_handle in stream_pipeline_handles.values() {
-            stream_pipeline_handle.close();
+        for host_stream_pipeline_handle in host_stream_pipeline_handles.values() {
+            host_stream_pipeline_handle.close();
         }
 
         let mut first_error = capture_worker_handle.shutdown().await.err();
 
-        for stream_pipeline_handle in stream_pipeline_handles.into_values() {
-            if let Err(error) = stream_pipeline_handle.shutdown().await
+        for host_stream_pipeline_handle in host_stream_pipeline_handles.into_values() {
+            if let Err(error) = host_stream_pipeline_handle.shutdown().await
                 && first_error.is_none()
             {
                 first_error = Some(error);
@@ -71,17 +74,17 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
     ) -> eros::Result<()> {
         let Self {
             capture_worker_handle,
-            stream_pipeline_handles,
+            host_stream_pipeline_handles,
         } = self;
 
-        for stream_pipeline_handle in stream_pipeline_handles.values() {
-            stream_pipeline_handle.close();
+        for host_stream_pipeline_handle in host_stream_pipeline_handles.values() {
+            host_stream_pipeline_handle.close();
         }
 
         let mut first_error = capture_worker_handle.join().await.err();
 
-        for stream_pipeline_handle in stream_pipeline_handles.into_values() {
-            if let Err(error) = stream_pipeline_handle.shutdown().await
+        for host_stream_pipeline_handle in host_stream_pipeline_handles.into_values() {
+            if let Err(error) = host_stream_pipeline_handle.shutdown().await
                 && first_error.is_none()
             {
                 first_error = Some(error);
@@ -95,34 +98,34 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
     }
 
     pub(in crate::app::container::host) fn contains_stream(&self, stream_id: StreamId) -> bool {
-        self.stream_pipeline_handles.contains_key(&stream_id)
+        self.host_stream_pipeline_handles.contains_key(&stream_id)
     }
 
     pub(in crate::app::container::host) fn is_empty(&self) -> bool {
-        self.stream_pipeline_handles.is_empty()
+        self.host_stream_pipeline_handles.is_empty()
     }
 
     pub(in crate::app::container::host) async fn add_stream(
         &mut self,
         stream_id: StreamId,
-        stream_pipeline_handle: StreamPipelineWorkerHandle<Capturer::CapturedFrame>,
+        host_stream_pipeline_handle: HostStreamPipelineWorkerHandle<Capturer::CapturedFrame>,
     ) -> eros::Result<()> {
-        if self.stream_pipeline_handles.contains_key(&stream_id) {
-            stream_pipeline_handle.shutdown().await?;
-            eros::bail!("Stream pipeline already exists");
+        if self.host_stream_pipeline_handles.contains_key(&stream_id) {
+            host_stream_pipeline_handle.shutdown().await?;
+            eros::bail!("Host stream pipeline already exists");
         }
 
         if let Err(error) = self
             .capture_worker_handle
-            .add_stream(stream_id, stream_pipeline_handle.frame_slot())
+            .add_stream(stream_id, host_stream_pipeline_handle.frame_slot())
             .await
         {
-            let _ = stream_pipeline_handle.shutdown().await;
+            let _ = host_stream_pipeline_handle.shutdown().await;
             return Err(error);
         }
 
-        self.stream_pipeline_handles
-            .insert(stream_id, stream_pipeline_handle);
+        self.host_stream_pipeline_handles
+            .insert(stream_id, host_stream_pipeline_handle);
 
         Ok(())
     }
@@ -131,33 +134,33 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
         &mut self,
         stream_id: StreamId,
     ) -> eros::Result<()> {
-        self.stream_pipeline_handles
+        self.host_stream_pipeline_handles
             .get(&stream_id)
-            .with_context(|| "Stream pipeline does not exist")?;
+            .with_context(|| "Host stream pipeline does not exist")?;
 
         self.capture_worker_handle.remove_stream(stream_id).await?;
 
-        let stream_pipeline_handle = self
-            .stream_pipeline_handles
+        let host_stream_pipeline_handle = self
+            .host_stream_pipeline_handles
             .remove(&stream_id)
-            .with_context(|| "Stream pipeline disappeared while removing stream")?;
+            .with_context(|| "Host stream pipeline disappeared while removing stream")?;
 
-        stream_pipeline_handle.shutdown().await
+        host_stream_pipeline_handle.shutdown().await
     }
 
-    pub(in crate::app::container::host) async fn remove_stream_after_pipeline_exit(
+    pub(in crate::app::container::host) async fn remove_stream_after_host_pipeline_exit(
         &mut self,
         stream_id: StreamId,
     ) -> eros::Result<()> {
-        let stream_pipeline_handle = self
-            .stream_pipeline_handles
+        let host_stream_pipeline_handle = self
+            .host_stream_pipeline_handles
             .remove(&stream_id)
-            .with_context(|| "Stream pipeline does not exist")?;
+            .with_context(|| "Host stream pipeline does not exist")?;
 
-        stream_pipeline_handle.close();
+        host_stream_pipeline_handle.close();
 
         let _ = self.capture_worker_handle.remove_stream(stream_id).await;
 
-        stream_pipeline_handle.shutdown().await
+        host_stream_pipeline_handle.shutdown().await
     }
 }

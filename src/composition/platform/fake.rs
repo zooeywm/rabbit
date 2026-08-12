@@ -7,6 +7,10 @@ use crate::{
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
             },
         },
+        host_stream_pipeline::{
+            HostStreamPipelineContainer,
+            outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
+        },
         network::{NetworkContainer, outbound_port::Transporter},
         root::{
             AppContainer,
@@ -15,10 +19,6 @@ use crate::{
         screen_capture::{
             ScreenCaptureContainer,
             outbound_port::{CaptureLoopAction, ScreenCapturer},
-        },
-        stream_pipeline::{
-            StreamPipelineContainer,
-            outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
         },
     },
     domain::stream::models::vo::CaptureSourceId,
@@ -162,7 +162,7 @@ where
 }
 
 impl<EcdSt> AsRef<FakeEncoderFrameConverterState>
-    for StreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
+    for HostStreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
 {
     fn as_ref(&self) -> &FakeEncoderFrameConverterState {
         self.encoder_frame_converter_state()
@@ -170,7 +170,7 @@ impl<EcdSt> AsRef<FakeEncoderFrameConverterState>
 }
 
 impl<EcdSt> AsMut<FakeEncoderFrameConverterState>
-    for StreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
+    for HostStreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
 {
     fn as_mut(&mut self) -> &mut FakeEncoderFrameConverterState {
         self.encoder_frame_converter_state_mut()
@@ -178,7 +178,7 @@ impl<EcdSt> AsMut<FakeEncoderFrameConverterState>
 }
 
 impl<EcdSt> EncoderFrameConverter
-    for StreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
+    for HostStreamPipelineContainer<FakeEncoderFrameConverterState, EcdSt>
 {
     type CapturedFrame = FrameLease<FakeCapturedFrame>;
     type EncoderInput = FakeEncoderInput;
@@ -229,19 +229,23 @@ where
     }
 }
 
-impl<CvtSt> AsRef<FakeVideoEncoderState> for StreamPipelineContainer<CvtSt, FakeVideoEncoderState> {
+impl<CvtSt> AsRef<FakeVideoEncoderState>
+    for HostStreamPipelineContainer<CvtSt, FakeVideoEncoderState>
+{
     fn as_ref(&self) -> &FakeVideoEncoderState {
         self.video_encoder_state()
     }
 }
 
-impl<CvtSt> AsMut<FakeVideoEncoderState> for StreamPipelineContainer<CvtSt, FakeVideoEncoderState> {
+impl<CvtSt> AsMut<FakeVideoEncoderState>
+    for HostStreamPipelineContainer<CvtSt, FakeVideoEncoderState>
+{
     fn as_mut(&mut self) -> &mut FakeVideoEncoderState {
         self.video_encoder_state_mut()
     }
 }
 
-impl<CvtSt> VideoEncoder for StreamPipelineContainer<CvtSt, FakeVideoEncoderState> {
+impl<CvtSt> VideoEncoder for HostStreamPipelineContainer<CvtSt, FakeVideoEncoderState> {
     type EncoderInput = FakeEncoderInput;
     type EncodedBuffer = [u8; 8];
 

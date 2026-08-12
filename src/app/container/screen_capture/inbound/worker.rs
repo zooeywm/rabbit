@@ -11,8 +11,8 @@ use eros::Context;
 use crate::{
     app::container::{
         host::outbound_port::MetricsRecorder,
+        host_stream_pipeline::inbound::LatestFrameSlot,
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
-        stream_pipeline::inbound::LatestFrameSlot,
     },
     app::runtime::AppMessage,
     domain::stream::models::vo::{CaptureSourceId, StreamId},

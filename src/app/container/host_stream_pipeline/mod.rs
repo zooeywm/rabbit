@@ -6,13 +6,13 @@ use crate::{
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
-pub(crate) struct StreamPipelineContainer<CvtSt, EcdSt> {
+pub(crate) struct HostStreamPipelineContainer<CvtSt, EcdSt> {
     metrics_target: MetricsTarget,
     encoder_frame_converter_state: CvtSt,
     video_encoder_state: EcdSt,
 }
 
-impl<CvtSt, EcdSt> StreamPipelineContainer<CvtSt, EcdSt> {
+impl<CvtSt, EcdSt> HostStreamPipelineContainer<CvtSt, EcdSt> {
     pub(crate) fn new(
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
@@ -46,7 +46,7 @@ impl<CvtSt, EcdSt> StreamPipelineContainer<CvtSt, EcdSt> {
     }
 }
 
-impl<CvtSt, EcdSt> AsRef<MetricsTarget> for StreamPipelineContainer<CvtSt, EcdSt> {
+impl<CvtSt, EcdSt> AsRef<MetricsTarget> for HostStreamPipelineContainer<CvtSt, EcdSt> {
     fn as_ref(&self) -> &MetricsTarget {
         &self.metrics_target
     }

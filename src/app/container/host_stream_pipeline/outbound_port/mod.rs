@@ -1,3 +1,4 @@
+// Host stream pipeline outbound capabilities and models.
 mod encoder_frame_converter;
 mod model;
 mod video_encoder;

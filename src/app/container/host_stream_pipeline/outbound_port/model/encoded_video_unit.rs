@@ -1,4 +1,4 @@
-use crate::app::container::stream_pipeline::outbound_port::UnitNumber;
+use crate::app::container::host_stream_pipeline::outbound_port::UnitNumber;
 use crate::domain::stream::models::vo::FrameId;
 
 pub struct EncodedVideoUnit<Buffer> {

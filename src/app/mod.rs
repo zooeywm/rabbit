@@ -6,12 +6,13 @@ mod runtime;
 use config::Config;
 use container::{
     host::{
-        CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer, StreamPipelineFor,
+        CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer, HostStreamPipelineFor,
         outbound_port::{
             CapturerManager, CapturerManagerStateSpec, ConverterManager, ConverterManagerStateSpec,
             EncoderManager, EncoderManagerStateSpec,
         },
     },
+    host_stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
     network::{NetworkContainer, outbound_port::Transporter},
     root::{
         AppContainer, TransporterStateFor,
@@ -19,7 +20,6 @@ use container::{
             NetworkMetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
         },
     },
-    stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
 };
 use directories::ProjectDirs;
 use eros::Context;
@@ -46,7 +46,7 @@ where
         + ConverterManager<State = CvtMgrSt>
         + EncoderManager<State = EcdMgrSt>,
     AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>: TransporterConstructor<State = TprCstSt>,
-    StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+    HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
 {

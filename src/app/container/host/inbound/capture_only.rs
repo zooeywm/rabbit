@@ -10,7 +10,7 @@ where
     Self: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
         + EncoderManager<State = EcdMgrSt>,
-    StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+    HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
 {

@@ -141,7 +141,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::container::stream_pipeline::outbound_port::EncodedVideoUnit,
+        app::container::host_stream_pipeline::outbound_port::EncodedVideoUnit,
         domain::stream::models::vo::StreamId,
     };
 

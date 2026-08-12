@@ -1,16 +1,17 @@
 use crate::app::{
     container::{
         host::{
-            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer, StreamPipelineFor,
+            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer,
+            HostStreamPipelineFor,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
                 MetricsRecorder,
             },
         },
+        host_stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
         network::inbound::EncodedUnitSender,
         root::AppContainer,
-        stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
     },
     runtime::AppMessage,
 };
@@ -24,7 +25,7 @@ where
     HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>: CapturerManager<State = CapMgrSt>
         + ConverterManager<State = CvtMgrSt>
         + EncoderManager<State = EcdMgrSt>,
-    StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+    HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
         + MetricsRecorder,
     EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,
@@ -75,13 +76,13 @@ where
                     let _ = self.host.shutdown().await;
                     return failure;
                 }
-                Ok(AppMessage::StreamPipelineWorkerExited {
+                Ok(AppMessage::HostStreamPipelineWorkerExited {
                     capture_source_id,
                     stream_id,
                 }) => {
                     let Some(failure) = self
                         .host
-                        .handle_stream_pipeline_worker_exit(capture_source_id, stream_id)
+                        .handle_host_stream_pipeline_worker_exit(capture_source_id, stream_id)
                         .await
                     else {
                         continue;

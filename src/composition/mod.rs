@@ -1,8 +1,8 @@
 use crate::{
     app::container::{
-        ResourceUsage, host::outbound_port::MetricsRecorder, network::NetworkContainer,
+        ResourceUsage, host::outbound_port::MetricsRecorder,
+        host_stream_pipeline::HostStreamPipelineContainer, network::NetworkContainer,
         root::outbound_port::NetworkMetricsRecorder, screen_capture::ScreenCaptureContainer,
-        stream_pipeline::StreamPipelineContainer,
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
     infrastructure::common::OpenTelemetryMetricsRecorderImpl,
@@ -49,7 +49,7 @@ impl<State> MetricsRecorder for ScreenCaptureContainer<State> {
     }
 }
 
-impl<CvtSt, EcdSt> MetricsRecorder for StreamPipelineContainer<CvtSt, EcdSt> {
+impl<CvtSt, EcdSt> MetricsRecorder for HostStreamPipelineContainer<CvtSt, EcdSt> {
     fn register_metrics_target(&self) {
         MetricsRecorder::register_metrics_target(OpenTelemetryMetricsRecorderImpl::inj_ref(self));
     }

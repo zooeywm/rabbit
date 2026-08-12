@@ -8,13 +8,15 @@ use eros::Context;
 use crate::{
     app::container::{
         host::{
-            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer, StreamPipelineFor,
+            CapturedFrameFor, EncodedBufferFor, EncoderInputFor, HostContainer,
+            HostStreamPipelineFor,
             outbound_port::{
                 CapturerManager, CapturerManagerStateSpec, ConverterManager,
                 ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
                 MetricsRecorder,
             },
         },
+        host_stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
         network::{NetworkContainer, inbound::NetworkWorker, outbound_port::Transporter},
         root::{
             AppContainer, TransporterStateFor,
@@ -22,7 +24,6 @@ use crate::{
                 NetworkMetricsRecorder, TransporterConstructor, TransporterConstructorStateSpec,
             },
         },
-        stream_pipeline::outbound_port::{EncoderFrameConverter, VideoEncoder},
     },
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
@@ -44,7 +45,7 @@ pub(crate) enum AppMessage {
     CaptureWorkerExited {
         capture_source_id: CaptureSourceId,
     },
-    StreamPipelineWorkerExited {
+    HostStreamPipelineWorkerExited {
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
     },
@@ -82,7 +83,7 @@ impl AppRuntime {
             + EncoderManager<State = EcdMgrSt>,
         AppContainer<CapMgrSt, CvtMgrSt, EcdMgrSt, TprCstSt>:
             TransporterConstructor<State = TprCstSt>,
-        StreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
+        HostStreamPipelineFor<CvtMgrSt, EcdMgrSt>: EncoderFrameConverter<CapturedFrame = CapturedFrameFor<CapMgrSt>>
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtMgrSt, EcdMgrSt>>
             + MetricsRecorder,
         EncodedBufferFor<CvtMgrSt, EcdMgrSt>: Send + 'static,

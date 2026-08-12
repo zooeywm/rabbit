@@ -5,6 +5,7 @@ struct LatestFrameSlotState<Frame> {
     closed: bool,
 }
 
+/// Holds the latest captured frame for a Host stream pipeline.
 pub(crate) struct LatestFrameSlot<Frame> {
     state: Mutex<LatestFrameSlotState<Frame>>,
     frame_available: Condvar,
