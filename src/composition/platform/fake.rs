@@ -38,7 +38,7 @@ use crate::{
         FakeEncoderFrameConverterState, FakeEncoderInput, FakeEncoderManagerImpl,
         FakeEncoderManagerState, FakePacketized, FakeScreenCapturerControl, FakeScreenCapturerImpl,
         FakeScreenCapturerState, FakeTransporterConstructorImpl, FakeTransporterConstructorState,
-        FakeTransporterImpl, FakeTransporterReceiver, FakeTransporterSender, FakeTransporterState,
+        FakeTransporterHost, FakeTransporterImpl, FakeTransporterReceiver, FakeTransporterState,
         FakeVideoDecoderImpl, FakeVideoDecoderState, FakeVideoEncoderImpl, FakeVideoEncoderState,
     },
     infrastructure::support::media::FrameLease,
@@ -439,25 +439,22 @@ impl AsMut<FakeTransporterState> for NetworkContainer<FakeTransporterState> {
 impl TransporterHostSide for NetworkContainer<FakeTransporterState> {
     type EncodedBuffer = [u8; 8];
     type Packetized = FakePacketized;
-    type Sender = FakeTransporterSender;
+    type Host = FakeTransporterHost;
 
-    fn take_sender(&mut self) -> eros::Result<Self::Sender> {
-        TransporterHostSide::take_sender(FakeTransporterImpl::inj_ref_mut(self))
+    fn take_host(&mut self) -> eros::Result<Self::Host> {
+        TransporterHostSide::take_host(FakeTransporterImpl::inj_ref_mut(self))
     }
 
     fn packetize(
-        &mut self,
+        host: &mut Self::Host,
         stream_id: crate::domain::stream::models::vo::StreamId,
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized> {
-        TransporterHostSide::packetize(FakeTransporterImpl::inj_ref_mut(self), stream_id, unit)
+        Ok(host.packetize(stream_id, unit))
     }
 
-    async fn send(
-        sender: &mut Self::Sender,
-        packetized: Self::Packetized,
-    ) -> eros::Result<SentBytes> {
-        sender.send(packetized).await
+    async fn send(host: &mut Self::Host, packetized: Self::Packetized) -> eros::Result<SentBytes> {
+        host.send(packetized).await
     }
 }
 

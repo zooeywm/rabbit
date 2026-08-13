@@ -25,8 +25,8 @@ pub(crate) use decoder_manager::{FakeDecoderManagerImpl, FakeDecoderManagerState
 pub(crate) use encoder::{FakeVideoEncoderImpl, FakeVideoEncoderState};
 pub(crate) use encoder_manager::{FakeEncoderManagerImpl, FakeEncoderManagerState};
 pub(crate) use transporter::{
-    FakePacketized, FakeReceived, FakeTransporterImpl, FakeTransporterReceiver,
-    FakeTransporterSender, FakeTransporterState,
+    FakePacketized, FakeReceived, FakeTransporterHost, FakeTransporterImpl,
+    FakeTransporterReceiver, FakeTransporterState,
 };
 pub(crate) use transporter_constructor::{
     FakeTransporterConstructorImpl, FakeTransporterConstructorState,

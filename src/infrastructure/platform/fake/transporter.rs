@@ -1,13 +1,14 @@
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use eros::Context;
 
 use crate::{
     app::container::{
         host_stream_pipeline::outbound_port::EncodedVideoUnit,
-        network::outbound_port::{
-            NetworkMetricsRecorder, SentBytes, TransporterClientSide, TransporterHostSide,
-        },
+        network::outbound_port::{SentBytes, TransporterClientSide, TransporterHostSide},
     },
     domain::stream::models::vo::{FrameId, StreamId},
     infrastructure::platform::FakeDecoderInput,
@@ -16,7 +17,7 @@ use crate::{
 #[derive(kudi::DepInj)]
 #[target(FakeTransporterImpl)]
 pub(crate) struct FakeTransporterState {
-    sender: Option<FakeTransporterSender>,
+    host: Option<FakeTransporterHost>,
     receiver: Option<FakeTransporterReceiver>,
     streams_awaiting_video_refresh: HashSet<StreamId>,
 }
@@ -28,12 +29,14 @@ pub(crate) struct FakePacketized {
     payload: [u8; 8],
 }
 
-pub(crate) struct FakeTransporterSender {
-    sender: flume::Sender<FakeReceived>,
+pub(crate) struct FakeTransporterHost {
+    wire: Arc<Mutex<Option<FakeReceived>>>,
+    notification_sender: flume::Sender<()>,
 }
 
 pub(crate) struct FakeTransporterReceiver {
-    receiver: flume::Receiver<FakeReceived>,
+    wire: Arc<Mutex<Option<FakeReceived>>>,
+    notification_receiver: flume::Receiver<()>,
 }
 
 pub(crate) struct FakeReceived {
@@ -43,17 +46,37 @@ pub(crate) struct FakeReceived {
     payload: [u8; 8],
 }
 
-impl FakeTransporterSender {
+impl FakeTransporterHost {
+    pub(crate) fn packetize(
+        &mut self,
+        stream_id: StreamId,
+        unit: EncodedVideoUnit<[u8; 8]>,
+    ) -> FakePacketized {
+        FakePacketized {
+            frame_id: unit.source_frame_id,
+            stream_id,
+            is_keyframe: unit.is_keyframe,
+            payload: unit.data,
+        }
+    }
+
     pub(crate) async fn send(&mut self, packetized: FakePacketized) -> eros::Result<SentBytes> {
-        self.sender
-            .send_async(FakeReceived {
-                frame_id: packetized.frame_id,
-                stream_id: packetized.stream_id,
-                is_keyframe: packetized.is_keyframe,
-                payload: packetized.payload,
-            })
-            .await
-            .with_context(|| "Fake transporter receiver stopped before send completed")?;
+        let received = FakeReceived {
+            frame_id: packetized.frame_id,
+            stream_id: packetized.stream_id,
+            is_keyframe: packetized.is_keyframe,
+            payload: packetized.payload,
+        };
+        *self
+            .wire
+            .lock()
+            .expect("fake wire mutex should not be poisoned") = Some(received);
+        match self.notification_sender.try_send(()) {
+            Ok(()) | Err(flume::TrySendError::Full(())) => {}
+            Err(flume::TrySendError::Disconnected(())) => {
+                eros::bail!("Fake transporter receiver stopped before send completed");
+            }
+        }
 
         Ok(SentBytes::new(
             packetized.frame_id.capture_source_id(),
@@ -65,18 +88,35 @@ impl FakeTransporterSender {
 
 impl FakeTransporterReceiver {
     pub(crate) async fn receive(&mut self) -> eros::Result<Option<FakeReceived>> {
-        Ok(Some(self.receiver.recv_async().await.with_context(
-            || "Fake transporter sender stopped while the connection was active",
-        )?))
+        loop {
+            self.notification_receiver.recv_async().await.with_context(
+                || "Fake transporter sender stopped while the connection was active",
+            )?;
+            if let Some(received) = self
+                .wire
+                .lock()
+                .expect("fake wire mutex should not be poisoned")
+                .take()
+            {
+                return Ok(Some(received));
+            }
+        }
     }
 }
 
 impl FakeTransporterState {
     pub(crate) fn new() -> eros::Result<Self> {
-        let (sender, receiver) = flume::bounded(1);
+        let wire = Arc::new(Mutex::new(None));
+        let (notification_sender, notification_receiver) = flume::bounded(1);
         Ok(Self {
-            sender: Some(FakeTransporterSender { sender }),
-            receiver: Some(FakeTransporterReceiver { receiver }),
+            host: Some(FakeTransporterHost {
+                wire: Arc::clone(&wire),
+                notification_sender,
+            }),
+            receiver: Some(FakeTransporterReceiver {
+                wire,
+                notification_receiver,
+            }),
             streams_awaiting_video_refresh: HashSet::new(),
         })
     }
@@ -84,47 +124,31 @@ impl FakeTransporterState {
 
 impl<Deps> TransporterHostSide for FakeTransporterImpl<Deps>
 where
-    Deps: AsMut<FakeTransporterState> + NetworkMetricsRecorder,
+    Deps: AsMut<FakeTransporterState>,
 {
     type EncodedBuffer = [u8; 8];
     type Packetized = FakePacketized;
-    type Sender = FakeTransporterSender;
+    type Host = FakeTransporterHost;
 
-    fn take_sender(&mut self) -> eros::Result<Self::Sender> {
+    fn take_host(&mut self) -> eros::Result<Self::Host> {
         Ok(self
             .prj_ref_mut()
             .as_mut()
-            .sender
+            .host
             .take()
-            .with_context(|| "Fake transporter sender has already been taken")?)
+            .with_context(|| "Fake transporter host half has already been taken")?)
     }
 
     fn packetize(
-        &mut self,
+        host: &mut Self::Host,
         stream_id: StreamId,
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized> {
-        let packetize_started_at = Instant::now();
-        let capture_source_id = unit.source_frame_id.capture_source_id();
-        self.prj_ref().record_packetized_frame(
-            capture_source_id,
-            stream_id,
-            unit.source_frame_id,
-            packetize_started_at.elapsed(),
-        );
-        Ok(FakePacketized {
-            frame_id: unit.source_frame_id,
-            stream_id,
-            is_keyframe: unit.is_keyframe,
-            payload: unit.data,
-        })
+        Ok(host.packetize(stream_id, unit))
     }
 
-    async fn send(
-        sender: &mut Self::Sender,
-        packetized: Self::Packetized,
-    ) -> eros::Result<SentBytes> {
-        sender.send(packetized).await
+    async fn send(host: &mut Self::Host, packetized: Self::Packetized) -> eros::Result<SentBytes> {
+        host.send(packetized).await
     }
 }
 
@@ -137,10 +161,10 @@ mod tests {
     fn fake_wire_is_bounded_to_one_unit() -> eros::Result<()> {
         let state = FakeTransporterState::new()?;
         let capacity = state
-            .sender
+            .host
             .as_ref()
-            .expect("fake sender should exist")
-            .sender
+            .expect("fake host half should exist")
+            .notification_sender
             .capacity();
 
         assert_eq!(capacity, Some(1));
@@ -148,12 +172,39 @@ mod tests {
     }
 
     #[test]
+    fn full_fake_wire_keeps_only_the_latest_unit() -> eros::Result<()> {
+        let mut state = FakeTransporterState::new()?;
+        let mut host = state.host.take().expect("fake host half should exist");
+        let mut receiver = state.receiver.take().expect("fake receiver should exist");
+        let runtime = compio::runtime::Runtime::new()?;
+
+        runtime.block_on(async {
+            for sequence in 0..=1 {
+                host.send(FakePacketized {
+                    frame_id: FrameId::new(CaptureSourceId::new(0), sequence),
+                    stream_id: StreamId::new(0),
+                    is_keyframe: false,
+                    payload: sequence.to_le_bytes(),
+                })
+                .await?;
+            }
+
+            let received = receiver
+                .receive()
+                .await?
+                .with_context(|| "fake wire stopped before returning its latest unit")?;
+            assert!(received.payload == 1_u64.to_le_bytes());
+            eros::Result::Ok(())
+        })
+    }
+
+    #[test]
     fn fake_send_propagates_a_closed_wire() -> eros::Result<()> {
         let mut state = FakeTransporterState::new()?;
-        let mut sender = state.sender.take().expect("fake sender should exist");
+        let mut host = state.host.take().expect("fake host half should exist");
         drop(state.receiver.take());
         let runtime = compio::runtime::Runtime::new()?;
-        let result = runtime.block_on(sender.send(FakePacketized {
+        let result = runtime.block_on(host.send(FakePacketized {
             frame_id: FrameId::new(CaptureSourceId::new(0), 0),
             stream_id: StreamId::new(0),
             is_keyframe: true,
@@ -167,7 +218,7 @@ mod tests {
     #[test]
     fn fake_receive_propagates_an_unexpected_closed_wire() -> eros::Result<()> {
         let mut state = FakeTransporterState::new()?;
-        drop(state.sender.take());
+        drop(state.host.take());
         let mut receiver = state.receiver.take().expect("fake receiver should exist");
         let runtime = compio::runtime::Runtime::new()?;
         let error = match runtime.block_on(receiver.receive()) {

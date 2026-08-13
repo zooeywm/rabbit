@@ -8,18 +8,15 @@ use super::SentBytes;
 pub(crate) trait TransporterHostSide {
     type EncodedBuffer;
     type Packetized;
-    type Sender: 'static;
+    type Host: 'static;
 
-    fn take_sender(&mut self) -> eros::Result<Self::Sender>;
+    fn take_host(&mut self) -> eros::Result<Self::Host>;
 
     fn packetize(
-        &mut self,
+        host: &mut Self::Host,
         stream_id: StreamId,
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized>;
 
-    async fn send(
-        sender: &mut Self::Sender,
-        packetized: Self::Packetized,
-    ) -> eros::Result<SentBytes>;
+    async fn send(host: &mut Self::Host, packetized: Self::Packetized) -> eros::Result<SentBytes>;
 }

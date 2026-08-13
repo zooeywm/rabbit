@@ -1,5 +1,4 @@
 mod client_stream_control;
-mod packetized_send_queue;
 mod unit_queue;
 mod worker;
 

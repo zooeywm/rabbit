@@ -311,24 +311,21 @@ impl AsMut<LinuxTransporterState> for NetworkContainer<LinuxTransporterState> {
 impl TransporterHostSide for NetworkContainer<LinuxTransporterState> {
     type EncodedBuffer = Infallible;
     type Packetized = Infallible;
-    type Sender = Infallible;
+    type Host = Infallible;
 
-    fn take_sender(&mut self) -> eros::Result<Self::Sender> {
-        TransporterHostSide::take_sender(LinuxTransporterImpl::inj_ref_mut(self))
+    fn take_host(&mut self) -> eros::Result<Self::Host> {
+        TransporterHostSide::take_host(LinuxTransporterImpl::inj_ref_mut(self))
     }
 
     fn packetize(
-        &mut self,
-        stream_id: crate::domain::stream::models::vo::StreamId,
-        unit: EncodedVideoUnit<Self::EncodedBuffer>,
+        host: &mut Self::Host,
+        _stream_id: crate::domain::stream::models::vo::StreamId,
+        _unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized> {
-        TransporterHostSide::packetize(LinuxTransporterImpl::inj_ref_mut(self), stream_id, unit)
+        match *host {}
     }
 
-    async fn send(
-        _sender: &mut Self::Sender,
-        packetized: Self::Packetized,
-    ) -> eros::Result<SentBytes> {
+    async fn send(_host: &mut Self::Host, packetized: Self::Packetized) -> eros::Result<SentBytes> {
         match packetized {}
     }
 }

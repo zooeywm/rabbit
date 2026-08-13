@@ -17,24 +17,21 @@ pub(crate) struct LinuxTransporterState {
 impl<Deps> TransporterHostSide for LinuxTransporterImpl<Deps> {
     type EncodedBuffer = Infallible;
     type Packetized = Infallible;
-    type Sender = Infallible;
+    type Host = Infallible;
 
-    fn take_sender(&mut self) -> eros::Result<Self::Sender> {
+    fn take_host(&mut self) -> eros::Result<Self::Host> {
         eros::bail!("Linux transporter is not implemented")
     }
 
     fn packetize(
-        &mut self,
+        _host: &mut Self::Host,
         _stream_id: StreamId,
         unit: EncodedVideoUnit<Self::EncodedBuffer>,
     ) -> eros::Result<Self::Packetized> {
         match unit.data {}
     }
 
-    async fn send(
-        _sender: &mut Self::Sender,
-        packetized: Self::Packetized,
-    ) -> eros::Result<SentBytes> {
+    async fn send(_host: &mut Self::Host, packetized: Self::Packetized) -> eros::Result<SentBytes> {
         match packetized {}
     }
 }
