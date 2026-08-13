@@ -4,7 +4,7 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        host::outbound_port::MetricsRecorder,
+        host::outbound_port::{MetricsRecorder, ScreenCapturerState},
         screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer, ScreenCapturerControl},
     },
     domain::stream::models::vo::{CaptureSourceId, FrameId},
@@ -48,6 +48,12 @@ impl FakeScreenCapturerState {
             control_sender,
             control_receiver,
         }
+    }
+}
+
+impl ScreenCapturerState for FakeScreenCapturerState {
+    fn new(capture_source_id: CaptureSourceId) -> eros::Result<Self> {
+        Ok(Self::new(capture_source_id))
     }
 }
 
@@ -145,10 +151,5 @@ where
 }
 
 fn frame_pool_size(consumer_count: usize) -> usize {
-    #[cfg(feature = "test-ui")]
-    if consumer_count == 0 {
-        return 1;
-    }
-
     consumer_count + 2
 }

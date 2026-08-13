@@ -24,7 +24,7 @@ use crate::{
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
-use super::metrics_recorder::{
+use super::recorder::{
     CAPTURE_DURATION_METRIC, CAPTURE_SOURCE_ID_ATTRIBUTE, CONVERT_DURATION_METRIC,
     CompletedSourceFrameCounts, ENCODE_DURATION_METRIC, PACKETIZE_DURATION_METRIC,
     STREAM_ID_ATTRIBUTE, TargetResourceUsageSnapshots, snapshot_metrics_resource_usages,
@@ -37,11 +37,11 @@ struct TracingMetricExporter {
     last_exported_at: Mutex<Instant>,
 }
 
-pub(crate) struct MetricsRuntime {
+pub(in crate::app) struct MetricsGuard {
     meter_provider: SdkMeterProvider,
 }
 
-pub(crate) fn init_metrics() -> MetricsRuntime {
+pub(in crate::app) fn init() -> MetricsGuard {
     let reader = PeriodicReader::builder(TracingMetricExporter::default()).build();
     let meter_provider = SdkMeterProvider::builder()
         .with_reader(reader)
@@ -54,7 +54,7 @@ pub(crate) fn init_metrics() -> MetricsRuntime {
         "runtime metrics initialized: ms=(avg p50 p95 p99)"
     );
 
-    MetricsRuntime { meter_provider }
+    MetricsGuard { meter_provider }
 }
 
 impl Default for TracingMetricExporter {
@@ -126,7 +126,7 @@ impl TracingMetricExporter {
     }
 }
 
-impl Drop for MetricsRuntime {
+impl Drop for MetricsGuard {
     fn drop(&mut self) {
         if let Err(error) = self.meter_provider.shutdown() {
             tracing::error!(%error, "failed to shut down metrics runtime");

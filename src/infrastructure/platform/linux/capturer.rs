@@ -1,11 +1,23 @@
 use std::convert::Infallible;
 
-use crate::app::container::screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer};
+use crate::{
+    app::container::{
+        host::outbound_port::ScreenCapturerState,
+        screen_capture::outbound_port::{CaptureLoopAction, ScreenCapturer},
+    },
+    domain::stream::models::vo::CaptureSourceId,
+};
 
 #[derive(kudi::DepInj)]
 #[target(LinuxScreenCapturerImpl)]
 pub(crate) struct LinuxScreenCapturerState {
     never: Infallible,
+}
+
+impl ScreenCapturerState for LinuxScreenCapturerState {
+    fn new(_capture_source_id: CaptureSourceId) -> eros::Result<Self> {
+        eros::bail!("Linux screen capturer infrastructure has not been implemented")
+    }
 }
 
 impl<Deps> ScreenCapturer for LinuxScreenCapturerImpl<Deps> {

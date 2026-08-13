@@ -1,6 +1,7 @@
 use crate::{
-    app::container::client_stream_pipeline::outbound_port::{
-        DecodedVideoFrame, VideoDecodeUnit, VideoDecoder,
+    app::container::{
+        client::outbound_port::VideoDecoderState,
+        client_stream_pipeline::outbound_port::{DecodedVideoFrame, VideoDecodeUnit, VideoDecoder},
     },
     domain::stream::models::vo::FrameId,
 };
@@ -36,6 +37,12 @@ pub(crate) struct FakeVideoDecoderState {
 impl FakeVideoDecoderState {
     pub(crate) fn new() -> Self {
         Self { output: None }
+    }
+}
+
+impl VideoDecoderState for FakeVideoDecoderState {
+    fn new() -> eros::Result<Self> {
+        Ok(Self::new())
     }
 }
 

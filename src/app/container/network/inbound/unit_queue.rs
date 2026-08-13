@@ -27,7 +27,7 @@ pub(crate) struct EncodedUnitSender<Buffer> {
     queue: Arc<EncodedUnitQueue<Buffer>>,
 }
 
-pub(super) struct EncodedUnitReceiver<Buffer> {
+pub(crate) struct EncodedUnitReceiver<Buffer> {
     receiver: flume::Receiver<QueuedEncodedUnit<Buffer>>,
     receiver_alive: Arc<AtomicBool>,
     usage: ResourceUsage,
@@ -42,6 +42,10 @@ impl<Buffer> Clone for EncodedUnitSender<Buffer> {
 }
 
 impl<Buffer> EncodedUnitSender<Buffer> {
+    pub(crate) fn channel() -> (Self, EncodedUnitReceiver<Buffer>) {
+        EncodedUnitReceiver::channel()
+    }
+
     pub(crate) fn send(
         &self,
         stream_id: StreamId,
@@ -91,7 +95,7 @@ impl<Buffer> EncodedUnitSender<Buffer> {
 }
 
 impl<Buffer> EncodedUnitReceiver<Buffer> {
-    pub(super) fn channel() -> (EncodedUnitSender<Buffer>, Self) {
+    fn channel() -> (EncodedUnitSender<Buffer>, Self) {
         let (sender, receiver) = flume::bounded(ENCODED_UNIT_QUEUE_CAPACITY);
         let receiver_alive = Arc::new(AtomicBool::new(true));
         let usage = ResourceUsage::new(0, ENCODED_UNIT_QUEUE_CAPACITY);

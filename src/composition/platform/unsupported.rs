@@ -3,82 +3,28 @@ use std::convert::Infallible;
 use crate::{
     app::container::{
         client::ClientContainer,
-        host::{
-            HostContainer,
-            outbound_port::{
-                CapturerManager, CapturerManagerStateSpec, ConverterManager,
-                ConverterManagerStateSpec, EncoderManager, EncoderManagerStateSpec,
-            },
-        },
+        host::HostContainer,
         host_stream_pipeline::{
             HostStreamPipelineContainer,
             outbound_port::{EncodedVideoUnit, EncoderFrameConverter, VideoEncoder},
         },
         network::{
-            NetworkContainer,
+            ConfiguredNetworkContainer, NetworkContainer,
+            inbound::{ClientStreamControlSender, EncodedUnitSender, NetworkRequestSender},
             outbound_port::{SentBytes, TransporterClientSide, TransporterHostSide},
-        },
-        root::{
-            AppContainer,
-            outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
         },
         screen_capture::{
             ScreenCaptureContainer,
             outbound_port::{CaptureLoopAction, ScreenCapturer},
         },
     },
-    domain::stream::models::vo::CaptureSourceId,
+    domain::stream::models::StreamRequest,
     infrastructure::platform::{
-        UnsupportedCapturerManagerImpl, UnsupportedCapturerManagerState,
-        UnsupportedConverterManagerImpl, UnsupportedConverterManagerState,
-        UnsupportedEncoderFrameConverterState, UnsupportedEncoderManagerImpl,
-        UnsupportedEncoderManagerState, UnsupportedScreenCapturerImpl,
-        UnsupportedScreenCapturerState, UnsupportedTransporterConstructorImpl,
-        UnsupportedTransporterConstructorState, UnsupportedTransporterImpl,
-        UnsupportedTransporterState, UnsupportedVideoEncoderState,
+        UnsupportedEncoderFrameConverterState, UnsupportedScreenCapturerImpl,
+        UnsupportedScreenCapturerState, UnsupportedTransporterImpl, UnsupportedTransporterState,
+        UnsupportedVideoEncoderState,
     },
 };
-
-impl CapturerManagerStateSpec for UnsupportedCapturerManagerState {
-    type ScreenCapturerState = UnsupportedScreenCapturerState;
-    type ScreenCapturer = ScreenCaptureContainer<UnsupportedScreenCapturerState>;
-}
-
-impl<CvtMgrSt, EcdMgrSt> AsRef<UnsupportedCapturerManagerState>
-    for HostContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
-{
-    fn as_ref(&self) -> &UnsupportedCapturerManagerState {
-        self.capturer_manager_state()
-    }
-}
-
-impl<CvtMgrSt, EcdMgrSt> AsMut<UnsupportedCapturerManagerState>
-    for HostContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
-{
-    fn as_mut(&mut self) -> &mut UnsupportedCapturerManagerState {
-        self.capturer_manager_state_mut()
-    }
-}
-
-impl<CvtMgrSt, EcdMgrSt> CapturerManager
-    for HostContainer<UnsupportedCapturerManagerState, CvtMgrSt, EcdMgrSt>
-{
-    type State = UnsupportedCapturerManagerState;
-
-    fn compose_screen_capturer_state(
-        &mut self,
-        capture_source_id: CaptureSourceId,
-    ) -> impl FnOnce()
-        -> eros::Result<<Self::State as CapturerManagerStateSpec>::ScreenCapturerState>
-    + Send
-    + 'static
-    + use<CvtMgrSt, EcdMgrSt> {
-        CapturerManager::compose_screen_capturer_state(
-            UnsupportedCapturerManagerImpl::inj_ref_mut(self),
-            capture_source_id,
-        )
-    }
-}
 
 impl ScreenCapturer for ScreenCaptureContainer<UnsupportedScreenCapturerState> {
     type CapturedFrame = Infallible;
@@ -110,51 +56,6 @@ impl ScreenCapturer for ScreenCaptureContainer<UnsupportedScreenCapturerState> {
     }
 }
 
-impl ConverterManagerStateSpec for UnsupportedConverterManagerState {
-    type EncoderFrameConverterState = UnsupportedEncoderFrameConverterState;
-}
-
-impl<CapMgrSt, EcdMgrSt> AsRef<UnsupportedConverterManagerState>
-    for HostContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    fn as_ref(&self) -> &UnsupportedConverterManagerState {
-        self.converter_manager_state()
-    }
-}
-
-impl<CapMgrSt, EcdMgrSt> AsMut<UnsupportedConverterManagerState>
-    for HostContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    fn as_mut(&mut self) -> &mut UnsupportedConverterManagerState {
-        self.converter_manager_state_mut()
-    }
-}
-
-impl<CapMgrSt, EcdMgrSt> ConverterManager
-    for HostContainer<CapMgrSt, UnsupportedConverterManagerState, EcdMgrSt>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    type State = UnsupportedConverterManagerState;
-
-    fn compose_encoder_frame_converter_state(
-        &mut self,
-    ) -> impl FnOnce() -> eros::Result<
-        <Self::State as ConverterManagerStateSpec>::EncoderFrameConverterState,
-    >
-    + Send
-    + 'static
-    + use<CapMgrSt, EcdMgrSt> {
-        ConverterManager::compose_encoder_frame_converter_state(
-            UnsupportedConverterManagerImpl::inj_ref_mut(self),
-        )
-    }
-}
-
 impl<EcdSt> AsRef<UnsupportedEncoderFrameConverterState>
     for HostStreamPipelineContainer<UnsupportedEncoderFrameConverterState, EcdSt>
 {
@@ -179,49 +80,6 @@ impl<EcdSt> EncoderFrameConverter
 
     fn convert(&mut self, frame: Self::CapturedFrame) -> eros::Result<Self::EncoderInput> {
         match frame {}
-    }
-}
-
-impl EncoderManagerStateSpec for UnsupportedEncoderManagerState {
-    type VideoEncoderState = UnsupportedVideoEncoderState;
-}
-
-impl<CapMgrSt, CvtMgrSt> AsRef<UnsupportedEncoderManagerState>
-    for HostContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    fn as_ref(&self) -> &UnsupportedEncoderManagerState {
-        self.encoder_manager_state()
-    }
-}
-
-impl<CapMgrSt, CvtMgrSt> AsMut<UnsupportedEncoderManagerState>
-    for HostContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    fn as_mut(&mut self) -> &mut UnsupportedEncoderManagerState {
-        self.encoder_manager_state_mut()
-    }
-}
-
-impl<CapMgrSt, CvtMgrSt> EncoderManager
-    for HostContainer<CapMgrSt, CvtMgrSt, UnsupportedEncoderManagerState>
-where
-    CapMgrSt: CapturerManagerStateSpec,
-{
-    type State = UnsupportedEncoderManagerState;
-
-    fn compose_video_encoder_state(
-        &mut self,
-    ) -> impl FnOnce() -> eros::Result<<Self::State as EncoderManagerStateSpec>::VideoEncoderState>
-    + Send
-    + 'static
-    + use<CapMgrSt, CvtMgrSt> {
-        EncoderManager::compose_video_encoder_state(UnsupportedEncoderManagerImpl::inj_ref_mut(
-            self,
-        ))
     }
 }
 
@@ -253,60 +111,34 @@ impl<CvtSt> VideoEncoder for HostStreamPipelineContainer<CvtSt, UnsupportedVideo
     }
 }
 
-impl TransporterConstructorStateSpec for UnsupportedTransporterConstructorState {
-    type TransporterState = UnsupportedTransporterState;
-}
-
-impl<Host, Client> AsRef<UnsupportedTransporterConstructorState>
-    for AppContainer<Host, Client, UnsupportedTransporterConstructorState>
-{
-    fn as_ref(&self) -> &UnsupportedTransporterConstructorState {
-        self.network_constructor_state()
-    }
-}
-
-impl<Host, Client> TransporterConstructor
-    for AppContainer<Host, Client, UnsupportedTransporterConstructorState>
-{
-    type State = UnsupportedTransporterConstructorState;
-
-    fn compose_transporter_state(
-        &self,
-    ) -> eros::Result<
-        impl FnOnce()
-            -> eros::Result<<Self::State as TransporterConstructorStateSpec>::TransporterState>
-        + Send
-        + 'static
-        + use<Host, Client>,
-    > {
-        TransporterConstructor::compose_transporter_state(
-            UnsupportedTransporterConstructorImpl::inj_ref(self),
-        )
-    }
-}
-
 pub(super) type PlatformHost = HostContainer<
-    UnsupportedCapturerManagerState,
-    UnsupportedConverterManagerState,
-    UnsupportedEncoderManagerState,
+    UnsupportedScreenCapturerState,
+    UnsupportedEncoderFrameConverterState,
+    UnsupportedVideoEncoderState,
 >;
 pub(super) type PlatformClient = ClientContainer<()>;
-pub(super) type PlatformNetworkConstructorState = UnsupportedTransporterConstructorState;
-pub(super) type PlatformApp =
-    AppContainer<PlatformHost, PlatformClient, PlatformNetworkConstructorState>;
+pub(super) type PlatformNetwork = ConfiguredNetworkContainer<UnsupportedTransporterState>;
+pub(super) type PlatformContainers = (PlatformHost, PlatformClient, Vec<PlatformNetwork>);
 
-pub(super) fn compose_app() -> impl FnOnce() -> eros::Result<PlatformApp> + Send + 'static {
-    || {
-        Ok(AppContainer::new(
-            PlatformHost::new(
-                UnsupportedCapturerManagerState::new()?,
-                UnsupportedConverterManagerState::new()?,
-                UnsupportedEncoderManagerState::new()?,
-            ),
-            PlatformClient::new(()),
-            UnsupportedTransporterConstructorState::new()?,
-        ))
-    }
+pub(super) fn compose_containers(
+    app_message_sender: flume::Sender<crate::app::AppMessage>,
+) -> eros::Result<PlatformContainers> {
+    let (encoded_unit_sender, encoded_unit_receiver) = EncodedUnitSender::channel();
+    let (client_stream_control_sender, client_stream_control_receiver) =
+        ClientStreamControlSender::channel();
+    let (network_request_sender, network_request_receiver) = NetworkRequestSender::channel();
+
+    Ok((
+        PlatformHost::new(encoded_unit_sender),
+        PlatformClient::new(client_stream_control_sender, network_request_sender),
+        vec![PlatformNetwork::new(
+            (),
+            encoded_unit_receiver,
+            client_stream_control_receiver,
+            network_request_receiver,
+            app_message_sender,
+        )],
+    ))
 }
 
 impl AsMut<UnsupportedTransporterState> for NetworkContainer<UnsupportedTransporterState> {
@@ -319,9 +151,14 @@ impl TransporterHostSide for NetworkContainer<UnsupportedTransporterState> {
     type EncodedBuffer = Infallible;
     type Packetized = Infallible;
     type Host = Infallible;
+    type RequestReceiver = Infallible;
 
     fn take_host(&mut self) -> eros::Result<Self::Host> {
         TransporterHostSide::take_host(UnsupportedTransporterImpl::inj_ref_mut(self))
+    }
+
+    fn take_request_receiver(&mut self) -> eros::Result<Self::RequestReceiver> {
+        TransporterHostSide::take_request_receiver(UnsupportedTransporterImpl::inj_ref_mut(self))
     }
 
     fn packetize(
@@ -335,10 +172,17 @@ impl TransporterHostSide for NetworkContainer<UnsupportedTransporterState> {
     async fn send(_host: &mut Self::Host, packetized: Self::Packetized) -> eros::Result<SentBytes> {
         match packetized {}
     }
+
+    async fn receive_request(
+        receiver: &mut Self::RequestReceiver,
+    ) -> eros::Result<Option<StreamRequest>> {
+        match *receiver {}
+    }
 }
 
 impl TransporterClientSide for NetworkContainer<UnsupportedTransporterState> {
     type Receiver = Infallible;
+    type RequestSender = Infallible;
     type Received = Infallible;
     type Depacketized = Infallible;
 
@@ -346,8 +190,19 @@ impl TransporterClientSide for NetworkContainer<UnsupportedTransporterState> {
         TransporterClientSide::take_receiver(UnsupportedTransporterImpl::inj_ref_mut(self))
     }
 
+    fn take_request_sender(&mut self) -> eros::Result<Self::RequestSender> {
+        TransporterClientSide::take_request_sender(UnsupportedTransporterImpl::inj_ref_mut(self))
+    }
+
     async fn receive(_receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
         eros::bail!("Transporter is not implemented on this platform")
+    }
+
+    async fn send_request(
+        sender: &mut Self::RequestSender,
+        _request: StreamRequest,
+    ) -> eros::Result<()> {
+        match *sender {}
     }
 
     fn depacketize(

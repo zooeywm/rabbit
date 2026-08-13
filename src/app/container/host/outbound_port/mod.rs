@@ -1,11 +1,9 @@
-mod capturer_manager;
-mod converter_manager;
-mod encoder_manager;
-mod host_event_reporter;
+mod encoder_frame_converter_state;
 mod metrics_recorder;
+mod screen_capturer_state;
+mod video_encoder_state;
 
-pub(crate) use capturer_manager::{CapturerManager, CapturerManagerStateSpec};
-pub(crate) use converter_manager::{ConverterManager, ConverterManagerStateSpec};
-pub(crate) use encoder_manager::{EncoderManager, EncoderManagerStateSpec};
-pub(crate) use host_event_reporter::HostEventReporter;
+pub(crate) use encoder_frame_converter_state::EncoderFrameConverterState;
 pub(crate) use metrics_recorder::{MetricsRecorder, MetricsTarget};
+pub(crate) use screen_capturer_state::ScreenCapturerState;
+pub(crate) use video_encoder_state::VideoEncoderState;

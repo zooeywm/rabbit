@@ -8,31 +8,28 @@ use gpui_component::{
 };
 
 use crate::{
-    app::AppHandle,
+    app::{AppHandle, RunningApp},
     domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
 #[derive(Clone, Copy)]
-enum StreamState {
-    Stopped,
-    Starting,
-    Running(StreamId),
-    Stopping,
-    Restarting,
+enum StreamMode {
+    Full,
+    HostOnly,
 }
 
 #[derive(Clone, Copy)]
-enum CaptureOnlyState {
+enum StreamState {
     Stopped,
-    Starting,
-    Running,
-    Stopping,
+    Starting(StreamMode),
+    Running(StreamId, StreamMode),
+    Stopping(StreamMode),
 }
 
 struct TestUi {
     app_handle: AppHandle,
     stream_state: StreamState,
-    capture_only_state: CaptureOnlyState,
+    next_stream_id: u16,
 }
 
 impl Render for TestUi {
@@ -42,143 +39,59 @@ impl Render for TestUi {
             .gap_2()
             .child("Rabbit Test UI")
             .child(
-                Button::new("capture-only-action")
-                    .label(self.capture_only_action_label())
-                    .disabled(self.capture_only_action_disabled())
-                    .on_click(cx.listener(|this, _, _, cx| match this.capture_only_state {
-                        CaptureOnlyState::Stopped => this.start_capture_only(cx),
-                        CaptureOnlyState::Running => this.stop_capture_only(cx),
-                        CaptureOnlyState::Starting | CaptureOnlyState::Stopping => {}
-                    })),
-            )
-            .child(
                 Button::new("stream-action")
                     .primary()
-                    .label(self.stream_action_label())
-                    .disabled(self.stream_action_disabled())
+                    .label(self.stream_action_label(StreamMode::Full))
+                    .disabled(self.stream_action_disabled(StreamMode::Full))
                     .on_click(cx.listener(|this, _, _, cx| match this.stream_state {
                         StreamState::Stopped => this.start_stream(cx),
-                        StreamState::Running(_) => this.stop_stream(cx),
-                        StreamState::Starting | StreamState::Stopping | StreamState::Restarting => {
-                        }
+                        StreamState::Running(_, StreamMode::Full) => this.stop_stream(cx),
+                        _ => {}
                     })),
             )
             .child(
-                Button::new("restart")
-                    .label("Restart")
-                    .disabled(self.restart_disabled())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.restart_stream(cx);
+                Button::new("host-only-stream-action")
+                    .label(self.stream_action_label(StreamMode::HostOnly))
+                    .disabled(self.stream_action_disabled(StreamMode::HostOnly))
+                    .on_click(cx.listener(|this, _, _, cx| match this.stream_state {
+                        StreamState::Stopped => this.start_host_only_stream(cx),
+                        StreamState::Running(_, StreamMode::HostOnly) => this.stop_stream(cx),
+                        _ => {}
                     })),
             )
     }
 }
 
 impl TestUi {
-    fn stream_action_label(&self) -> &'static str {
-        match self.stream_state {
-            StreamState::Stopped => "Start",
-            StreamState::Starting => "Starting...",
-            StreamState::Running(_) => "Stop",
-            StreamState::Stopping => "Stopping...",
-            StreamState::Restarting => "Restarting...",
+    fn stream_action_label(&self, mode: StreamMode) -> &'static str {
+        match (self.stream_state, mode) {
+            (StreamState::Starting(StreamMode::Full), StreamMode::Full) => "Starting...",
+            (StreamState::Starting(StreamMode::HostOnly), StreamMode::HostOnly) => {
+                "Starting Host Only..."
+            }
+            (StreamState::Running(_, StreamMode::Full), StreamMode::Full) => "Stop",
+            (StreamState::Running(_, StreamMode::HostOnly), StreamMode::HostOnly) => {
+                "Stop Host Only"
+            }
+            (StreamState::Stopping(StreamMode::Full), StreamMode::Full) => "Stopping...",
+            (StreamState::Stopping(StreamMode::HostOnly), StreamMode::HostOnly) => {
+                "Stopping Host Only..."
+            }
+            (_, StreamMode::Full) => "Start",
+            (_, StreamMode::HostOnly) => "Start Host Only",
         }
     }
 
-    fn stream_action_disabled(&self) -> bool {
-        !matches!(self.capture_only_state, CaptureOnlyState::Stopped)
-            || matches!(
-                self.stream_state,
-                StreamState::Starting | StreamState::Stopping | StreamState::Restarting
-            )
-    }
-
-    fn restart_disabled(&self) -> bool {
-        !matches!(self.capture_only_state, CaptureOnlyState::Stopped)
-            || !matches!(self.stream_state, StreamState::Running(_))
-    }
-
-    fn capture_only_action_label(&self) -> &'static str {
-        match self.capture_only_state {
-            CaptureOnlyState::Stopped => "Start Capture Only",
-            CaptureOnlyState::Starting => "Starting Capture...",
-            CaptureOnlyState::Running => "Stop Capture Only",
-            CaptureOnlyState::Stopping => "Stopping Capture...",
-        }
-    }
-
-    fn capture_only_action_disabled(&self) -> bool {
-        !matches!(self.stream_state, StreamState::Stopped)
-            || matches!(
-                self.capture_only_state,
-                CaptureOnlyState::Starting | CaptureOnlyState::Stopping
-            )
-    }
-
-    fn start_capture_only(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.capture_only_state, CaptureOnlyState::Stopped)
-            || !matches!(self.stream_state, StreamState::Stopped)
-        {
-            return;
-        }
-
-        self.capture_only_state = CaptureOnlyState::Starting;
-        cx.notify();
-
-        let app_handle = self.app_handle.clone();
-
-        cx.spawn(async move |this, cx| {
-            let result = app_handle.start_capture_only(CaptureSourceId::new(0)).await;
-
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        tracing::info!("Test capture-only source started");
-                        this.capture_only_state = CaptureOnlyState::Running;
-                    }
-                    Err(error) => {
-                        tracing::error!(?error, "Failed to start test capture-only source");
-                        this.capture_only_state = CaptureOnlyState::Stopped;
-                    }
-                }
-
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn stop_capture_only(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.capture_only_state, CaptureOnlyState::Running) {
-            return;
-        }
-
-        self.capture_only_state = CaptureOnlyState::Stopping;
-        cx.notify();
-
-        let app_handle = self.app_handle.clone();
-
-        cx.spawn(async move |this, cx| {
-            let result = app_handle.stop_capture_only(CaptureSourceId::new(0)).await;
-
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(()) => {
-                        tracing::info!("Test capture-only source stopped");
-                        this.capture_only_state = CaptureOnlyState::Stopped;
-                    }
-                    Err(error) => {
-                        tracing::error!(?error, "Failed to stop test capture-only source");
-                        this.capture_only_state = CaptureOnlyState::Running;
-                    }
-                }
-
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+    fn stream_action_disabled(&self, mode: StreamMode) -> bool {
+        !matches!(
+            (self.stream_state, mode),
+            (StreamState::Stopped, _)
+                | (StreamState::Running(_, StreamMode::Full), StreamMode::Full)
+                | (
+                    StreamState::Running(_, StreamMode::HostOnly),
+                    StreamMode::HostOnly
+                )
+        )
     }
 
     fn start_stream(&mut self, cx: &mut Context<Self>) {
@@ -186,7 +99,7 @@ impl TestUi {
             return;
         }
 
-        self.stream_state = StreamState::Starting;
+        self.stream_state = StreamState::Starting(StreamMode::Full);
         cx.notify();
 
         let app_handle = self.app_handle.clone();
@@ -198,7 +111,48 @@ impl TestUi {
                 match result {
                     Ok(stream_id) => {
                         tracing::info!("Test stream {} started", stream_id.value());
-                        this.stream_state = StreamState::Running(stream_id);
+                        this.stream_state = StreamState::Running(stream_id, StreamMode::Full);
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "Failed to start test stream");
+                        this.stream_state = StreamState::Stopped;
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_host_only_stream(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.stream_state, StreamState::Stopped) {
+            return;
+        }
+
+        self.stream_state = StreamState::Starting(StreamMode::HostOnly);
+        let stream_id = StreamId::new(self.next_stream_id);
+        let Some(next_stream_id) = self.next_stream_id.checked_add(1) else {
+            tracing::error!("Test stream ID space is exhausted");
+            self.stream_state = StreamState::Stopped;
+            cx.notify();
+            return;
+        };
+        self.next_stream_id = next_stream_id;
+        cx.notify();
+
+        let app_handle = self.app_handle.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = app_handle
+                .simulate_remote_start_stream(CaptureSourceId::new(0), stream_id)
+                .await;
+
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        tracing::info!("Test stream {} started", stream_id.value());
+                        this.stream_state = StreamState::Running(stream_id, StreamMode::HostOnly);
                     }
                     Err(error) => {
                         tracing::error!(?error, "Failed to start test stream");
@@ -214,17 +168,20 @@ impl TestUi {
     }
 
     fn stop_stream(&mut self, cx: &mut Context<Self>) {
-        let StreamState::Running(stream_id) = self.stream_state else {
+        let StreamState::Running(stream_id, mode) = self.stream_state else {
             return;
         };
 
-        self.stream_state = StreamState::Stopping;
+        self.stream_state = StreamState::Stopping(mode);
         cx.notify();
 
         let app_handle = self.app_handle.clone();
 
         cx.spawn(async move |this, cx| {
-            let result = app_handle.remove_stream(stream_id).await;
+            let result = match mode {
+                StreamMode::Full => app_handle.remove_stream(stream_id).await,
+                StreamMode::HostOnly => app_handle.simulate_remote_remove_stream(stream_id).await,
+            };
 
             this.update(cx, |this, cx| {
                 match result {
@@ -234,54 +191,7 @@ impl TestUi {
                     }
                     Err(error) => {
                         tracing::error!(?error, "Failed to stop test stream");
-                        this.stream_state = StreamState::Running(stream_id);
-                    }
-                }
-
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn restart_stream(&mut self, cx: &mut Context<Self>) {
-        let StreamState::Running(stream_id) = self.stream_state else {
-            return;
-        };
-
-        self.stream_state = StreamState::Restarting;
-        cx.notify();
-
-        let app_handle = self.app_handle.clone();
-
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = app_handle.remove_stream(stream_id).await {
-                this.update(cx, |this, cx| {
-                    tracing::error!(?error, "Failed to stop test stream for restart");
-                    this.stream_state = StreamState::Running(stream_id);
-                    cx.notify();
-                })
-                .ok();
-
-                return;
-            }
-
-            let result = app_handle.start_stream(CaptureSourceId::new(0)).await;
-
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(new_stream_id) => {
-                        tracing::info!(
-                            "Test stream {} restarted as {}",
-                            stream_id.value(),
-                            new_stream_id.value()
-                        );
-                        this.stream_state = StreamState::Running(new_stream_id);
-                    }
-                    Err(error) => {
-                        tracing::error!(?error, "Failed to restart test stream");
-                        this.stream_state = StreamState::Stopped;
+                        this.stream_state = StreamState::Running(stream_id, mode);
                     }
                 }
 
@@ -293,7 +203,9 @@ impl TestUi {
     }
 }
 
-pub(crate) fn run(app_handle: AppHandle) -> eros::Result<()> {
+pub(crate) fn run(app: RunningApp) -> eros::Result<()> {
+    let app_handle = app.handle();
+
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
 
@@ -302,7 +214,7 @@ pub(crate) fn run(app_handle: AppHandle) -> eros::Result<()> {
                 let view = cx.new(|_| TestUi {
                     app_handle,
                     stream_state: StreamState::Stopped,
-                    capture_only_state: CaptureOnlyState::Stopped,
+                    next_stream_id: 0,
                 });
 
                 cx.new(|cx| Root::new(view, window, cx))
@@ -311,5 +223,7 @@ pub(crate) fn run(app_handle: AppHandle) -> eros::Result<()> {
         })
         .detach();
     });
+
+    drop(app);
     Ok(())
 }

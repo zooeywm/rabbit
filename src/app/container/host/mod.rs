@@ -1,94 +1,57 @@
 pub(crate) mod inbound;
-pub(crate) mod inbound_port;
 pub(crate) mod outbound_port;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, marker::PhantomData};
 
 use crate::{
     app::container::{
-        host::{
-            inbound::CaptureSourceRuntime,
-            outbound_port::{
-                CapturerManagerStateSpec, ConverterManagerStateSpec, EncoderManagerStateSpec,
-            },
-        },
+        host::inbound::CaptureSourceRuntime,
         host_stream_pipeline::{
             HostStreamPipelineContainer,
             outbound_port::{EncoderFrameConverter, VideoEncoder},
         },
-        screen_capture::outbound_port::ScreenCapturer,
+        network::inbound::EncodedUnitSender,
+        screen_capture::{ScreenCaptureContainer, outbound_port::ScreenCapturer},
     },
     domain::stream::models::vo::CaptureSourceId,
 };
 
-pub(crate) type CapturedFrameFor<CapMgrSt> =
-    <<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer as ScreenCapturer>::CapturedFrame;
+pub(crate) type CapturedFrameFor<CapSt> =
+    <ScreenCaptureContainer<CapSt> as ScreenCapturer>::CapturedFrame;
 
-pub(crate) type HostStreamPipelineFor<CvtMgrSt, EcdMgrSt> = HostStreamPipelineContainer<
-    <CvtMgrSt as ConverterManagerStateSpec>::EncoderFrameConverterState,
-    <EcdMgrSt as EncoderManagerStateSpec>::VideoEncoderState,
->;
+pub(crate) type HostStreamPipelineFor<CvtSt, EcdSt> = HostStreamPipelineContainer<CvtSt, EcdSt>;
 
-pub(crate) type EncoderInputFor<CvtMgrSt, EcdMgrSt> =
-    <HostStreamPipelineFor<CvtMgrSt, EcdMgrSt> as EncoderFrameConverter>::EncoderInput;
+pub(crate) type EncoderInputFor<CvtSt, EcdSt> =
+    <HostStreamPipelineFor<CvtSt, EcdSt> as EncoderFrameConverter>::EncoderInput;
 
-pub(crate) type EncodedBufferFor<CvtMgrSt, EcdMgrSt> =
-    <HostStreamPipelineFor<CvtMgrSt, EcdMgrSt> as VideoEncoder>::EncodedBuffer;
+pub(crate) type EncodedBufferFor<CvtSt, EcdSt> =
+    <HostStreamPipelineFor<CvtSt, EcdSt> as VideoEncoder>::EncodedBuffer;
 
-type CaptureSourceRuntimeFor<CapMgrSt> =
-    CaptureSourceRuntime<<CapMgrSt as CapturerManagerStateSpec>::ScreenCapturer>;
+type CaptureSourceRuntimeFor<CapSt> = CaptureSourceRuntime<ScreenCaptureContainer<CapSt>>;
 
-pub(crate) struct HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+pub(crate) struct HostContainer<CapSt, CvtSt, EcdSt>
 where
-    CapMgrSt: CapturerManagerStateSpec,
+    ScreenCaptureContainer<CapSt>: ScreenCapturer,
+    HostStreamPipelineFor<CvtSt, EcdSt>: VideoEncoder,
 {
-    capturer_manager_state: CapMgrSt,
-    converter_manager_state: CvtMgrSt,
-    encoder_manager_state: EcdMgrSt,
-    capture_source_runtimes: HashMap<CaptureSourceId, CaptureSourceRuntimeFor<CapMgrSt>>,
-    next_stream_id: u16,
+    capture_source_runtimes: HashMap<CaptureSourceId, CaptureSourceRuntimeFor<CapSt>>,
+    encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtSt, EcdSt>>,
+    _pipeline_state_types: PhantomData<fn() -> (CvtSt, EcdSt)>,
 }
 
-impl<CapMgrSt, CvtMgrSt, EcdMgrSt> HostContainer<CapMgrSt, CvtMgrSt, EcdMgrSt>
+impl<CapSt, CvtSt, EcdSt> HostContainer<CapSt, CvtSt, EcdSt>
 where
-    CapMgrSt: CapturerManagerStateSpec,
+    ScreenCaptureContainer<CapSt>: ScreenCapturer,
+    HostStreamPipelineFor<CvtSt, EcdSt>: VideoEncoder,
 {
     pub(crate) fn new(
-        capturer_manager_state: CapMgrSt,
-        converter_manager_state: CvtMgrSt,
-        encoder_manager_state: EcdMgrSt,
+        encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtSt, EcdSt>>,
     ) -> Self {
         Self {
-            capturer_manager_state,
-            converter_manager_state,
-            encoder_manager_state,
             capture_source_runtimes: HashMap::new(),
-            next_stream_id: 0,
+            encoded_unit_sender,
+            _pipeline_state_types: PhantomData,
         }
-    }
-
-    pub(crate) fn capturer_manager_state(&self) -> &CapMgrSt {
-        &self.capturer_manager_state
-    }
-
-    pub(crate) fn capturer_manager_state_mut(&mut self) -> &mut CapMgrSt {
-        &mut self.capturer_manager_state
-    }
-
-    pub(crate) fn converter_manager_state(&self) -> &CvtMgrSt {
-        &self.converter_manager_state
-    }
-
-    pub(crate) fn converter_manager_state_mut(&mut self) -> &mut CvtMgrSt {
-        &mut self.converter_manager_state
-    }
-
-    pub(crate) fn encoder_manager_state(&self) -> &EcdMgrSt {
-        &self.encoder_manager_state
-    }
-
-    pub(crate) fn encoder_manager_state_mut(&mut self) -> &mut EcdMgrSt {
-        &mut self.encoder_manager_state
     }
 
     pub(crate) async fn shutdown(self) -> eros::Result<()> {

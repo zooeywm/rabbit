@@ -1,5 +1,3 @@
-mod client_event_reporter;
-mod decoder_manager;
+mod video_decoder_state;
 
-pub(crate) use client_event_reporter::ClientEventReporter;
-pub(crate) use decoder_manager::{DecoderManager, DecoderManagerStateSpec};
+pub(crate) use video_decoder_state::VideoDecoderState;

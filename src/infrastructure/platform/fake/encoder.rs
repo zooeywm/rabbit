@@ -4,7 +4,7 @@ use eros::Context;
 
 use crate::{
     app::container::{
-        host::outbound_port::MetricsRecorder,
+        host::outbound_port::{MetricsRecorder, VideoEncoderState},
         host_stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber, VideoEncoder},
     },
     infrastructure::fake::converter::FakeEncoderInput,
@@ -21,6 +21,12 @@ impl FakeVideoEncoderState {
         Self {
             next_unit_number: 0,
         }
+    }
+}
+
+impl VideoEncoderState for FakeVideoEncoderState {
+    fn new() -> eros::Result<Self> {
+        Ok(Self::new())
     }
 }
 

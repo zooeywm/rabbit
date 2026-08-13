@@ -6,7 +6,7 @@ use std::{
 use eros::Context;
 
 use crate::app::container::{
-    host::outbound_port::{HostEventReporter, MetricsRecorder},
+    host::outbound_port::{EncoderFrameConverterState, MetricsRecorder, VideoEncoderState},
     host_stream_pipeline::{
         HostStreamPipelineContainer,
         inbound::LatestFrameSlot,
@@ -32,31 +32,25 @@ pub(crate) struct HostStreamPipelineWorkerHandle<Frame> {
     worker_thread: JoinHandle<eros::Result<()>>,
 }
 
-struct HostStreamPipelineWorkerExitGuard<Frame, EventReporter: HostEventReporter> {
-    capture_source_id: CaptureSourceId,
-    stream_id: StreamId,
+struct FrameSlotGuard<Frame> {
     frame_slot: Arc<LatestFrameSlot<Frame>>,
-    event_reporter: EventReporter,
 }
 
 impl HostStreamPipelineWorker {
-    pub(crate) async fn spawn<CvtSt, EcdSt, EventReporter>(
+    pub(crate) async fn spawn<CvtSt, EcdSt>(
         capture_source_id: CaptureSourceId,
         stream_id: StreamId,
-        host_stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>
-        + Send
-        + 'static,
         encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtSt, EcdSt>>,
-        event_reporter: EventReporter,
     ) -> eros::Result<HostStreamPipelineWorkerHandle<HostPipelineFrameFor<CvtSt, EcdSt>>>
     where
+        CvtSt: EncoderFrameConverterState,
+        EcdSt: VideoEncoderState,
         HostPipelineFrameFor<CvtSt, EcdSt>: Send + 'static,
         EncodedBufferFor<CvtSt, EcdSt>: Send + 'static,
         HostStreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter
             + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
             + MetricsRecorder
             + 'static,
-        EventReporter: HostEventReporter,
     {
         let frame_slot = Arc::new(LatestFrameSlot::new());
         let worker_frame_slot = Arc::clone(&frame_slot);
@@ -66,17 +60,13 @@ impl HostStreamPipelineWorker {
         let worker_thread = thread::Builder::new()
             .name(format!("host-stream-pipeline-{}", stream_id.value()))
             .spawn(move || {
-                let _exit_guard = HostStreamPipelineWorkerExitGuard {
-                    capture_source_id,
-                    stream_id,
+                let _frame_slot_guard = FrameSlotGuard {
                     frame_slot: exit_frame_slot,
-                    event_reporter,
                 };
 
                 run_host_stream_pipeline_worker(
                     capture_source_id,
                     stream_id,
-                    host_stream_pipeline_states_constructor,
                     encoded_unit_sender,
                     worker_frame_slot,
                     started_sender,
@@ -96,13 +86,9 @@ impl HostStreamPipelineWorker {
     }
 }
 
-impl<Frame, EventReporter: HostEventReporter> Drop
-    for HostStreamPipelineWorkerExitGuard<Frame, EventReporter>
-{
+impl<Frame> Drop for FrameSlotGuard<Frame> {
     fn drop(&mut self) {
         self.frame_slot.close();
-        self.event_reporter
-            .report_host_stream_pipeline_worker_exited(self.capture_source_id, self.stream_id);
     }
 }
 
@@ -137,23 +123,22 @@ impl<Frame> HostStreamPipelineWorkerHandle<Frame> {
 fn run_host_stream_pipeline_worker<CvtSt, EcdSt>(
     capture_source_id: CaptureSourceId,
     stream_id: StreamId,
-    host_stream_pipeline_states_constructor: impl FnOnce() -> eros::Result<(CvtSt, EcdSt)>,
     encoded_unit_sender: EncodedUnitSender<EncodedBufferFor<CvtSt, EcdSt>>,
     frame_slot: Arc<LatestFrameSlot<HostPipelineFrameFor<CvtSt, EcdSt>>>,
     started_sender: flume::Sender<()>,
 ) -> eros::Result<()>
 where
+    CvtSt: EncoderFrameConverterState,
+    EcdSt: VideoEncoderState,
     HostStreamPipelineContainer<CvtSt, EcdSt>: EncoderFrameConverter
         + VideoEncoder<EncoderInput = EncoderInputFor<CvtSt, EcdSt>>
         + MetricsRecorder,
 {
-    let (encoder_frame_converter_state, video_encoder_state) =
-        host_stream_pipeline_states_constructor()?;
     let mut host_stream_pipeline = HostStreamPipelineContainer::new(
         capture_source_id,
         stream_id,
-        encoder_frame_converter_state,
-        video_encoder_state,
+        CvtSt::new()?,
+        EcdSt::new()?,
     );
     host_stream_pipeline.register_metrics_target();
 

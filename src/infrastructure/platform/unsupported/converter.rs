@@ -1,7 +1,13 @@
 use std::convert::Infallible;
 
-#[derive(kudi::DepInj)]
-#[target(UnsupportedEncoderFrameConverterImpl)]
+use crate::app::container::host::outbound_port::EncoderFrameConverterState;
+
 pub(crate) struct UnsupportedEncoderFrameConverterState {
     never: Infallible,
+}
+
+impl EncoderFrameConverterState for UnsupportedEncoderFrameConverterState {
+    fn new() -> eros::Result<Self> {
+        eros::bail!("Rabbit is unsupported on {}", std::env::consts::OS)
+    }
 }

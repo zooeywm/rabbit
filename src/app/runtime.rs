@@ -3,78 +3,40 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use eros::Context;
+use eros::{Context, bail};
+use futures_util::FutureExt;
 
 use crate::{
-    app::container::{
-        client::{inbound_port::ClientApplication, outbound_port::ClientEventReporter},
-        host::{inbound_port::HostApplication, outbound_port::HostEventReporter},
-        network::{
-            NetworkContainer,
-            inbound::NetworkWorker,
-            outbound_port::{NetworkMetricsRecorder, TransporterClientSide, TransporterHostSide},
-        },
-        root::{
-            AppContainer, AppRunExit, TransporterStateFor,
-            outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
-        },
+    app::container::network::inbound::NetworkWorker,
+    domain::stream::models::{
+        StreamRequest,
+        vo::{CaptureSourceId, StreamId},
     },
-    domain::stream::models::vo::{CaptureSourceId, StreamId},
 };
 
-#[cfg(feature = "test-ui")]
-pub(crate) mod capture_only;
-
 pub(crate) enum AppMessage {
-    #[cfg(feature = "test-ui")]
-    CaptureOnly(capture_only::CaptureOnlyMessage),
-    StartStream {
+    User(UserMessage),
+    Network(NetworkMessage),
+}
+
+pub(crate) enum UserMessage {
+    Start {
         capture_source_id: CaptureSourceId,
         response_sender: flume::Sender<eros::Result<StreamId>>,
     },
-    RemoveStream {
+    Remove {
         stream_id: StreamId,
         response_sender: flume::Sender<eros::Result<()>>,
     },
-    CaptureWorkerExited {
-        capture_source_id: CaptureSourceId,
-    },
-    HostStreamPipelineWorkerExited {
-        capture_source_id: CaptureSourceId,
-        stream_id: StreamId,
-    },
-    ClientStreamPipelineWorkerExited {
-        stream_id: StreamId,
-    },
-    NetworkWorkerExited,
-    Shutdown,
 }
 
-impl HostEventReporter for flume::Sender<AppMessage> {
-    fn report_capture_worker_exited(&self, capture_source_id: CaptureSourceId) {
-        let _ = self.send(AppMessage::CaptureWorkerExited { capture_source_id });
-    }
-
-    fn report_host_stream_pipeline_worker_exited(
-        &self,
-        capture_source_id: CaptureSourceId,
-        stream_id: StreamId,
-    ) {
-        let _ = self.send(AppMessage::HostStreamPipelineWorkerExited {
-            capture_source_id,
-            stream_id,
-        });
-    }
-}
-
-impl ClientEventReporter for flume::Sender<AppMessage> {
-    fn report_client_stream_pipeline_worker_exited(&self, stream_id: StreamId) {
-        let _ = self.send(AppMessage::ClientStreamPipelineWorkerExited { stream_id });
-    }
+pub(crate) enum NetworkMessage {
+    Request(StreamRequest),
 }
 
 pub(super) struct AppRuntime {
     app_handle: AppHandle,
+    shutdown_sender: flume::Sender<()>,
     app_thread: JoinHandle<eros::Result<()>>,
 }
 
@@ -84,54 +46,100 @@ pub(crate) struct AppHandle {
 }
 
 impl AppRuntime {
-    pub(super) fn start<Host, Client, NetworkConstructorState, AppRuntimeGuard>(
-        app_constructor: impl FnOnce() -> eros::Result<(
-            AppContainer<Host, Client, NetworkConstructorState>,
-            AppRuntimeGuard,
-        )> + Send
-        + 'static,
-    ) -> eros::Result<Self>
-    where
-        Host: HostApplication,
-        Client: ClientApplication,
-        NetworkConstructorState: TransporterConstructorStateSpec,
-        NetworkContainer<TransporterStateFor<NetworkConstructorState>>: TransporterHostSide<EncodedBuffer = Host::EncodedBuffer>
-            + TransporterClientSide<Depacketized = Client::NetworkInput>
-            + NetworkMetricsRecorder,
-        AppContainer<Host, Client, NetworkConstructorState>:
-            TransporterConstructor<State = NetworkConstructorState>,
-    {
+    pub(super) fn start() -> eros::Result<Self> {
         let (message_sender, message_receiver) = flume::unbounded();
+        let (shutdown_sender, shutdown_receiver) = flume::bounded(1);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
-        let app_message_sender = message_sender.clone();
+        let container_app_message_sender = message_sender.clone();
 
         let app_thread = thread::Builder::new()
             .name("app".to_owned())
             .spawn(move || {
                 let runtime = compio::runtime::Runtime::new()
                     .with_context(|| "Failed to create Compio runtime for app")?;
-                let (app, _app_runtime_guard) = runtime
-                    .enter(app_constructor)
-                    .with_context(|| "Failed to construct app")?;
-                let transporter_constructor = app.compose_transporter()?;
-                let network_worker =
-                    NetworkWorker::spawn(transporter_constructor, app_message_sender.clone())?;
-                let encoded_unit_sender = network_worker.sender();
-                let client_stream_control_sender = network_worker.client_stream_control_sender();
+                let (mut host, mut client, networks) = runtime
+                    .enter(|| crate::composition::compose_containers(container_app_message_sender))
+                    .with_context(|| "Failed to construct application containers")?;
+                let mut network_workers = Vec::with_capacity(networks.len());
+                for network in networks {
+                    match NetworkWorker::spawn(network) {
+                        Ok(worker) => network_workers.push(worker),
+                        Err(error) => {
+                            for worker in network_workers {
+                                let _ = runtime.block_on(worker.shutdown());
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
 
                 started_sender
                     .send(())
                     .with_context(|| "Failed to report app startup")?;
 
-                let app_exit = runtime.block_on(app.run(
-                    encoded_unit_sender,
-                    client_stream_control_sender,
-                    app_message_sender,
-                    message_receiver,
-                ));
-                let network_result = runtime.block_on(network_worker.shutdown());
+                let app_result = runtime.block_on(async move {
+                    loop {
+                        let message = message_receiver.recv_async().fuse();
+                        let shutdown = shutdown_receiver.recv_async().fuse();
+                        futures_util::pin_mut!(message, shutdown);
+                        let message = futures_util::select_biased! {
+                            _ = shutdown => break,
+                            message = message => message,
+                        };
 
-                select_app_and_network_result(app_exit, network_result)
+                        match message {
+                            Ok(AppMessage::User(UserMessage::Start {
+                                capture_source_id,
+                                response_sender,
+                            })) => {
+                                let result = client.start_stream(capture_source_id).await;
+                                response_sender
+                                    .send(result)
+                                    .with_context(|| "Failed response StartStream")?;
+                            }
+                            Ok(AppMessage::User(UserMessage::Remove {
+                                stream_id,
+                                response_sender,
+                            })) => {
+                                response_sender
+                                    .send(client.remove_stream(stream_id).await)
+                                    .with_context(|| "Failed response RemoveStream")?;
+                            }
+                            Ok(AppMessage::Network(NetworkMessage::Request(request))) => {
+                                let result = match request {
+                                    StreamRequest::Start {
+                                        capture_source_id,
+                                        stream_id,
+                                    } => host.start_stream(capture_source_id, stream_id).await,
+                                    StreamRequest::Remove { stream_id } => {
+                                        host.remove_stream(stream_id).await
+                                    }
+                                };
+                                if let Err(error) = result {
+                                    tracing::error!(?error, "Failed to handle network request");
+                                }
+                            }
+                            Err(e) => bail!("Failed recv app message: {:?}", e),
+                        }
+                    }
+
+                    let host_result = host.shutdown().await;
+                    let client_result = client.shutdown().await;
+
+                    host_result?;
+                    client_result
+                });
+                let mut network_result = Ok(());
+                for worker in network_workers {
+                    if let Err(error) = runtime.block_on(worker.shutdown())
+                        && network_result.is_ok()
+                    {
+                        network_result = Err(error);
+                    }
+                }
+
+                app_result?;
+                network_result
             })
             .with_context(|| "Failed to spawn app thread")?;
 
@@ -142,6 +150,7 @@ impl AppRuntime {
 
         Ok(Self {
             app_handle: AppHandle { message_sender },
+            shutdown_sender,
             app_thread,
         })
     }
@@ -149,10 +158,12 @@ impl AppRuntime {
     pub(super) fn shutdown(self) -> eros::Result<()> {
         let Self {
             app_handle,
+            shutdown_sender,
             app_thread,
         } = self;
 
-        let send_result = app_handle.message_sender.send(AppMessage::Shutdown);
+        let send_result = shutdown_sender.send(());
+        drop(app_handle);
 
         join_app_thread(app_thread)?;
 
@@ -166,20 +177,6 @@ impl AppRuntime {
     }
 }
 
-fn select_app_and_network_result(
-    app_exit: AppRunExit,
-    network_result: eros::Result<()>,
-) -> eros::Result<()> {
-    match app_exit {
-        AppRunExit::Application(Err(error)) => Err(error),
-        AppRunExit::Application(Ok(())) => network_result,
-        AppRunExit::NetworkWorkerExited => match network_result {
-            Err(error) => Err(error),
-            Ok(()) => eros::bail!("Network worker exited unexpectedly"),
-        },
-    }
-}
-
 impl AppHandle {
     pub(crate) async fn start_stream(
         &self,
@@ -188,10 +185,10 @@ impl AppHandle {
         let (response_sender, response_receiver) = flume::bounded(1);
 
         self.message_sender
-            .send(AppMessage::StartStream {
+            .send(AppMessage::User(UserMessage::Start {
                 capture_source_id,
                 response_sender,
-            })
+            }))
             .with_context(|| "App stopped before stream could be started")?;
 
         response_receiver
@@ -204,10 +201,10 @@ impl AppHandle {
         let (response_sender, response_receiver) = flume::bounded(1);
 
         self.message_sender
-            .send(AppMessage::RemoveStream {
+            .send(AppMessage::User(UserMessage::Remove {
                 stream_id,
                 response_sender,
-            })
+            }))
             .with_context(|| "App stopped before stream could be removed")?;
 
         response_receiver
@@ -215,38 +212,43 @@ impl AppHandle {
             .await
             .with_context(|| "App stopped while removing stream")?
     }
+
+    #[cfg(feature = "test-ui")]
+    pub(crate) async fn simulate_remote_start_stream(
+        &self,
+        capture_source_id: CaptureSourceId,
+        stream_id: StreamId,
+    ) -> eros::Result<()> {
+        self.simulate_remote_network_request(StreamRequest::Start {
+            capture_source_id,
+            stream_id,
+        })
+        .await
+    }
+
+    #[cfg(feature = "test-ui")]
+    pub(crate) async fn simulate_remote_remove_stream(
+        &self,
+        stream_id: StreamId,
+    ) -> eros::Result<()> {
+        self.simulate_remote_network_request(StreamRequest::Remove { stream_id })
+            .await
+    }
+
+    #[cfg(feature = "test-ui")]
+    async fn simulate_remote_network_request(&self, request: StreamRequest) -> eros::Result<()> {
+        self.message_sender
+            .send_async(AppMessage::Network(NetworkMessage::Request(request)))
+            .await
+            .map_err(|_| {
+                eros::error!("App stopped before simulated remote request could be handled")
+            })
+    }
 }
 
 fn join_app_thread(app_thread: JoinHandle<eros::Result<()>>) -> eros::Result<()> {
     match app_thread.join() {
         Ok(result) => result,
         Err(_) => eros::bail!("App thread panicked"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn application_failure_precedes_network_cleanup_failure() {
-        let result = select_app_and_network_result(
-            AppRunExit::Application(Err(eros::error!("Application failed first"))),
-            Err(eros::error!("Network cleanup failed second")),
-        );
-
-        let error = result.expect_err("application failure should be returned");
-        assert!(error.to_string().contains("Application failed first"));
-    }
-
-    #[test]
-    fn network_exit_uses_the_network_root_cause() {
-        let result = select_app_and_network_result(
-            AppRunExit::NetworkWorkerExited,
-            Err(eros::error!("Network root cause")),
-        );
-
-        let error = result.expect_err("network failure should be returned");
-        assert!(error.to_string().contains("Network root cause"));
     }
 }

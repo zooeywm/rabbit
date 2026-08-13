@@ -17,16 +17,6 @@ pub(in crate::app::container::host) struct CaptureSourceRuntime<Capturer: Screen
 }
 
 impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
-    #[cfg(feature = "test-ui")]
-    pub(in crate::app::container::host) fn capture_only(
-        capture_worker_handle: CaptureWorkerHandle<Capturer>,
-    ) -> Self {
-        Self {
-            capture_worker_handle,
-            host_stream_pipeline_handles: HashMap::new(),
-        }
-    }
-
     pub(in crate::app::container::host) fn new(
         capture_worker_handle: CaptureWorkerHandle<Capturer>,
         initial_stream_id: StreamId,
@@ -54,34 +44,6 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
         }
 
         let mut first_error = capture_worker_handle.shutdown().await.err();
-
-        for host_stream_pipeline_handle in host_stream_pipeline_handles.into_values() {
-            if let Err(error) = host_stream_pipeline_handle.shutdown().await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-
-        match first_error {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
-    pub(in crate::app::container::host) async fn shutdown_after_capture_worker_exit(
-        self,
-    ) -> eros::Result<()> {
-        let Self {
-            capture_worker_handle,
-            host_stream_pipeline_handles,
-        } = self;
-
-        for host_stream_pipeline_handle in host_stream_pipeline_handles.values() {
-            host_stream_pipeline_handle.close();
-        }
-
-        let mut first_error = capture_worker_handle.join().await.err();
 
         for host_stream_pipeline_handle in host_stream_pipeline_handles.into_values() {
             if let Err(error) = host_stream_pipeline_handle.shutdown().await
@@ -138,27 +100,16 @@ impl<Capturer: ScreenCapturer> CaptureSourceRuntime<Capturer> {
             .get(&stream_id)
             .with_context(|| "Host stream pipeline does not exist")?;
 
-        self.capture_worker_handle.remove_stream(stream_id).await?;
+        let capture_result = self.capture_worker_handle.remove_stream(stream_id).await;
 
         let host_stream_pipeline_handle = self
             .host_stream_pipeline_handles
             .remove(&stream_id)
             .with_context(|| "Host stream pipeline disappeared while removing stream")?;
 
-        host_stream_pipeline_handle.shutdown().await
-    }
+        let pipeline_result = host_stream_pipeline_handle.shutdown().await;
 
-    pub(in crate::app::container::host) async fn remove_stream_after_host_pipeline_exit(
-        &mut self,
-        stream_id: StreamId,
-    ) -> eros::Result<()> {
-        let host_stream_pipeline_handle = self
-            .host_stream_pipeline_handles
-            .remove(&stream_id)
-            .with_context(|| "Host stream pipeline does not exist")?;
-
-        let _ = self.capture_worker_handle.remove_stream(stream_id).await;
-
-        host_stream_pipeline_handle.shutdown().await
+        pipeline_result?;
+        capture_result
     }
 }

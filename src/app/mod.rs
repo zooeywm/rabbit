@@ -1,57 +1,46 @@
 mod config;
 pub(crate) mod container;
 mod logging;
+mod metrics;
 mod runtime;
 
 use config::Config;
-use container::{
-    client::inbound_port::ClientApplication,
-    host::inbound_port::HostApplication,
-    network::{
-        NetworkContainer,
-        outbound_port::{NetworkMetricsRecorder, TransporterClientSide, TransporterHostSide},
-    },
-    root::{
-        AppContainer, TransporterStateFor,
-        outbound_port::{TransporterConstructor, TransporterConstructorStateSpec},
-    },
-};
 use directories::ProjectDirs;
 use eros::Context;
 use runtime::AppRuntime;
 
-pub(crate) use runtime::AppHandle;
+pub(crate) use runtime::{AppHandle, AppMessage};
 
-pub(crate) fn run<Host, Client, NetworkConstructorState, AppRuntimeGuard>(
-    app_constructor: impl FnOnce() -> eros::Result<(
-        AppContainer<Host, Client, NetworkConstructorState>,
-        AppRuntimeGuard,
-    )> + Send
-    + 'static,
-    run_presentation: impl FnOnce(AppHandle) -> eros::Result<()>,
-) -> eros::Result<()>
-where
-    Host: HostApplication,
-    Client: ClientApplication,
-    NetworkConstructorState: TransporterConstructorStateSpec,
-    NetworkContainer<TransporterStateFor<NetworkConstructorState>>: TransporterHostSide<EncodedBuffer = Host::EncodedBuffer>
-        + TransporterClientSide<Depacketized = Client::NetworkInput>
-        + NetworkMetricsRecorder,
-    AppContainer<Host, Client, NetworkConstructorState>:
-        TransporterConstructor<State = NetworkConstructorState>,
-{
+pub(crate) struct RunningApp {
+    app_runtime: AppRuntime,
+    _logging_guard: logging::LoggingGuard,
+    _metrics_guard: metrics::MetricsGuard,
+}
+
+pub(crate) fn run() -> eros::Result<RunningApp> {
     let project_dirs = ProjectDirs::from("", "", "rabbit")
         .with_context(|| "Failed looking for app project dir")?;
 
     let config = Config::load(&project_dirs)?;
-    let _logging_guard = logging::init(&project_dirs, &config.logging)?;
-    let app_runtime = AppRuntime::start(app_constructor)?;
+    let logging_guard = logging::init(&project_dirs, &config.logging)?;
+    let metrics_guard = metrics::init();
+    let app_runtime = AppRuntime::start()?;
 
     tracing::info!("rabbit started");
 
-    let presentation_result = run_presentation(app_runtime.handle());
-    let shutdown_result = app_runtime.shutdown();
+    Ok(RunningApp {
+        app_runtime,
+        _logging_guard: logging_guard,
+        _metrics_guard: metrics_guard,
+    })
+}
 
-    presentation_result?;
-    shutdown_result
+impl RunningApp {
+    pub(crate) fn handle(&self) -> AppHandle {
+        self.app_runtime.handle()
+    }
+
+    pub(crate) fn shutdown(self) -> eros::Result<()> {
+        self.app_runtime.shutdown()
+    }
 }

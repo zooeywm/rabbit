@@ -8,7 +8,7 @@ use eros::Context;
 use super::{DecodeUnitSender, LatestDecodedFrameSlot, decode_unit_queue::DecodeUnitReceiver};
 use crate::{
     app::container::{
-        client::outbound_port::ClientEventReporter,
+        client::outbound_port::VideoDecoderState,
         client_stream_pipeline::{
             ClientStreamPipelineContainer,
             outbound_port::{DecodedVideoFrame, VideoDecodeUnit, VideoDecoder},
@@ -30,29 +30,22 @@ pub(crate) struct ClientStreamPipelineWorkerHandle<Input, DecodedFrame> {
     worker_thread: JoinHandle<eros::Result<()>>,
 }
 
-struct ClientStreamPipelineWorkerExitGuard<Input, DecodedFrame, EventReporter>
-where
-    EventReporter: ClientEventReporter,
-{
-    stream_id: StreamId,
+struct PipelineResourcesGuard<Input, DecodedFrame> {
     input_sender: DecodeUnitSender<Input>,
     decoded_frame_slot: Arc<LatestDecodedFrameSlot<DecodedFrame>>,
-    event_reporter: EventReporter,
 }
 
 impl ClientStreamPipelineWorker {
-    pub(crate) async fn spawn<DcdSt, EventReporter>(
+    pub(crate) async fn spawn<DcdSt>(
         stream_id: StreamId,
-        decoder_constructor: impl FnOnce() -> eros::Result<DcdSt> + Send + 'static,
-        event_reporter: EventReporter,
     ) -> eros::Result<
         ClientStreamPipelineWorkerHandle<DecoderInputFor<DcdSt>, DecodedFrameFor<DcdSt>>,
     >
     where
+        DcdSt: VideoDecoderState,
         DecoderInputFor<DcdSt>: VideoDecodeUnit + Send + 'static,
         DecodedBufferFor<DcdSt>: Send + 'static,
         ClientStreamPipelineContainer<DcdSt>: VideoDecoder + 'static,
-        EventReporter: ClientEventReporter,
     {
         let (input_sender, input_receiver) = DecodeUnitSender::channel();
         let decoded_frame_slot = Arc::new(LatestDecodedFrameSlot::new());
@@ -64,15 +57,12 @@ impl ClientStreamPipelineWorker {
         let worker_thread = thread::Builder::new()
             .name(format!("client-stream-pipeline-{}", stream_id.value()))
             .spawn(move || {
-                let _exit_guard = ClientStreamPipelineWorkerExitGuard {
-                    stream_id,
+                let _resources_guard = PipelineResourcesGuard {
                     input_sender: exit_input_sender,
                     decoded_frame_slot: exit_decoded_frame_slot,
-                    event_reporter,
                 };
 
                 run_client_stream_pipeline_worker(
-                    decoder_constructor,
                     input_receiver,
                     worker_decoded_frame_slot,
                     started_sender,
@@ -93,16 +83,10 @@ impl ClientStreamPipelineWorker {
     }
 }
 
-impl<Input, DecodedFrame, EventReporter> Drop
-    for ClientStreamPipelineWorkerExitGuard<Input, DecodedFrame, EventReporter>
-where
-    EventReporter: ClientEventReporter,
-{
+impl<Input, DecodedFrame> Drop for PipelineResourcesGuard<Input, DecodedFrame> {
     fn drop(&mut self) {
         self.input_sender.close();
         self.decoded_frame_slot.close();
-        self.event_reporter
-            .report_client_stream_pipeline_worker_exited(self.stream_id);
     }
 }
 
@@ -137,15 +121,15 @@ impl<Input, DecodedFrame> ClientStreamPipelineWorkerHandle<Input, DecodedFrame> 
 }
 
 fn run_client_stream_pipeline_worker<DcdSt>(
-    decoder_constructor: impl FnOnce() -> eros::Result<DcdSt>,
     input_receiver: DecodeUnitReceiver<DecoderInputFor<DcdSt>>,
     decoded_frame_slot: Arc<LatestDecodedFrameSlot<DecodedFrameFor<DcdSt>>>,
     started_sender: flume::Sender<()>,
 ) -> eros::Result<()>
 where
+    DcdSt: VideoDecoderState,
     ClientStreamPipelineContainer<DcdSt>: VideoDecoder,
 {
-    let mut pipeline = ClientStreamPipelineContainer::new(decoder_constructor()?);
+    let mut pipeline = ClientStreamPipelineContainer::new(DcdSt::new()?);
     started_sender
         .send(())
         .with_context(|| "Failed to report Client stream pipeline worker startup")?;
@@ -185,7 +169,7 @@ mod tests {
     use std::{
         rc::Rc,
         sync::{
-            Arc,
+            Mutex,
             atomic::{AtomicBool, Ordering},
         },
         thread,
@@ -214,16 +198,32 @@ mod tests {
     struct NonSendDecoderState {
         _not_send: Rc<()>,
         pending: Option<DecodedVideoFrame<u64>>,
-        caller_thread_id: thread::ThreadId,
-        dropped_on_worker: Arc<AtomicBool>,
+    }
+
+    static CALLER_THREAD_ID: Mutex<Option<thread::ThreadId>> = Mutex::new(None);
+    static CONSTRUCTED_ON_WORKER: AtomicBool = AtomicBool::new(false);
+    static DROPPED_ON_WORKER: AtomicBool = AtomicBool::new(false);
+
+    impl VideoDecoderState for NonSendDecoderState {
+        fn new() -> eros::Result<Self> {
+            let caller_thread_id = CALLER_THREAD_ID
+                .lock()
+                .expect("decoder test caller thread mutex should not be poisoned")
+                .expect("decoder test caller thread should be registered");
+            CONSTRUCTED_ON_WORKER.store(
+                thread::current().id() != caller_thread_id,
+                Ordering::Relaxed,
+            );
+            Ok(Self {
+                _not_send: Rc::new(()),
+                pending: None,
+            })
+        }
     }
 
     impl Drop for NonSendDecoderState {
         fn drop(&mut self) {
-            self.dropped_on_worker.store(
-                thread::current().id() != self.caller_thread_id,
-                Ordering::Relaxed,
-            );
+            DROPPED_ON_WORKER.store(true, Ordering::Relaxed);
         }
     }
 
@@ -247,38 +247,20 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct TestEventReporter;
-
-    impl ClientEventReporter for TestEventReporter {
-        fn report_client_stream_pipeline_worker_exited(&self, _stream_id: StreamId) {}
-    }
-
     #[test]
     fn constructs_decodes_and_drops_non_send_decoder_on_its_worker_thread() -> eros::Result<()> {
         let caller_thread_id = thread::current().id();
-        let constructed_on_worker = Arc::new(AtomicBool::new(false));
-        let constructed_flag = Arc::clone(&constructed_on_worker);
-        let dropped_on_worker = Arc::new(AtomicBool::new(false));
-        let dropped_flag = Arc::clone(&dropped_on_worker);
+        *CALLER_THREAD_ID
+            .lock()
+            .expect("decoder test caller thread mutex should not be poisoned") =
+            Some(caller_thread_id);
+        CONSTRUCTED_ON_WORKER.store(false, Ordering::Relaxed);
+        DROPPED_ON_WORKER.store(false, Ordering::Relaxed);
         let frame_id = FrameId::new(CaptureSourceId::new(4), 8);
         let runtime = compio::runtime::Runtime::new()?;
 
-        let handle = runtime.block_on(ClientStreamPipelineWorker::spawn(
+        let handle = runtime.block_on(ClientStreamPipelineWorker::spawn::<NonSendDecoderState>(
             StreamId::new(3),
-            move || {
-                constructed_flag.store(
-                    thread::current().id() != caller_thread_id,
-                    Ordering::Relaxed,
-                );
-                Ok(NonSendDecoderState {
-                    _not_send: Rc::new(()),
-                    pending: None,
-                    caller_thread_id,
-                    dropped_on_worker: dropped_flag,
-                })
-            },
-            TestEventReporter,
         ))?;
         let input_sender = handle.input_sender();
         let decoded_frame_slot = handle.decoded_frame_slot();
@@ -304,8 +286,8 @@ mod tests {
         assert_eq!(decoded.buffer, 42);
 
         runtime.block_on(handle.shutdown())?;
-        assert!(constructed_on_worker.load(Ordering::Relaxed));
-        assert!(dropped_on_worker.load(Ordering::Relaxed));
+        assert!(CONSTRUCTED_ON_WORKER.load(Ordering::Relaxed));
+        assert!(DROPPED_ON_WORKER.load(Ordering::Relaxed));
         Ok(())
     }
 }

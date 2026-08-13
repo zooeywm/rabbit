@@ -21,7 +21,7 @@ pub(crate) struct ClientStreamControlSender<Input> {
     sender: flume::Sender<ClientStreamControl<Input>>,
 }
 
-pub(super) struct ClientStreamControlReceiver<Input> {
+pub(crate) struct ClientStreamControlReceiver<Input> {
     receiver: flume::Receiver<ClientStreamControl<Input>>,
 }
 
@@ -34,7 +34,7 @@ impl<Input> Clone for ClientStreamControlSender<Input> {
 }
 
 impl<Input> ClientStreamControlSender<Input> {
-    pub(super) fn channel() -> (Self, ClientStreamControlReceiver<Input>) {
+    pub(crate) fn channel() -> (Self, ClientStreamControlReceiver<Input>) {
         let (sender, receiver) = flume::bounded(CLIENT_STREAM_CONTROL_CAPACITY);
         (Self { sender }, ClientStreamControlReceiver { receiver })
     }

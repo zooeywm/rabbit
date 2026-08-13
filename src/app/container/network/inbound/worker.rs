@@ -9,74 +9,56 @@ use eros::Context;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 
 use super::{
-    client_stream_control::{
-        ClientStreamControl, ClientStreamControlReceiver, ClientStreamControlSender,
-    },
+    client_stream_control::{ClientStreamControl, ClientStreamControlReceiver},
+    network_request::NetworkRequestReceiver,
     unit_queue::EncodedUnitReceiver,
 };
 use crate::app::{
     container::network::{
-        NetworkContainer, NetworkMetricsHandle,
-        inbound::EncodedUnitSender,
+        ConfiguredNetworkContainer, NetworkContainer, NetworkMetricsHandle,
         outbound_port::{
-            NetworkMetricsRecorder, SentBytes, TransporterClientSide, TransporterHostSide,
+            NetworkMetricsRecorder, NetworkState, SentBytes, TransporterClientSide,
+            TransporterHostSide,
         },
     },
-    runtime::AppMessage,
+    runtime::{AppMessage, NetworkMessage},
 };
 
 pub(crate) struct NetworkWorker;
 
-pub(crate) struct NetworkWorkerHandle<Buffer, ClientInput> {
-    sender: EncodedUnitSender<Buffer>,
-    client_stream_control_sender: ClientStreamControlSender<ClientInput>,
+pub(crate) struct NetworkWorkerHandle {
     shutdown_sender: flume::Sender<()>,
     worker_thread: JoinHandle<eros::Result<()>>,
-}
-
-struct NetworkWorkerExitGuard {
-    app_message_sender: flume::Sender<AppMessage>,
 }
 
 struct NetworkQueueMetricsGuard;
 
 impl NetworkWorker {
-    pub(crate) fn spawn<State, Constructor>(
-        transporter_constructor: Constructor,
-        app_message_sender: flume::Sender<AppMessage>,
-    ) -> eros::Result<
-        NetworkWorkerHandle<
-            <NetworkContainer<State> as TransporterHostSide>::EncodedBuffer,
-            <NetworkContainer<State> as TransporterClientSide>::Depacketized,
-        >,
-    >
+    pub(crate) fn spawn<State>(
+        network: ConfiguredNetworkContainer<State>,
+    ) -> eros::Result<NetworkWorkerHandle>
     where
-        State: 'static,
-        Constructor: FnOnce() -> eros::Result<State> + Send + 'static,
-        NetworkContainer<State>:
-            TransporterHostSide + TransporterClientSide + NetworkMetricsRecorder,
+        State: NetworkState,
+        NetworkContainer<State>: TransporterHostSide<EncodedBuffer = State::EncodedBuffer>
+            + TransporterClientSide<Depacketized = State::ClientInput>
+            + NetworkMetricsRecorder,
         <NetworkContainer<State> as TransporterHostSide>::EncodedBuffer: Send + 'static,
         <NetworkContainer<State> as TransporterHostSide>::Packetized: 'static,
         <NetworkContainer<State> as TransporterClientSide>::Received: 'static,
         <NetworkContainer<State> as TransporterClientSide>::Depacketized:
             crate::app::container::client_stream_pipeline::outbound_port::VideoDecodeUnit,
     {
-        let (sender, receiver) = EncodedUnitReceiver::channel();
-        let (client_stream_control_sender, client_stream_control_receiver) =
-            ClientStreamControlSender::channel();
         let (shutdown_sender, shutdown_receiver) = flume::bounded(1);
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
         let worker_thread = thread::Builder::new()
             .name("network".to_owned())
             .spawn(move || {
-                let _exit_guard = NetworkWorkerExitGuard { app_message_sender };
                 let runtime = compio::runtime::Runtime::new()
                     .with_context(|| "Failed to create Compio runtime for network worker")?;
+                let network = network.initialize()?;
 
                 runtime.block_on(run_network_worker(
-                    transporter_constructor,
-                    receiver,
-                    client_stream_control_receiver,
+                    network,
                     shutdown_receiver,
                     started_sender,
                 ))
@@ -89,37 +71,18 @@ impl NetworkWorker {
         }
 
         Ok(NetworkWorkerHandle {
-            sender,
-            client_stream_control_sender,
             shutdown_sender,
             worker_thread,
         })
     }
 }
 
-impl Drop for NetworkWorkerExitGuard {
-    fn drop(&mut self) {
-        let _ = self
-            .app_message_sender
-            .send(AppMessage::NetworkWorkerExited);
-    }
-}
-
-impl<Buffer, ClientInput> NetworkWorkerHandle<Buffer, ClientInput> {
-    pub(crate) fn sender(&self) -> EncodedUnitSender<Buffer> {
-        self.sender.clone()
-    }
-
-    pub(crate) fn client_stream_control_sender(&self) -> ClientStreamControlSender<ClientInput> {
-        self.client_stream_control_sender.clone()
-    }
-
+impl NetworkWorkerHandle {
     pub(crate) async fn shutdown(self) -> eros::Result<()> {
         let Self {
-            sender: _sender,
-            client_stream_control_sender: _client_stream_control_sender,
             shutdown_sender,
             worker_thread,
+            ..
         } = self;
         let _ = shutdown_sender.try_send(());
 
@@ -130,34 +93,36 @@ impl<Buffer, ClientInput> NetworkWorkerHandle<Buffer, ClientInput> {
     }
 }
 
-async fn run_network_worker<State, Constructor>(
-    transporter_constructor: Constructor,
-    encoded_receiver: EncodedUnitReceiver<
-        <NetworkContainer<State> as TransporterHostSide>::EncodedBuffer,
-    >,
-    client_stream_control_receiver: ClientStreamControlReceiver<
-        <NetworkContainer<State> as TransporterClientSide>::Depacketized,
-    >,
+async fn run_network_worker<State>(
+    mut network: NetworkContainer<State>,
     worker_shutdown_receiver: flume::Receiver<()>,
     started_sender: mpsc::SyncSender<()>,
 ) -> eros::Result<()>
 where
-    State: 'static,
-    Constructor: FnOnce() -> eros::Result<State>,
-    NetworkContainer<State>:
-        TransporterHostSide + TransporterClientSide + NetworkMetricsRecorder + 'static,
+    State: NetworkState,
+    NetworkContainer<State>: TransporterHostSide<EncodedBuffer = State::EncodedBuffer>
+        + TransporterClientSide<Depacketized = State::ClientInput>
+        + NetworkMetricsRecorder
+        + 'static,
     <NetworkContainer<State> as TransporterHostSide>::Packetized: 'static,
     <NetworkContainer<State> as TransporterClientSide>::Received: 'static,
     <NetworkContainer<State> as TransporterClientSide>::Depacketized:
         crate::app::container::client_stream_pipeline::outbound_port::VideoDecodeUnit,
 {
-    let mut network = NetworkContainer::new(transporter_constructor()?);
+    let encoded_receiver = network.take_encoded_unit_receiver();
+    let client_stream_control_receiver = network.take_client_stream_control_receiver();
+    let network_request_receiver = network.take_network_request_receiver();
+    let app_message_sender = network.app_message_sender();
     let host = TransporterHostSide::take_host(&mut network)?;
+    let request_receiver = TransporterHostSide::take_request_receiver(&mut network)?;
     let receiver = TransporterClientSide::take_receiver(&mut network)?;
+    let request_sender = TransporterClientSide::take_request_sender(&mut network)?;
     let (received_sender, received_receiver) = flume::bounded(1);
     let (event_shutdown_sender, event_shutdown_receiver) = flume::bounded(1);
     let (host_shutdown_sender, host_shutdown_receiver) = flume::bounded(1);
     let (receive_shutdown_sender, receive_shutdown_receiver) = flume::bounded(1);
+    let (request_send_shutdown_sender, request_send_shutdown_receiver) = flume::bounded(1);
+    let (request_receive_shutdown_sender, request_receive_shutdown_receiver) = flume::bounded(1);
 
     network.register_network_queue_usage(encoded_receiver.usage());
     let _metrics_guard = NetworkQueueMetricsGuard;
@@ -192,6 +157,22 @@ where
         )
         .await
     }));
+    tasks.push(compio::runtime::spawn(async move {
+        run_request_send_loop::<NetworkContainer<State>>(
+            request_sender,
+            network_request_receiver,
+            request_send_shutdown_receiver,
+        )
+        .await
+    }));
+    tasks.push(compio::runtime::spawn(async move {
+        run_request_receive_loop::<NetworkContainer<State>>(
+            request_receiver,
+            app_message_sender,
+            request_receive_shutdown_receiver,
+        )
+        .await
+    }));
 
     let mut first_error = None;
     let mut shutdown_started = false;
@@ -210,6 +191,8 @@ where
                     let _ = event_shutdown_sender.try_send(());
                     let _ = host_shutdown_sender.try_send(());
                     let _ = receive_shutdown_sender.try_send(());
+                    let _ = request_send_shutdown_sender.try_send(());
+                    let _ = request_receive_shutdown_sender.try_send(());
                     None
                 },
             }
@@ -227,6 +210,8 @@ where
                 let _ = event_shutdown_sender.try_send(());
                 let _ = host_shutdown_sender.try_send(());
                 let _ = receive_shutdown_sender.try_send(());
+                let _ = request_send_shutdown_sender.try_send(());
+                let _ = request_receive_shutdown_sender.try_send(());
                 shutdown_started = true;
                 continue;
             }
@@ -241,12 +226,70 @@ where
         let _ = event_shutdown_sender.try_send(());
         let _ = host_shutdown_sender.try_send(());
         let _ = receive_shutdown_sender.try_send(());
+        let _ = request_send_shutdown_sender.try_send(());
+        let _ = request_receive_shutdown_sender.try_send(());
     }
 
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+async fn run_request_send_loop<Network>(
+    mut sender: Network::RequestSender,
+    request_receiver: NetworkRequestReceiver,
+    shutdown_receiver: flume::Receiver<()>,
+) -> eros::Result<()>
+where
+    Network: TransporterClientSide,
+{
+    loop {
+        let request = {
+            let request = request_receiver.receive().fuse();
+            let shutdown = shutdown_receiver.recv_async().fuse();
+            futures_util::pin_mut!(request, shutdown);
+            futures_util::select_biased! {
+                _ = shutdown => return Ok(()),
+                request = request => request,
+            }
+        };
+        let Some(request) = request else {
+            let _ = shutdown_receiver.recv_async().await;
+            return Ok(());
+        };
+
+        Network::send_request(&mut sender, request).await?;
+    }
+}
+
+async fn run_request_receive_loop<Network>(
+    mut receiver: Network::RequestReceiver,
+    app_message_sender: flume::Sender<AppMessage>,
+    shutdown_receiver: flume::Receiver<()>,
+) -> eros::Result<()>
+where
+    Network: TransporterHostSide,
+{
+    loop {
+        let request = Network::receive_request(&mut receiver).fuse();
+        let shutdown = shutdown_receiver.recv_async().fuse();
+        futures_util::pin_mut!(request, shutdown);
+
+        let Some(request) = (futures_util::select_biased! {
+            _ = shutdown => break,
+            request = request => request?,
+        }) else {
+            break;
+        };
+
+        app_message_sender
+            .send_async(AppMessage::Network(NetworkMessage::Request(request)))
+            .await
+            .map_err(|_| eros::error!("App stopped before handling remote network request"))?;
+    }
+
+    Ok(())
 }
 
 async fn run_network_event_loop<Network>(
@@ -374,45 +417,38 @@ async fn run_host_loop<Network>(
 where
     Network: TransporterHostSide,
 {
-    let shutdown = shutdown_receiver.recv_async().fuse();
-    futures_util::pin_mut!(shutdown);
-
     loop {
-        let process_one = async {
-            let Some(item) = encoded_receiver.receive().await else {
-                return eros::Result::Ok(false);
-            };
-
-            let frame_id = item.unit.source_frame_id;
-            let packetize_started_at = Instant::now();
-            let packetized = Network::packetize(&mut host, item.stream_id, item.unit)?;
-            metrics.record_packetized_frame(
-                frame_id.capture_source_id(),
-                item.stream_id,
-                frame_id,
-                packetize_started_at.elapsed(),
-            );
-
-            let SentBytes {
-                capture_source_id,
-                stream_id,
-                bytes,
-            } = Network::send(&mut host, packetized).await?;
-            metrics.record_sent_bytes(capture_source_id, stream_id, bytes);
-            eros::Result::Ok(true)
-        }
-        .fuse();
-        futures_util::pin_mut!(process_one);
-
-        let keep_running = futures_util::select_biased! {
-            _ = shutdown => break,
-            result = process_one => result?,
+        let item = {
+            let receive = encoded_receiver.receive().fuse();
+            let shutdown = shutdown_receiver.recv_async().fuse();
+            futures_util::pin_mut!(receive, shutdown);
+            futures_util::select_biased! {
+                _ = shutdown => return Ok(()),
+                item = receive => item,
+            }
         };
-        if !keep_running {
-            break;
-        }
+        let Some(item) = item else {
+            let _ = shutdown_receiver.recv_async().await;
+            return Ok(());
+        };
+
+        let frame_id = item.unit.source_frame_id;
+        let packetize_started_at = Instant::now();
+        let packetized = Network::packetize(&mut host, item.stream_id, item.unit)?;
+        metrics.record_packetized_frame(
+            frame_id.capture_source_id(),
+            item.stream_id,
+            frame_id,
+            packetize_started_at.elapsed(),
+        );
+
+        let SentBytes {
+            capture_source_id,
+            stream_id,
+            bytes,
+        } = Network::send(&mut host, packetized).await?;
+        metrics.record_sent_bytes(capture_source_id, stream_id, bytes);
     }
-    Ok(())
 }
 
 async fn run_receive_loop<Network>(
@@ -460,12 +496,7 @@ fn join_network_worker(worker_thread: JoinHandle<eros::Result<()>>) -> eros::Res
 #[cfg(test)]
 mod tests {
     use std::{
-        marker::PhantomData,
-        rc::Rc,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::{Arc, Mutex},
         thread,
         time::Duration,
     };
@@ -475,6 +506,7 @@ mod tests {
         app::container::{
             client_stream_pipeline::outbound_port::VideoDecodeUnit,
             host_stream_pipeline::outbound_port::{EncodedVideoUnit, UnitNumber},
+            network::inbound::{ClientStreamControlSender, EncodedUnitSender},
         },
         domain::stream::models::vo::{CaptureSourceId, FrameId, StreamId},
     };
@@ -485,15 +517,19 @@ mod tests {
         }
     }
 
-    struct NonSendTransporterState {
-        _not_send: PhantomData<Rc<()>>,
-        caller_thread_id: thread::ThreadId,
-        dropped_on_network_thread: Arc<AtomicBool>,
-    }
-
     struct CancellationTransporterState {
         host: Option<CancellationHost>,
         receiver: Option<CancellationReceiver>,
+    }
+
+    impl NetworkState for CancellationTransporterState {
+        type Config = Self;
+        type EncodedBuffer = u64;
+        type ClientInput = ();
+
+        fn new(config: Self::Config) -> eros::Result<Self> {
+            Ok(config)
+        }
     }
 
     struct CancellationHost {
@@ -508,14 +544,8 @@ mod tests {
         Fail,
     }
 
-    impl Drop for NonSendTransporterState {
-        fn drop(&mut self) {
-            self.dropped_on_network_thread.store(
-                thread::current().id() != self.caller_thread_id,
-                Ordering::Relaxed,
-            );
-        }
-    }
+    struct CancellationRequestSender;
+    struct CancellationRequestReceiver;
 
     impl TransporterHostSide
         for crate::app::container::network::NetworkContainer<CancellationTransporterState>
@@ -523,6 +553,7 @@ mod tests {
         type EncodedBuffer = u64;
         type Packetized = u64;
         type Host = CancellationHost;
+        type RequestReceiver = CancellationRequestReceiver;
 
         fn take_host(&mut self) -> eros::Result<Self::Host> {
             Ok(self
@@ -530,6 +561,10 @@ mod tests {
                 .host
                 .take()
                 .with_context(|| "Cancellation test host half has already been taken")?)
+        }
+
+        fn take_request_receiver(&mut self) -> eros::Result<Self::RequestReceiver> {
+            Ok(CancellationRequestReceiver)
         }
 
         fn packetize(
@@ -564,12 +599,19 @@ mod tests {
                 std::mem::size_of::<u64>(),
             ))
         }
+
+        async fn receive_request(
+            _receiver: &mut Self::RequestReceiver,
+        ) -> eros::Result<Option<crate::domain::stream::models::StreamRequest>> {
+            futures_util::future::pending().await
+        }
     }
 
     impl TransporterClientSide
         for crate::app::container::network::NetworkContainer<CancellationTransporterState>
     {
         type Receiver = CancellationReceiver;
+        type RequestSender = CancellationRequestSender;
         type Received = ();
         type Depacketized = ();
 
@@ -581,6 +623,10 @@ mod tests {
                 .with_context(|| "Cancellation test receiver has already been taken")?)
         }
 
+        fn take_request_sender(&mut self) -> eros::Result<Self::RequestSender> {
+            Ok(CancellationRequestSender)
+        }
+
         async fn receive(receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
             match receiver {
                 CancellationReceiver::Pending(_sender, receiver) => {
@@ -590,6 +636,13 @@ mod tests {
                     eros::bail!("Intentional receive failure")
                 }
             }
+        }
+
+        async fn send_request(
+            _sender: &mut Self::RequestSender,
+            _request: crate::domain::stream::models::StreamRequest,
+        ) -> eros::Result<()> {
+            Ok(())
         }
 
         fn depacketize(
@@ -618,7 +671,39 @@ mod tests {
         CancellationReceiver::Pending(sender, receiver)
     }
 
-    fn shutdown_with_timeout(worker: NetworkWorkerHandle<u64, ()>) -> eros::Result<()> {
+    fn spawn_cancellation_worker(
+        state: CancellationTransporterState,
+    ) -> eros::Result<(
+        NetworkWorkerHandle,
+        EncodedUnitSender<u64>,
+        ClientStreamControlSender<()>,
+        crate::app::container::network::inbound::NetworkRequestSender,
+    )> {
+        let (encoded_unit_sender, encoded_unit_receiver) = EncodedUnitSender::channel();
+        let (client_stream_control_sender, client_stream_control_receiver) =
+            ClientStreamControlSender::channel();
+        let (network_request_sender, network_request_receiver) =
+            crate::app::container::network::inbound::NetworkRequestSender::channel();
+        let (app_message_sender, _app_message_receiver) = flume::unbounded();
+        let worker = NetworkWorker::spawn(ConfiguredNetworkContainer::<
+            CancellationTransporterState,
+        >::new(
+            state,
+            encoded_unit_receiver,
+            client_stream_control_receiver,
+            network_request_receiver,
+            app_message_sender,
+        ))?;
+
+        Ok((
+            worker,
+            encoded_unit_sender,
+            client_stream_control_sender,
+            network_request_sender,
+        ))
+    }
+
+    fn shutdown_with_timeout(worker: NetworkWorkerHandle) -> eros::Result<()> {
         let (result_sender, result_receiver) = mpsc::sync_channel(1);
         let shutdown_thread = thread::spawn(move || {
             let result = match compio::runtime::Runtime::new() {
@@ -636,93 +721,6 @@ mod tests {
         result
     }
 
-    impl TransporterHostSide
-        for crate::app::container::network::NetworkContainer<NonSendTransporterState>
-    {
-        type EncodedBuffer = ();
-        type Packetized = ();
-        type Host = ();
-
-        fn take_host(&mut self) -> eros::Result<Self::Host> {
-            Ok(())
-        }
-
-        fn packetize(
-            _host: &mut Self::Host,
-            _stream_id: StreamId,
-            _unit: EncodedVideoUnit<Self::EncodedBuffer>,
-        ) -> eros::Result<Self::Packetized> {
-            Ok(())
-        }
-
-        async fn send(
-            _host: &mut Self::Host,
-            _packetized: Self::Packetized,
-        ) -> eros::Result<SentBytes> {
-            Ok(SentBytes::new(CaptureSourceId::new(0), StreamId::new(0), 0))
-        }
-    }
-
-    impl TransporterClientSide
-        for crate::app::container::network::NetworkContainer<NonSendTransporterState>
-    {
-        type Receiver = (flume::Sender<()>, flume::Receiver<()>);
-        type Received = ();
-        type Depacketized = ();
-
-        fn take_receiver(&mut self) -> eros::Result<Self::Receiver> {
-            Ok(flume::unbounded())
-        }
-
-        async fn receive(receiver: &mut Self::Receiver) -> eros::Result<Option<Self::Received>> {
-            Ok(receiver.1.recv_async().await.ok())
-        }
-
-        fn depacketize(
-            &mut self,
-            _received: Self::Received,
-        ) -> eros::Result<(StreamId, Self::Depacketized)> {
-            Ok((StreamId::new(0), ()))
-        }
-
-        fn request_video_refresh(&mut self, _stream_id: StreamId) -> eros::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn constructs_and_drops_non_send_transporter_on_the_network_thread() {
-        let caller_thread_id = thread::current().id();
-        let constructed_on_network_thread = Arc::new(AtomicBool::new(false));
-        let constructed_flag = Arc::clone(&constructed_on_network_thread);
-        let dropped_on_network_thread = Arc::new(AtomicBool::new(false));
-        let dropped_flag = Arc::clone(&dropped_on_network_thread);
-        let (app_message_sender, _app_message_receiver) = flume::unbounded();
-
-        let worker = NetworkWorker::spawn(
-            move || {
-                constructed_flag.store(
-                    thread::current().id() != caller_thread_id,
-                    Ordering::Relaxed,
-                );
-                Ok(NonSendTransporterState {
-                    _not_send: PhantomData,
-                    caller_thread_id,
-                    dropped_on_network_thread: dropped_flag,
-                })
-            },
-            app_message_sender,
-        )
-        .expect("network worker should start");
-
-        let runtime = compio::runtime::Runtime::new().expect("test runtime should start");
-        runtime
-            .block_on(worker.shutdown())
-            .expect("network worker should stop");
-        assert!(constructed_on_network_thread.load(Ordering::Relaxed));
-        assert!(dropped_on_network_thread.load(Ordering::Relaxed));
-    }
-
     #[test]
     fn shutdown_cancels_a_blocked_in_flight_send() -> eros::Result<()> {
         let (gate_sender, gate_receiver) = flume::unbounded();
@@ -730,22 +728,16 @@ mod tests {
         let (send_started_sender, send_started_receiver) = flume::unbounded();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sent_from_network = Arc::clone(&sent);
-        let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let worker = NetworkWorker::spawn(
-            move || {
-                Ok(CancellationTransporterState {
-                    host: Some(CancellationHost {
-                        packetized_sender,
-                        gate_receiver,
-                        send_started_sender,
-                        sent: sent_from_network,
-                    }),
-                    receiver: Some(pending_cancellation_receiver()),
-                })
-            },
-            app_message_sender,
-        )?;
-        let encoded_sender = worker.sender();
+        let (worker, encoded_sender, _client_stream_control_sender, _network_request_sender) =
+            spawn_cancellation_worker(CancellationTransporterState {
+                host: Some(CancellationHost {
+                    packetized_sender,
+                    gate_receiver,
+                    send_started_sender,
+                    sent: sent_from_network,
+                }),
+                receiver: Some(pending_cancellation_receiver()),
+            })?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);
@@ -772,22 +764,16 @@ mod tests {
         let (send_started_sender, send_started_receiver) = flume::unbounded();
         let sent = Arc::new(Mutex::new(Vec::new()));
         let sent_from_network = Arc::clone(&sent);
-        let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let worker = NetworkWorker::spawn(
-            move || {
-                Ok(CancellationTransporterState {
-                    host: Some(CancellationHost {
-                        packetized_sender,
-                        gate_receiver,
-                        send_started_sender,
-                        sent: sent_from_network,
-                    }),
-                    receiver: Some(pending_cancellation_receiver()),
-                })
-            },
-            app_message_sender,
-        )?;
-        let encoded_sender = worker.sender();
+        let (worker, encoded_sender, _client_stream_control_sender, _network_request_sender) =
+            spawn_cancellation_worker(CancellationTransporterState {
+                host: Some(CancellationHost {
+                    packetized_sender,
+                    gate_receiver,
+                    send_started_sender,
+                    sent: sent_from_network,
+                }),
+                receiver: Some(pending_cancellation_receiver()),
+            })?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(
@@ -822,22 +808,16 @@ mod tests {
         let (packetized_sender, packetized_receiver) = flume::unbounded();
         let (send_started_sender, send_started_receiver) = flume::unbounded();
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let worker = NetworkWorker::spawn(
-            move || {
-                Ok(CancellationTransporterState {
-                    host: Some(CancellationHost {
-                        packetized_sender,
-                        gate_receiver,
-                        send_started_sender,
-                        sent,
-                    }),
-                    receiver: Some(pending_cancellation_receiver()),
-                })
-            },
-            app_message_sender,
-        )?;
-        let encoded_sender = worker.sender();
+        let (worker, encoded_sender, _client_stream_control_sender, _network_request_sender) =
+            spawn_cancellation_worker(CancellationTransporterState {
+                host: Some(CancellationHost {
+                    packetized_sender,
+                    gate_receiver,
+                    send_started_sender,
+                    sent,
+                }),
+                receiver: Some(pending_cancellation_receiver()),
+            })?;
         encoded_sender.send(StreamId::new(0), encoded_unit(1))?;
 
         assert_eq!(packetized_receiver.recv_timeout(Duration::from_secs(1))?, 1);
@@ -861,37 +841,19 @@ mod tests {
         let (_gate_sender, gate_receiver) = flume::unbounded();
         let (packetized_sender, _packetized_receiver) = flume::unbounded();
         let (send_started_sender, _send_started_receiver) = flume::unbounded();
-        let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let worker = NetworkWorker::spawn(
-            move || {
-                Ok(CancellationTransporterState {
-                    host: Some(CancellationHost {
-                        packetized_sender,
-                        gate_receiver,
-                        send_started_sender,
-                        sent: Arc::new(Mutex::new(Vec::new())),
-                    }),
-                    receiver: Some(CancellationReceiver::Fail),
-                })
-            },
-            app_message_sender,
-        )?;
+        let (worker, _encoded_sender, _client_stream_control_sender, _network_request_sender) =
+            spawn_cancellation_worker(CancellationTransporterState {
+                host: Some(CancellationHost {
+                    packetized_sender,
+                    gate_receiver,
+                    send_started_sender,
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                }),
+                receiver: Some(CancellationReceiver::Fail),
+            })?;
 
         let error = shutdown_with_timeout(worker).expect_err("receive should fail");
         assert!(format!("{error:?}").contains("Intentional receive failure"));
         Ok(())
-    }
-
-    #[test]
-    fn constructor_failure_is_reported_without_leaving_a_worker_thread() {
-        let (app_message_sender, _app_message_receiver) = flume::unbounded();
-        let result = NetworkWorker::spawn(
-            || -> eros::Result<NonSendTransporterState> {
-                eros::bail!("Intentional constructor failure")
-            },
-            app_message_sender,
-        );
-
-        assert!(result.is_err());
     }
 }

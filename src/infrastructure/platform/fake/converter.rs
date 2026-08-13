@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::{
     app::container::{
-        host::outbound_port::MetricsRecorder,
+        host::outbound_port::{EncoderFrameConverterState, MetricsRecorder},
         host_stream_pipeline::outbound_port::EncoderFrameConverter,
     },
     domain::stream::models::vo::FrameId,
@@ -21,6 +21,12 @@ pub(crate) struct FakeEncoderInput {
 impl FakeEncoderFrameConverterState {
     pub(crate) fn new() -> Self {
         Self
+    }
+}
+
+impl EncoderFrameConverterState for FakeEncoderFrameConverterState {
+    fn new() -> eros::Result<Self> {
+        Ok(Self::new())
     }
 }
 
